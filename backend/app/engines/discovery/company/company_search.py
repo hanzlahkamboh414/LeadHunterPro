@@ -1,14 +1,20 @@
 """Public-source search for construction estimating companies.
 
-Searches multiple providers (Google, Bing, DuckDuckGo) for company data.
-Each provider implements the ``CompanySearchProvider`` interface.
+Searches via:
+1. SerpAPI (recommended — structured JSON, no CAPTCHA)
+2. Bing SERP (free HTML fallback)
+3. Google SERP (free HTML fallback)
+4. DuckDuckGo HTML (free HTML fallback)
+
 All providers may return CAPTCHA pages from certain environments;
 in that case the pipeline returns an empty list with a clear error log.
+No fabricated or seed data is ever returned.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import re
 from abc import ABC, abstractmethod
 from urllib.parse import quote
@@ -56,6 +62,58 @@ class CompanySearchProvider(ABC):
 # ---------------------------------------------------------------------------
 # Provider implementations
 # ---------------------------------------------------------------------------
+
+
+class SerpAPISearchProvider(CompanySearchProvider):
+    """SerpAPI Google/Bing search provider.
+
+    Returns structured JSON results with no CAPTCHA issues.
+    Requires ``SERPAPI_API_KEY`` environment variable.
+    """
+
+    BASE_URL = "https://serpapi.com/search"
+    _HEADERS = {"User-Agent": "LeadHunterPro/1.0"}
+
+    def search(self, query: str, page: int, limit: int) -> tuple[list[dict], bool]:
+        api_key = os.environ.get("SERPAPI_API_KEY")
+        if not api_key:
+            logger.info("SerpAPI: no SERPAPI_API_KEY configured — skipping")
+            return [], False
+        params = {
+            "q": query,
+            "engine": "google",
+            "num": min(limit, 20),
+            "start": ((page - 1) * 20) + 1,
+            "api_key": api_key,
+            "gl": "us",
+            "hl": "en",
+        }
+        try:
+            resp = requests.get(
+                self.BASE_URL, headers=self._HEADERS, params=params, timeout=20
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as exc:
+            logger.warning("SerpAPI request failed: %s", exc)
+            return [], False
+
+        organic: list[dict] = []
+        for item in data.get("organic_results", []):
+            title = item.get("title", "").strip()
+            url = item.get("link", "").strip()
+            snippet = item.get("snippet", "").strip()
+            if title and url:
+                organic.append({"title": title, "url": url, "snippet": snippet})
+
+        # Try to paginate
+        next_page = data.get("next_page_token")
+        return organic, next_page is not None
+
+    @staticmethod
+    def _is_captcha(html: str) -> bool:
+        """SerpAPI never serves HTML CAPTCHAs directly — always return False."""
+        return False
 
 
 class DuckDuckGoSearchProvider(CompanySearchProvider):
@@ -236,9 +294,10 @@ def search_companies(
     logger.info("Searching for: %r", base_query)
 
     providers: list[CompanySearchProvider] = [
-        DuckDuckGoSearchProvider(),
-        GoogleSearchProvider(),
+        SerpAPISearchProvider(),
         BingSearchProvider(),
+        GoogleSearchProvider(),
+        DuckDuckGoSearchProvider(),
     ]
 
     for provider in providers:

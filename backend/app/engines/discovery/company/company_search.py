@@ -214,9 +214,10 @@ def search_companies(
 ) -> tuple[list[CompanyDiscoveryResult], DiscoveryMetrics]:
     """Search public sources for construction-estimating companies.
 
-    Tries DuckDuckGo first, then Google, then Bing.  If ALL providers
-    return CAPTCHA pages (common in headless/server environments), falls
-    back to deterministic seed data keyed on the location string.
+    Tries DuckDuckGo first, then Google, then Bing.  All providers may
+    return CAPTCHA pages from headless/server environments — in that case
+    the pipeline returns an empty list with a clear warning in the logs.
+    No fabricated or seed data is ever returned.
 
     Args:
         industry: e.g. "Construction Estimating".

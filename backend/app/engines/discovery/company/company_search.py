@@ -1,8 +1,9 @@
 """Public-source search for construction estimating companies.
 
-Searches multiple providers (DuckDuckGo, Google, Bing) with CAPTCHA
-detection and graceful fallback to deterministic seed data when live
-search is blocked by anti-bot measures.
+Searches multiple providers (Google, Bing, DuckDuckGo) for company data.
+Each provider implements the ``CompanySearchProvider`` interface.
+All providers may return CAPTCHA pages from certain environments;
+in that case the pipeline returns an empty list with a clear error log.
 """
 
 from __future__ import annotations
@@ -281,11 +282,7 @@ def search_companies(
         if not name:
             continue
         source = item["source"]
-        reason = (
-            "Found via SERP search result"
-            if source != "seed"
-            else f"Location-keyed seed result for {item.get('location', location)}"
-        )
+        reason = f"Found via {source} SERP search result"
         discoveries.append(CompanyDiscoveryResult(
             company_name=name,
             website=item["url"],

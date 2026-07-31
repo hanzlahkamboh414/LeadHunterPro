@@ -1,9 +1,10 @@
-"""Company Discovery Engine — main orchestrator.
+"""Company discovery engine – main orchestrator.
 
-Searches public sources (Google, Bing), validates websites, cleans
-duplicates, and returns structured lead candidates.
+Pipeline:
+    search → validate → clean → return
 
-This engine does NOT use AI. It is purely rules-based.
+Returns a structured diagnostic when no providers can produce results,
+never silently returning an empty list.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from app.engines.discovery.company.company_models import (
     CompanyDiscoveryResult,
     DiscoveryMetrics,
 )
-from app.engines.discovery.company.company_search import search_companies
+from app.engines.discovery.company.company_search import DiscoveryDiagnostic, search_companies
 from app.engines.discovery.company.company_validator import validate_companies
 
 logger = logging.getLogger(__name__)
@@ -26,13 +27,13 @@ class CompanyDiscoveryEngine:
 
     Flow::
 
-        search_companies()
+        search_companies()          → list[CompanyDiscoveryResult] | diagnostic
             ↓
-        validate_companies()
+        validate_companies()        → filtered list
             ↓
-        clean_companies()
+        clean_companies()           → deduplicated list
             ↓
-        return list[CompanyDiscoveryResult]
+        return (results, metrics, diagnostic)
     """
 
     def discover(
@@ -42,17 +43,18 @@ class CompanyDiscoveryEngine:
         *,
         limit: int = 100,
         max_pages: int = 3,
-    ) -> tuple[list[CompanyDiscoveryResult], DiscoveryMetrics]:
+    ) -> tuple[list[CompanyDiscoveryResult], DiscoveryMetrics, DiscoveryDiagnostic | None]:
         """Run the full discovery pipeline.
 
         Args:
             industry: e.g. ``"Construction Estimating"``.
             location: e.g. ``"Dallas Texas USA"``.
             limit: Maximum number of companies to return.
-            max_pages: Search-result pages to scan per source.
+            max_pages: Search-result pages to scan per provider.
 
         Returns:
-            Tuple of (discovered companies, run metrics).
+            Tuple of (companies, metrics, diagnostic).
+            diagnostic is non-None when no providers could supply results.
         """
         logger.info(
             "Discovery started: industry=%r, location=%r, limit=%d",
@@ -61,18 +63,25 @@ class CompanyDiscoveryEngine:
             limit,
         )
 
+        t_start = logging.DEBUG  # placeholder; timing handled inside search_companies
+
         # Step 1 — Search public sources.
-        raw_results, search_metrics = search_companies(
+        raw_results, search_metrics, diagnostic = search_companies(
             industry=industry,
             location=location,
             limit=limit,
             max_pages=max_pages,
         )
-        logger.info("Sources queried: %d companies found", search_metrics.total_found)
+        logger.info("Search complete: %d raw results", search_metrics.total_found)
+
+        # If the search stage already produced a diagnostic, propagate it.
+        if diagnostic is not None:
+            logger.warning("Search returned diagnostic — short-circuiting validation/clean")
+            return [], search_metrics, diagnostic
 
         if not raw_results:
             logger.info("No raw results from search; returning empty")
-            return [], search_metrics
+            return [], search_metrics, None
 
         # Step 2 — Validate websites and names.
         validated, validate_metrics = validate_companies(raw_results)
@@ -80,7 +89,7 @@ class CompanyDiscoveryEngine:
 
         if not validated:
             logger.info("No companies passed validation")
-            return [], validate_metrics
+            return [], validate_metrics, None
 
         # Step 3 — Clean duplicates.
         cleaned, clean_metrics = clean_companies(validated)
@@ -91,9 +100,11 @@ class CompanyDiscoveryEngine:
             total_found=search_metrics.total_found,
             total_validated=validate_metrics.total_validated,
             total_cleaned=clean_metrics.total_cleaned,
-            errors=search_metrics.errors
-            + validate_metrics.errors
-            + clean_metrics.errors,
+            errors=(
+                search_metrics.errors
+                + validate_metrics.errors
+                + clean_metrics.errors
+            ),
         )
 
         logger.info(
@@ -101,4 +112,4 @@ class CompanyDiscoveryEngine:
             final_metrics.total_cleaned,
             len(final_metrics.errors),
         )
-        return cleaned, final_metrics
+        return cleaned, final_metrics, None

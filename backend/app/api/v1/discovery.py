@@ -1,7 +1,7 @@
 """Company discovery API routes."""
 
 import logging
-from typing import List
+from typing import Any, List, Union
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
@@ -19,12 +19,19 @@ engine = CompanyDiscoveryEngine()
 
 @router.get(
     "/companies",
-    response_model=List[CompanyDiscoveryResult],
     summary="Discover construction companies",
     description=(
         "Search public sources for companies matching the given industry "
         "and location. Returns validated, deduplicated results."
+        "If no providers are available or all return CAPTCHA-blocked pages, "
+        "a structured diagnostic is returned explaining the failure."
     ),
+    responses={
+        200: {
+            "description": "Successful discovery — either a list of companies or a diagnostic object.",
+            "model": Any,
+        },
+    },
 )
 def discover_companies(
     industry: str = Query(
@@ -41,7 +48,12 @@ def discover_companies(
     ),
     limit: int = Query(100, ge=1, le=500, description="Maximum number of results"),
     db: Session = Depends(get_db),
-) -> List[CompanyDiscoveryResult]:
+) -> Any:
     """Discover companies from public web sources."""
-    results, _ = engine.discover(industry=industry, location=location, limit=limit)
+    results, metrics, diagnostic = engine.discover(
+        industry=industry, location=location, limit=limit
+    )
+    if diagnostic is not None:
+        # Return structured diagnostic instead of empty list
+        return diagnostic.to_dict()
     return results

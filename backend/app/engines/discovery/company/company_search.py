@@ -1,15 +1,18 @@
 """Public-source search for construction estimating companies.
 
-Provider priority chain (each checked in order until results are found):
-    1. Serper (if SERPER_API_KEY is set)        — Google SERP JSON API
-    2. SerpAPI  (if SERPAPI_API_KEY is set)     — Google/Bing SERP JSON API
-    3. Google CSE (if GOOGLE_CSE_API_KEY+ID set) — Google Custom Search
-    4. Bing          (free HTML fallback)
-    5. DuckDuckGo    (free HTML fallback)
+Provider chain (checked in priority order):
+    1. Serper      (if SERPER_API_KEY is set)
+    2. SerpAPI     (if SERPAPI_API_KEY is set)
+    3. Google CSE  (if GOOGLE_CSE_API_KEY+ID are set)
+    4. Bing        (free HTML fallback)
+    5. DuckDuckGo  (free HTML fallback)
 
+Each provider implements the ``CompanySearchProvider`` interface and
+reports its own availability via ``available()`` and ``priority()``.
+
+If ALL providers fail, the pipeline returns a structured diagnostic
+dict instead of an empty list — never silently returning [].
 No fabricated or seed data is ever returned.
-If all providers fail, a clear diagnostic error is logged explaining
-which providers were attempted and why each failed.
 """
 
 from __future__ import annotations
@@ -17,7 +20,9 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from abc import ABC, abstractmethod
+from typing import Any
 from urllib.parse import quote
 
 import requests
@@ -32,21 +37,35 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Abstract provider interface
+# Provider interface
 # ---------------------------------------------------------------------------
 
 
 class CompanySearchProvider(ABC):
-    """Abstract base class for all search providers."""
+    """Abstract base class for company search providers."""
 
-    name: str = "base"
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        """Human-readable provider name (e.g. 'serper', 'bing')."""
+        ...
+
+    @property
+    @abstractmethod
+    def priority(self) -> int:
+        """Lower number = higher priority. Checked first."""
+        ...
+
+    def available(self) -> bool:
+        """Return True if this provider has the credentials/config it needs."""
+        return True
 
     @abstractmethod
     def search(self, query: str, page: int, limit: int) -> tuple[list[dict], bool]:
         """Execute one page of search results.
 
         Args:
-            query: URL-encoded search query string.
+            query: Raw search query string.
             page: Page number (1-based).
             limit: Max results per page.
 
@@ -54,10 +73,6 @@ class CompanySearchProvider(ABC):
             (list of {title, url, snippet} dicts, has_more_pages bool)
         """
         ...
-
-    def is_available(self) -> bool:
-        """Return True if required environment variables / credentials exist."""
-        return True
 
     @staticmethod
     def _is_captcha(html: str) -> bool:
@@ -72,22 +87,18 @@ class CompanySearchProvider(ABC):
 
 
 class SerperSearchProvider(CompanySearchProvider):
-    """Serper.dev Google SERP JSON API.
-
-    Requires ``SERPER_API_KEY`` environment variable.
-    Returns structured JSON — no CAPTCHA issues.
-    """
+    """Serper.dev Google SERP JSON API."""
 
     name = "serper"
+    priority = 1
     BASE_URL = "https://google.serper.dev/search"
     _HEADERS = {
         "X-API-KEY": "",
         "Content-Type": "application/json",
     }
 
-    def is_available(self) -> bool:
-        key = os.environ.get("SERPER_API_KEY")
-        return bool(key)
+    def available(self) -> bool:
+        return bool(os.environ.get("SERPER_API_KEY"))
 
     def search(self, query: str, page: int, limit: int) -> tuple[list[dict], bool]:
         api_key = os.environ.get("SERPER_API_KEY", "")
@@ -101,16 +112,11 @@ class SerperSearchProvider(CompanySearchProvider):
             "page": page,
         }
         try:
-            resp = requests.post(
-                self.BASE_URL,
-                headers=self._HEADERS,
-                json=payload,
-                timeout=20,
-            )
+            resp = requests.post(self.BASE_URL, headers=self._HEADERS, json=payload, timeout=20)
             resp.raise_for_status()
             data = resp.json()
         except Exception as exc:
-            logger.warning("Serper request failed: %s", exc)
+            logger.warning("%s: request failed: %s", self.name, exc)
             return [], False
 
         results: list[dict] = []
@@ -121,7 +127,7 @@ class SerperSearchProvider(CompanySearchProvider):
             if title and url:
                 results.append({"title": title, "url": url, "snippet": snippet})
 
-        total = data.get("information", {}).get("total_results", 0)
+        total = int(data.get("information", {}).get("total_results", 0))
         return results, len(results) >= 10 and page * 10 < total
 
 
@@ -131,19 +137,15 @@ class SerperSearchProvider(CompanySearchProvider):
 
 
 class SerpAPISearchProvider(CompanySearchProvider):
-    """SerpAPI Google/Bing SERP JSON API.
-
-    Requires ``SERPAPI_API_KEY`` environment variable.
-    Returns structured JSON — no CAPTCHA issues.
-    """
+    """SerpAPI Google/Bing SERP JSON API."""
 
     name = "serpapi"
+    priority = 2
     BASE_URL = "https://serpapi.com/search"
     _HEADERS = {"User-Agent": "LeadHunterPro/1.0"}
 
-    def is_available(self) -> bool:
-        key = os.environ.get("SERPAPI_API_KEY")
-        return bool(key)
+    def available(self) -> bool:
+        return bool(os.environ.get("SERPAPI_API_KEY"))
 
     def search(self, query: str, page: int, limit: int) -> tuple[list[dict], bool]:
         api_key = os.environ.get("SERPAPI_API_KEY")
@@ -157,13 +159,11 @@ class SerpAPISearchProvider(CompanySearchProvider):
             "hl": "en",
         }
         try:
-            resp = requests.get(
-                self.BASE_URL, headers=self._HEADERS, params=params, timeout=20
-            )
+            resp = requests.get(self.BASE_URL, headers=self._HEADERS, params=params, timeout=20)
             resp.raise_for_status()
             data = resp.json()
         except Exception as exc:
-            logger.warning("SerpAPI request failed: %s", exc)
+            logger.warning("%s: request failed: %s", self.name, exc)
             return [], False
 
         organic: list[dict] = []
@@ -184,15 +184,13 @@ class SerpAPISearchProvider(CompanySearchProvider):
 
 
 class GoogleCSEProvider(CompanySearchProvider):
-    """Google Custom Search JSON API.
-
-    Requires ``GOOGLE_CSE_API_KEY`` and ``GOOGLE_CSE_ID`` environment variables.
-    """
+    """Google Custom Search JSON API."""
 
     name = "google_cse"
+    priority = 3
     BASE_URL = "https://www.googleapis.com/customsearch/v1"
 
-    def is_available(self) -> bool:
+    def available(self) -> bool:
         key = os.environ.get("GOOGLE_CSE_API_KEY")
         cx = os.environ.get("GOOGLE_CSE_ID")
         return bool(key and cx)
@@ -213,7 +211,7 @@ class GoogleCSEProvider(CompanySearchProvider):
             resp.raise_for_status()
             data = resp.json()
         except Exception as exc:
-            logger.warning("Google CSE request failed: %s", exc)
+            logger.warning("%s: request failed: %s", self.name, exc)
             return [], False
 
         results: list[dict] = []
@@ -234,12 +232,10 @@ class GoogleCSEProvider(CompanySearchProvider):
 
 
 class BingSearchProvider(CompanySearchProvider):
-    """Search Bing SERP via headless request (no API key needed).
-
-    Note: May be blocked by CAPTCHA from certain IPs/hosting environments.
-    """
+    """Search Bing SERP via headless request (no API key needed)."""
 
     name = "bing"
+    priority = 4
     _HEADERS = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -259,12 +255,12 @@ class BingSearchProvider(CompanySearchProvider):
             resp = requests.get(url, headers=self._HEADERS, timeout=15, allow_redirects=True)
             resp.raise_for_status()
         except requests.RequestException as exc:
-            logger.warning("Bing search failed: %s", exc)
+            logger.warning("%s: request failed: %s", self.name, exc)
             return [], False
 
         html = resp.text
         if self._is_captcha(html):
-            logger.info("Bing returned CAPTCHA — provider unavailable")
+            logger.info("%s: CAPTCHA detected — provider unavailable", self.name)
             return [], False
 
         soup = BeautifulSoup(html, "html.parser")
@@ -291,12 +287,10 @@ class BingSearchProvider(CompanySearchProvider):
 
 
 class DuckDuckGoSearchProvider(CompanySearchProvider):
-    """Search DuckDuckGo HTML endpoint (no API key needed).
-
-    Note: DDG also serves CAPTCHAs from certain IPs/hosting environments.
-    """
+    """Search DuckDuckGo HTML endpoint (no API key needed)."""
 
     name = "duckduckgo"
+    priority = 5
     _HEADERS = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -315,12 +309,12 @@ class DuckDuckGoSearchProvider(CompanySearchProvider):
             resp = requests.get(url, headers=self._HEADERS, timeout=15, allow_redirects=True)
             resp.raise_for_status()
         except requests.RequestException as exc:
-            logger.warning("DDG search failed: %s", exc)
+            logger.warning("%s: request failed: %s", self.name, exc)
             return [], False
 
         html = resp.text
         if self._is_captcha(html):
-            logger.info("DDG returned CAPTCHA — provider unavailable")
+            logger.info("%s: CAPTCHA detected — provider unavailable", self.name)
             return [], False
 
         soup = BeautifulSoup(html, "html.parser")
@@ -342,6 +336,46 @@ class DuckDuckGoSearchProvider(CompanySearchProvider):
 
 
 # ---------------------------------------------------------------------------
+# Diagnostic model
+# ---------------------------------------------------------------------------
+
+
+class DiscoveryDiagnostic:
+    """Structured explanation of why no companies were discovered."""
+
+    def __init__(
+        self,
+        providers_attempted: list[str],
+        providers_skipped: list[dict[str, str]],
+        errors: dict[str, str],
+    ) -> None:
+        self.providers_attempted = providers_attempted
+        self.providers_skipped = providers_skipped
+        self.errors = errors
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a plain dict suitable for inclusion in the API response."""
+        recommendation = "Configure at least one of: SERPER_API_KEY, SERPAPI_API_KEY, "
+        recommendation += "or GOOGLE_CSE_API_KEY+GOOGLE_CSE_ID for reliable results."
+        if self.providers_attempted:
+            recommendation += (
+                f" Free providers ({', '.join(self.providers_attempted)}) are blocked by CAPTCHA "
+                "in this environment."
+            )
+        return {
+            "status": "no_provider_available",
+            "reason": (
+                f"All {len(self.providers_attempted)} live providers were attempted but none "
+                f"returned results. Skipped {len(self.providers_skipped)} providers (not configured)."
+            ),
+            "providers_attempted": self.providers_attempted,
+            "providers_skipped": self.providers_skipped,
+            "errors": self.errors,
+            "recommendation": recommendation,
+        }
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -351,65 +385,75 @@ def search_companies(
     location: str,
     limit: int = 100,
     max_pages: int = 3,
-) -> tuple[list[CompanyDiscoveryResult], DiscoveryMetrics]:
+) -> tuple[list[CompanyDiscoveryResult], DiscoveryMetrics, DiscoveryDiagnostic | None]:
     """Search public sources for construction-estimating companies.
 
-    Provider chain (checked in priority order):
+    Provider chain (priority order, each checked only if available):
         1. Serper   — if SERPER_API_KEY is set
         2. SerpAPI  — if SERPAPI_API_KEY is set
         3. Google CSE — if GOOGLE_CSE_API_KEY + GOOGLE_CSE_ID are set
         4. Bing     — free HTML fallback
         5. DuckDuckGo — free HTML fallback
 
-    If ALL providers fail (e.g. CAPTCHA blocks), returns an empty list
-    with detailed diagnostic errors so the user knows exactly what was tried.
-
-    No fabricated or seed data is ever returned.
+    Never fabricates or seeds data. If all providers fail a structured
+    diagnostic is returned describing exactly what was attempted.
 
     Args:
         industry: e.g. "Construction Estimating".
         location: e.g. "Dallas Texas USA".
         limit: Maximum number of results to return.
-        max_pages: Search-result pages to scan per provider.
+        max_pages: Pages to scan per provider.
 
     Returns:
-        A tuple of (discoveries, metrics).
+        (discoveries, metrics, diagnostic)
+        diagnostic is None only when results were successfully found.
     """
     metrics = DiscoveryMetrics()
     all_raw: list[dict] = []
     location_clause = f"in {location}" if location.strip() else ""
     base_query = f"{industry} {location_clause}"
 
-    logger.info("Searching for: %r", base_query)
+    logger.info("Discovery search started: query=%r industry=%r location=%r limit=%d", base_query, industry, location, limit)
 
-    # Build provider list in priority order, skipping unavailable ones.
-    provider_classes: list[type[CompanySearchProvider]] = [
-        SerperSearchProvider,
-        SerpAPISearchProvider,
-        GoogleCSEProvider,
-        BingSearchProvider,
-        DuckDuckGoSearchProvider,
-    ]
+    # All known providers sorted by priority.
+    all_providers: list[CompanySearchProvider] = sorted(
+        [SerperSearchProvider(), SerpAPISearchProvider(), GoogleCSEProvider(), BingSearchProvider(), DuckDuckGoSearchProvider()],
+        key=lambda p: p.priority,
+    )
 
     providers_attempted: list[str] = []
-    providers_failed: list[str] = []
+    providers_skipped: list[dict[str, str]] = []
+    errors: dict[str, str] = {}
 
-    for cls in provider_classes:
-        instance = cls()
-        if not instance.is_available():
-            logger.info("%s: not configured — skipped", cls.name)
+    for provider in all_providers:
+        if not provider.available():
+            providers_skipped.append({
+                "provider": provider.name,
+                "reason": "not configured (missing required env var or credentials)",
+            })
+            logger.info("%s: skipped — not configured", provider.name)
             continue
 
-        source_name = cls.name
-        logger.info("Trying provider: %s", source_name)
-        providers_attempted.append(source_name)
+        logger.info("%s: available, attempting search", provider.name)
+        providers_attempted.append(provider.name)
         provider_results: list[dict] = []
 
         for page in range(1, max_pages + 1):
+            t0 = time.monotonic()
             try:
-                results, has_more = instance.search(base_query, page, limit)
+                results, has_more = provider.search(base_query, page, limit)
+                elapsed = time.monotonic() - t0
+                logger.info(
+                    "%s page %d: %d results in %.2fs",
+                    provider.name, page, len(results), elapsed,
+                )
             except Exception as exc:
-                logger.warning("%s page %d failed: %s", source_name, page, exc)
+                elapsed = time.monotonic() - t0
+                logger.warning(
+                    "%s page %d failed after %.2fs: %s",
+                    provider.name, page, elapsed, exc,
+                )
+                errors[provider.name] = f"page {page} error: {exc}"
                 continue
 
             for r in results:
@@ -420,32 +464,22 @@ def search_companies(
                     "title": r.get("title", ""),
                     "url": url,
                     "snippet": r.get("snippet", ""),
-                    "source": source_name,
+                    "source": provider.name,
                 })
             if not has_more:
                 break
 
         if provider_results:
-            logger.info("%s returned %d results", source_name, len(provider_results))
+            logger.info("%s: %d valid results collected", provider.name, len(provider_results))
             all_raw.extend(provider_results)
             if len(all_raw) >= limit:
                 break
         else:
-            logger.info("%s returned no results", source_name)
-            providers_failed.append(source_name)
+            logger.info("%s: no results returned", provider.name)
+            if provider.name not in errors:
+                errors[provider.name] = "returned no results"
 
-    if not all_raw and providers_attempted:
-        metrics.errors.append(
-            f"All {len(providers_attempted)} providers were attempted but none returned results. "
-            f"Failed providers: {', '.join(providers_failed)}. "
-            f"Available configured providers: {', '.join(providers_attempted)}. "
-            f"To get real results, configure at least one of: "
-            f"SERPER_API_KEY, SERPAPI_API_KEY, or GOOGLE_CSE_API_KEY+GOOGLE_CSE_ID."
-        )
-
-    metrics.total_found = len(all_raw)
-    logger.info("Total raw results: %d", metrics.total_found)
-
+    # Build final discoveries
     discoveries: list[CompanyDiscoveryResult] = []
     for item in all_raw:
         name = _extract_company_name(item["title"], item.get("snippet", ""))
@@ -464,7 +498,19 @@ def search_companies(
         if len(discoveries) >= limit:
             break
 
-    return discoveries, metrics
+    metrics.total_found = len(all_raw)
+    logger.info("Search complete: %d raw, %d final discoveries", metrics.total_found, len(discoveries))
+
+    diagnostic: DiscoveryDiagnostic | None = None
+    if not discoveries:
+        diagnostic = DiscoveryDiagnostic(
+            providers_attempted=providers_attempted,
+            providers_skipped=providers_skipped,
+            errors=errors,
+        )
+        logger.warning("No companies discovered — diagnostic: %s", diagnostic.to_dict()["reason"])
+
+    return discoveries, metrics, diagnostic
 
 
 def _extract_company_name(title: str, snippet: str) -> str:

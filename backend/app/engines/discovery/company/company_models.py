@@ -12,7 +12,9 @@ from typing import Literal
 
 
 SUPPORTED_SOURCES = Literal[
-    "google",
+    "serper",
+    "serpapi",
+    "google_cse",
     "bing",
     "duckduckgo",
     "directory",

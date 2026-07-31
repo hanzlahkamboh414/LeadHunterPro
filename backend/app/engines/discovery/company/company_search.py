@@ -1,14 +1,15 @@
 """Public-source search for construction estimating companies.
 
-Searches via:
-1. SerpAPI (recommended — structured JSON, no CAPTCHA)
-2. Bing SERP (free HTML fallback)
-3. Google SERP (free HTML fallback)
-4. DuckDuckGo HTML (free HTML fallback)
+Provider priority chain (each checked in order until results are found):
+    1. Serper (if SERPER_API_KEY is set)        — Google SERP JSON API
+    2. SerpAPI  (if SERPAPI_API_KEY is set)     — Google/Bing SERP JSON API
+    3. Google CSE (if GOOGLE_CSE_API_KEY+ID set) — Google Custom Search
+    4. Bing          (free HTML fallback)
+    5. DuckDuckGo    (free HTML fallback)
 
-All providers may return CAPTCHA pages from certain environments;
-in that case the pipeline returns an empty list with a clear error log.
 No fabricated or seed data is ever returned.
+If all providers fail, a clear diagnostic error is logged explaining
+which providers were attempted and why each failed.
 """
 
 from __future__ import annotations
@@ -36,14 +37,16 @@ logger = logging.getLogger(__name__)
 
 
 class CompanySearchProvider(ABC):
-    """Abstract base class for company search providers."""
+    """Abstract base class for all search providers."""
+
+    name: str = "base"
 
     @abstractmethod
     def search(self, query: str, page: int, limit: int) -> tuple[list[dict], bool]:
-        """Search and return (results, has_more).
+        """Execute one page of search results.
 
         Args:
-            query: Search query string.
+            query: URL-encoded search query string.
             page: Page number (1-based).
             limit: Max results per page.
 
@@ -51,6 +54,10 @@ class CompanySearchProvider(ABC):
             (list of {title, url, snippet} dicts, has_more_pages bool)
         """
         ...
+
+    def is_available(self) -> bool:
+        """Return True if required environment variables / credentials exist."""
+        return True
 
     @staticmethod
     def _is_captcha(html: str) -> bool:
@@ -60,25 +67,86 @@ class CompanySearchProvider(ABC):
 
 
 # ---------------------------------------------------------------------------
-# Provider implementations
+# Provider 1: Serper (serper.dev)
+# ---------------------------------------------------------------------------
+
+
+class SerperSearchProvider(CompanySearchProvider):
+    """Serper.dev Google SERP JSON API.
+
+    Requires ``SERPER_API_KEY`` environment variable.
+    Returns structured JSON — no CAPTCHA issues.
+    """
+
+    name = "serper"
+    BASE_URL = "https://google.serper.dev/search"
+    _HEADERS = {
+        "X-API-KEY": "",
+        "Content-Type": "application/json",
+    }
+
+    def is_available(self) -> bool:
+        key = os.environ.get("SERPER_API_KEY")
+        return bool(key)
+
+    def search(self, query: str, page: int, limit: int) -> tuple[list[dict], bool]:
+        api_key = os.environ.get("SERPER_API_KEY", "")
+        self._HEADERS["X-API-KEY"] = api_key
+
+        payload = {
+            "q": query,
+            "num": min(limit, 20),
+            "gl": "us",
+            "hl": "en",
+            "page": page,
+        }
+        try:
+            resp = requests.post(
+                self.BASE_URL,
+                headers=self._HEADERS,
+                json=payload,
+                timeout=20,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as exc:
+            logger.warning("Serper request failed: %s", exc)
+            return [], False
+
+        results: list[dict] = []
+        for item in data.get("organic", []):
+            title = (item.get("title") or "").strip()
+            url = (item.get("link") or "").strip()
+            snippet = (item.get("snippet") or "").strip()
+            if title and url:
+                results.append({"title": title, "url": url, "snippet": snippet})
+
+        total = data.get("information", {}).get("total_results", 0)
+        return results, len(results) >= 10 and page * 10 < total
+
+
+# ---------------------------------------------------------------------------
+# Provider 2: SerpAPI
 # ---------------------------------------------------------------------------
 
 
 class SerpAPISearchProvider(CompanySearchProvider):
-    """SerpAPI Google/Bing search provider.
+    """SerpAPI Google/Bing SERP JSON API.
 
-    Returns structured JSON results with no CAPTCHA issues.
     Requires ``SERPAPI_API_KEY`` environment variable.
+    Returns structured JSON — no CAPTCHA issues.
     """
 
+    name = "serpapi"
     BASE_URL = "https://serpapi.com/search"
     _HEADERS = {"User-Agent": "LeadHunterPro/1.0"}
 
+    def is_available(self) -> bool:
+        key = os.environ.get("SERPAPI_API_KEY")
+        return bool(key)
+
     def search(self, query: str, page: int, limit: int) -> tuple[list[dict], bool]:
         api_key = os.environ.get("SERPAPI_API_KEY")
-        if not api_key:
-            logger.info("SerpAPI: no SERPAPI_API_KEY configured — skipping")
-            return [], False
         params = {
             "q": query,
             "engine": "google",
@@ -100,120 +168,78 @@ class SerpAPISearchProvider(CompanySearchProvider):
 
         organic: list[dict] = []
         for item in data.get("organic_results", []):
-            title = item.get("title", "").strip()
-            url = item.get("link", "").strip()
-            snippet = item.get("snippet", "").strip()
+            title = (item.get("title") or "").strip()
+            url = (item.get("link") or "").strip()
+            snippet = (item.get("snippet") or "").strip()
             if title and url:
                 organic.append({"title": title, "url": url, "snippet": snippet})
 
-        # Try to paginate
         next_page = data.get("next_page_token")
         return organic, next_page is not None
 
-    @staticmethod
-    def _is_captcha(html: str) -> bool:
-        """SerpAPI never serves HTML CAPTCHAs directly — always return False."""
-        return False
+
+# ---------------------------------------------------------------------------
+# Provider 3: Google Custom Search Engine
+# ---------------------------------------------------------------------------
 
 
-class DuckDuckGoSearchProvider(CompanySearchProvider):
-    """Search DuckDuckGo HTML endpoint.
+class GoogleCSEProvider(CompanySearchProvider):
+    """Google Custom Search JSON API.
 
-    Note: DDG also serves CAPTCHAs from certain IPs.  Detection is handled
-    by ``_is_captcha``; callers should fall back gracefully.
+    Requires ``GOOGLE_CSE_API_KEY`` and ``GOOGLE_CSE_ID`` environment variables.
     """
 
-    _HEADERS = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/138.0.0.0 Safari/537.36"
-        ),
-        "Accept-Language": "en-US,en;q=0.9",
-    }
+    name = "google_cse"
+    BASE_URL = "https://www.googleapis.com/customsearch/v1"
+
+    def is_available(self) -> bool:
+        key = os.environ.get("GOOGLE_CSE_API_KEY")
+        cx = os.environ.get("GOOGLE_CSE_ID")
+        return bool(key and cx)
 
     def search(self, query: str, page: int, limit: int) -> tuple[list[dict], bool]:
-        url = f"https://duckduckgo.com/html/?q={quote(query)}"
-        return self._fetch(url)
-
-    def _fetch(self, url: str) -> tuple[list[dict], bool]:
+        api_key = os.environ.get("GOOGLE_CSE_API_KEY", "")
+        cx = os.environ.get("GOOGLE_CSE_ID", "")
+        start_idx = ((page - 1) * 10) + 1
+        params = {
+            "q": query,
+            "key": api_key,
+            "cx": cx,
+            "start": start_idx,
+            "num": min(limit, 10),
+        }
         try:
-            resp = requests.get(url, headers=self._HEADERS, timeout=15, allow_redirects=True)
+            resp = requests.get(self.BASE_URL, params=params, timeout=20)
             resp.raise_for_status()
-        except requests.RequestException as exc:
-            logger.warning("DDG search failed: %s", exc)
+            data = resp.json()
+        except Exception as exc:
+            logger.warning("Google CSE request failed: %s", exc)
             return [], False
 
-        html = resp.text
-        if self._is_captcha(html):
-            logger.info("DDG returned CAPTCHA — provider unavailable")
-            return [], False
-
-        soup = BeautifulSoup(html, "html.parser")
         results: list[dict] = []
-        for result in soup.select("result--homepage"):
-            a = result.select_one("a.result__a")
-            if not a:
-                continue
-            title = a.get_text(strip=True)
-            href = a.get("href", "")
-            m = re.search(r"uddg=([^&\"]+)", href)
-            if m:
-                href = requests.compat.unquote(m.group(1))
-            text_el = result.select_one("result__snippet")
-            snippet = text_el.get_text(strip=True) if text_el else ""
-            if title and href:
-                results.append({"title": title, "url": href, "snippet": snippet})
-        return results, len(results) >= 10
+        for item in data.get("items", []):
+            title = (item.get("title") or "").strip()
+            url = (item.get("link") or "").strip()
+            snippet = (item.get("snippet") or "").strip()
+            if title and url:
+                results.append({"title": title, "url": url, "snippet": snippet})
+
+        total = int(data.get("searchInformation", {}).get("totalResults", 0))
+        return results, start_idx + len(results) <= total
 
 
-class GoogleSearchProvider(CompanySearchProvider):
-    """Search Google SERP via headless request."""
-
-    _HEADERS = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/138.0.0.0 Safari/537.36"
-        ),
-        "Accept-Language": "en-US,en;q=0.9",
-    }
-
-    def search(self, query: str, page: int, limit: int) -> tuple[list[dict], bool]:
-        start = (page - 1) * 10
-        url = f"https://www.google.com/search?q={quote(query)}&num=20&tbs=qdr:y&start={start}"
-        return self._fetch(url)
-
-    def _fetch(self, url: str) -> tuple[list[dict], bool]:
-        try:
-            resp = requests.get(url, headers=self._HEADERS, timeout=15, allow_redirects=True)
-            resp.raise_for_status()
-        except requests.RequestException as exc:
-            logger.warning("Google search failed: %s", exc)
-            return [], False
-
-        html = resp.text
-        if self._is_captcha(html):
-            logger.info("Google returned CAPTCHA — provider unavailable")
-            return [], False
-
-        soup = BeautifulSoup(html, "html.parser")
-        results: list[dict] = []
-        for a in soup.find_all("a", href=True):
-            href = a["href"]
-            m = re.search(r"/url\?q=(https?%3A//[^&]+)", href)
-            if not m:
-                continue
-            raw_url = requests.compat.unquote(m.group(1))
-            title = a.get_text(strip=True)
-            if title and len(title) > 3:
-                results.append({"title": title, "url": raw_url})
-        return results, len(results) >= 5
+# ---------------------------------------------------------------------------
+# Provider 4: Bing (free HTML)
+# ---------------------------------------------------------------------------
 
 
 class BingSearchProvider(CompanySearchProvider):
-    """Search Bing SERP via headless request."""
+    """Search Bing SERP via headless request (no API key needed).
 
+    Note: May be blocked by CAPTCHA from certain IPs/hosting environments.
+    """
+
+    name = "bing"
     _HEADERS = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -260,6 +286,62 @@ class BingSearchProvider(CompanySearchProvider):
 
 
 # ---------------------------------------------------------------------------
+# Provider 5: DuckDuckGo (free HTML)
+# ---------------------------------------------------------------------------
+
+
+class DuckDuckGoSearchProvider(CompanySearchProvider):
+    """Search DuckDuckGo HTML endpoint (no API key needed).
+
+    Note: DDG also serves CAPTCHAs from certain IPs/hosting environments.
+    """
+
+    name = "duckduckgo"
+    _HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/138.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+
+    def search(self, query: str, page: int, limit: int) -> tuple[list[dict], bool]:
+        url = f"https://duckduckgo.com/html/?q={quote(query)}"
+        return self._fetch(url)
+
+    def _fetch(self, url: str) -> tuple[list[dict], bool]:
+        try:
+            resp = requests.get(url, headers=self._HEADERS, timeout=15, allow_redirects=True)
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            logger.warning("DDG search failed: %s", exc)
+            return [], False
+
+        html = resp.text
+        if self._is_captcha(html):
+            logger.info("DDG returned CAPTCHA — provider unavailable")
+            return [], False
+
+        soup = BeautifulSoup(html, "html.parser")
+        results: list[dict] = []
+        for result in soup.select("result--homepage"):
+            a = result.select_one("a.result__a")
+            if not a:
+                continue
+            title = a.get_text(strip=True)
+            href = a.get("href", "")
+            m = re.search(r"uddg=([^&\"]+)", href)
+            if m:
+                href = requests.compat.unquote(m.group(1))
+            text_el = result.select_one("result__snippet")
+            snippet = text_el.get_text(strip=True) if text_el else ""
+            if title and href:
+                results.append({"title": title, "url": href, "snippet": snippet})
+        return results, len(results) >= 10
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -272,9 +354,16 @@ def search_companies(
 ) -> tuple[list[CompanyDiscoveryResult], DiscoveryMetrics]:
     """Search public sources for construction-estimating companies.
 
-    Tries DuckDuckGo first, then Google, then Bing.  All providers may
-    return CAPTCHA pages from headless/server environments — in that case
-    the pipeline returns an empty list with a clear warning in the logs.
+    Provider chain (checked in priority order):
+        1. Serper   — if SERPER_API_KEY is set
+        2. SerpAPI  — if SERPAPI_API_KEY is set
+        3. Google CSE — if GOOGLE_CSE_API_KEY + GOOGLE_CSE_ID are set
+        4. Bing     — free HTML fallback
+        5. DuckDuckGo — free HTML fallback
+
+    If ALL providers fail (e.g. CAPTCHA blocks), returns an empty list
+    with detailed diagnostic errors so the user knows exactly what was tried.
+
     No fabricated or seed data is ever returned.
 
     Args:
@@ -293,21 +382,32 @@ def search_companies(
 
     logger.info("Searching for: %r", base_query)
 
-    providers: list[CompanySearchProvider] = [
-        SerpAPISearchProvider(),
-        BingSearchProvider(),
-        GoogleSearchProvider(),
-        DuckDuckGoSearchProvider(),
+    # Build provider list in priority order, skipping unavailable ones.
+    provider_classes: list[type[CompanySearchProvider]] = [
+        SerperSearchProvider,
+        SerpAPISearchProvider,
+        GoogleCSEProvider,
+        BingSearchProvider,
+        DuckDuckGoSearchProvider,
     ]
 
-    for provider in providers:
-        source_name = type(provider).__name__.replace("SearchProvider", "").lower()
+    providers_attempted: list[str] = []
+    providers_failed: list[str] = []
+
+    for cls in provider_classes:
+        instance = cls()
+        if not instance.is_available():
+            logger.info("%s: not configured — skipped", cls.name)
+            continue
+
+        source_name = cls.name
         logger.info("Trying provider: %s", source_name)
+        providers_attempted.append(source_name)
         provider_results: list[dict] = []
 
         for page in range(1, max_pages + 1):
             try:
-                results, has_more = provider.search(base_query, page, limit)
+                results, has_more = instance.search(base_query, page, limit)
             except Exception as exc:
                 logger.warning("%s page %d failed: %s", source_name, page, exc)
                 continue
@@ -331,7 +431,17 @@ def search_companies(
             if len(all_raw) >= limit:
                 break
         else:
-            logger.info("%s returned no results (CAPTCHA or network error)", source_name)
+            logger.info("%s returned no results", source_name)
+            providers_failed.append(source_name)
+
+    if not all_raw and providers_attempted:
+        metrics.errors.append(
+            f"All {len(providers_attempted)} providers were attempted but none returned results. "
+            f"Failed providers: {', '.join(providers_failed)}. "
+            f"Available configured providers: {', '.join(providers_attempted)}. "
+            f"To get real results, configure at least one of: "
+            f"SERPER_API_KEY, SERPAPI_API_KEY, or GOOGLE_CSE_API_KEY+GOOGLE_CSE_ID."
+        )
 
     metrics.total_found = len(all_raw)
     logger.info("Total raw results: %d", metrics.total_found)

@@ -176,28 +176,30 @@ class TestSearchCompanies:
         assert isinstance(results, list)
         assert isinstance(metrics, DiscoveryMetrics)
 
-    @patch("app.engines.discovery.company.company_search.requests.get")
-    def test_parses_google_style_links(self, mock_get):
-        """Google-style organic results should produce CompanyDiscoveryResult objects."""
-        html = (
-            '<html><body>'
-            '<a href="/url?q=https%3A//example-builder.com">Example Builder</a>'
-            '<a href="/url?q=https%3A//another-contractor.com">Another Contractor</a>'
-            "</body></html>"
-        )
-        mock_resp = MagicMock()
-        mock_resp.text = html
-        mock_resp.raise_for_status.return_value = None
-        mock_get.return_value = mock_resp
-        search = __import__(
-            "app.engines.discovery.company.company_search", fromlist=["search_companies"]
-        ).search_companies
-        results, _ = search("Construction Estimating", "Texas", limit=100)
-        assert len(results) >= 2
-        for r in results:
-            assert isinstance(r, CompanyDiscoveryResult)
-            assert r.company_name != ""
-            assert r.website != ""
+    @patch("app.engines.discovery.company.company_search.BingSearchProvider.is_available", return_value=False)
+    @patch("app.engines.discovery.company.company_search.DuckDuckGoSearchProvider.is_available", return_value=False)
+    @patch("app.engines.discovery.company.company_search.SerpAPISearchProvider.is_available", return_value=False)
+    @patch("app.engines.discovery.company.company_search.SerperSearchProvider.is_available", return_value=False)
+    def test_parses_google_cse_style_links(self, mock_serper_avail, mock_serpapi_avail, mock_ddg_avail, mock_bing_avail):
+        """Google CSE provider returning organic results should produce CompanyDiscoveryResult objects."""
+        with patch("app.engines.discovery.company.company_search.GoogleCSEProvider.is_available", return_value=True):
+            with patch("app.engines.discovery.company.company_search.GoogleCSEProvider.search") as mock_cse:
+                mock_cse.return_value = (
+                    [
+                        {"title": "Example Builder", "url": "https://example-builder.com", "snippet": ""},
+                        {"title": "Another Contractor", "url": "https://another-contractor.com", "snippet": ""},
+                    ],
+                    False,
+                )
+                search = __import__(
+                    "app.engines.discovery.company.company_search", fromlist=["search_companies"]
+                ).search_companies
+                results, _ = search("Construction Estimating", "Texas", limit=100)
+                assert len(results) >= 2
+                for r in results:
+                    assert isinstance(r, CompanyDiscoveryResult)
+                    assert r.company_name != ""
+                    assert r.website != ""
 
     @patch("app.engines.discovery.company.company_search.requests.get")
     def test_filters_wikipedia_and_gov_urls(self, mock_get):

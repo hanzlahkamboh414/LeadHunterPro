@@ -1,24 +1,9 @@
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.orm import Session
+"""Database engine and session factory.
 
-from app.core.config import settings
+Re-exported for convenience; prefer importing directly from
+:mod:`app.database.session` in application code.
+"""
 
-engine = create_engine(
-    settings.DATABASE_URL,
-    echo=False,
-)
+from app.database.session import engine, get_db, SessionLocal
 
-SessionLocal = sessionmaker(
-    autocommit=False,
-    autoflush=False,
-    bind=engine,
-)
-
-
-def get_db():
-    db: Session = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+__all__ = ["engine", "get_db", "SessionLocal"]

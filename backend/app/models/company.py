@@ -7,7 +7,7 @@ from sqlalchemy import String
 
 from sqlalchemy.orm import Mapped
 from sqlalchemy.orm import mapped_column
-
+from sqlalchemy.orm import relationship
 from app.database.base import Base
 
 
@@ -33,4 +33,17 @@ class Company(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
         default=datetime.utcnow,
+    )
+
+
+    contacts = relationship(
+        "Contact",
+        back_populates="company",
+        cascade="all, delete-orphan",
+    )
+
+    research_records = relationship(
+    "Research",
+    back_populates="company",
+    cascade="all, delete-orphan",
     )

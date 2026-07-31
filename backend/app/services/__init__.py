@@ -1,1 +1,2 @@
 from app.services.company_service import CompanyService
+from app.services.contact_service import ContactService

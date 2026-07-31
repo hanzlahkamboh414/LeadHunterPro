@@ -14,9 +14,11 @@ from typing import Literal
 SUPPORTED_SOURCES = Literal[
     "google",
     "bing",
+    "duckduckgo",
     "directory",
     "government",
     "construction_directory",
+    "seed",
 ]
 
 
@@ -31,6 +33,8 @@ class CompanyDiscoveryResult:
     country: str = "USA"
     source: SUPPORTED_SOURCES = "google"
     confidence: float = 0.5
+    source_url: str = ""
+    discovery_reason: str = ""
 
     @property
     def normalized_website(self) -> str:

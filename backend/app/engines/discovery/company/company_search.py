@@ -337,11 +337,19 @@ def search_companies(
         name = _extract_company_name(item["title"], item.get("snippet", ""))
         if not name:
             continue
+        source = item["source"]
+        reason = (
+            "Found via SERP search result"
+            if source != "seed"
+            else f"Location-keyed seed result for {item.get('location', location)}"
+        )
         discoveries.append(CompanyDiscoveryResult(
             company_name=name,
             website=item["url"],
-            source=item["source"],
-            confidence=0.6 if item["snippet"] else 0.4,
+            source=source,  # type: ignore[arg-type]
+            confidence=0.6 if item.get("snippet") else 0.4,
+            source_url=item["url"],
+            discovery_reason=reason,
         ))
         if len(discoveries) >= limit:
             break

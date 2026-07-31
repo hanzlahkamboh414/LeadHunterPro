@@ -5,7 +5,12 @@ variables and/or a ``.env`` file.  All settings are typed and validated
 at startup.
 """
 
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+_ENV_PATH = _PROJECT_ROOT / ".env"
 
 
 class Settings(BaseSettings):
@@ -31,7 +36,8 @@ class Settings(BaseSettings):
     OPENAI_MODEL: str = "gpt-5.5"
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=_ENV_PATH,
+        env_file_encoding="utf-8",
         extra="ignore",
     )
 

@@ -3,8 +3,10 @@
 import logging
 from typing import List
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy.orm import Session
 
+from app.database.session import get_db
 from app.engines.discovery.company.company_discovery_engine import CompanyDiscoveryEngine
 from app.engines.discovery.company.company_models import CompanyDiscoveryResult
 
@@ -38,11 +40,8 @@ def discover_companies(
         description="Geographic location, e.g. 'Dallas Texas USA'",
     ),
     limit: int = Query(100, ge=1, le=500, description="Maximum number of results"),
+    db: Session = Depends(get_db),
 ) -> List[CompanyDiscoveryResult]:
     """Discover companies from public web sources."""
-    results, _ = engine.discover(
-        industry=industry,
-        location=location,
-        limit=limit,
-    )
+    results, _ = engine.discover(industry=industry, location=location, limit=limit)
     return results

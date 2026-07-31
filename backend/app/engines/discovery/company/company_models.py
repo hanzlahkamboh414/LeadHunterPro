@@ -18,7 +18,6 @@ SUPPORTED_SOURCES = Literal[
     "directory",
     "government",
     "construction_directory",
-    "seed",
 ]
 
 

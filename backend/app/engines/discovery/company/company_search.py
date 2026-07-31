@@ -201,51 +201,6 @@ class BingSearchProvider(CompanySearchProvider):
 
 
 # ---------------------------------------------------------------------------
-# Deterministic seed generator (fallback when all providers are blocked)
-# ---------------------------------------------------------------------------
-
-
-def _seed_companies_from_location(location: str, limit: int) -> list[dict]:
-    """Generate deterministic seed data when live search is unavailable.
-
-    Uses real naming patterns for construction-estimating businesses keyed
-    on the provided location string so results are reproducible.
-    """
-    words = re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ']{3,}", location)
-    seed_base = "_".join(words[:3]).lower() if words else "texas"
-    suffixes = [
-        "Construction", "Builders", "Contractors", "Estimators",
-        "General Contractors", "Home Builders", "Civil Engineers",
-        "Remodeling", "Development Group", "Building Solutions",
-    ]
-    prefixes = [
-        f"{seed_base.title()}",
-        f"Lone Star {seed_base.title()}",
-        f"Texas {seed_base.title()}",
-        f"Big {seed_base.title()}",
-        f"South {seed_base.title()}",
-    ]
-    results: list[dict] = []
-    seen_urls: set[str] = set()
-    for prefix in prefixes:
-        for suffix in suffixes:
-            name = f"{prefix}{suffix}"
-            domain = re.sub(r"[^a-z0-9]+", "", name.lower())
-            website = f"https://www.{domain}.com"
-            if website not in seen_urls:
-                seen_urls.add(website)
-                results.append({
-                    "title": name,
-                    "url": website,
-                    "snippet": f"Professional {name.lower()} serving {location}",
-                    "source": "seed",
-                })
-                if len(results) >= limit:
-                    return results
-    return results
-
-
-# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -316,18 +271,6 @@ def search_companies(
                 break
         else:
             logger.info("%s returned no results (CAPTCHA or network error)", source_name)
-
-    # Fallback to deterministic seed data when all providers are blocked
-    if not all_raw:
-        logger.warning(
-            "All search providers blocked by CAPTCHA — using deterministic seed data for location=%r",
-            location,
-        )
-        all_raw = _seed_companies_from_location(location, limit)
-        metrics.errors.append(
-            "All live search providers (DuckDuckGo, Google, Bing) returned CAPTCHA. "
-            "Using deterministic seed data. Configure API keys or use a proxy for live search."
-        )
 
     metrics.total_found = len(all_raw)
     logger.info("Total raw results: %d", metrics.total_found)

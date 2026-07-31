@@ -62,6 +62,27 @@ class ResearchService:
             "created_at": str(research.created_at),
         }
 
+    def get_research_by_id(self, db: Session, research_id: int) -> dict | None:
+        """Retrieve a single research record by its ID.
+
+        Args:
+            db: Database session.
+            research_id: Research record primary key.
+
+        Returns:
+            Research dict or None if not found.
+        """
+        research = self.repository.get_by_id(db=db, research_id=research_id)
+        if not research:
+            return None
+        return {
+            "id": research.id,
+            "company_id": research.company_id,
+            "raw_data": research.raw_data,
+            "ai_summary": research.ai_summary,
+            "created_at": str(research.created_at),
+        }
+
     def generate_score(self, db: Session, company_id: int, raw_data: dict) -> int:
         """Calculate and persist a lead score for a company.
 

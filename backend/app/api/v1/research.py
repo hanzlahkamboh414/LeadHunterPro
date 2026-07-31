@@ -50,7 +50,7 @@ def generate_summary(
     db: Session = Depends(get_db),
 ):
     """Generate an AI summary for a specific research record."""
-    research = service.repository.get_by_id(db=db, research_id=research_id)
+    research = service.get_research_by_id(db=db, research_id=research_id)
     if not research:
         return {"message": "Research not found"}
     return service.generate_summary(

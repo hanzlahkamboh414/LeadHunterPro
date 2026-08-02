@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from abc import ABC, abstractmethod
 from typing import Any
 
 from app.engines.source_connectors.sdk_utils import ConnectorLogger
@@ -112,7 +113,7 @@ class ConnectorConfig:
 # ---------------------------------------------------------------------------
 
 
-class BaseConnector:
+class BaseConnector(ABC):
     """Abstract base class for all source connectors.
 
     Every connector MUST:
@@ -145,6 +146,7 @@ class BaseConnector:
         """Return True if this connector can run in the current environment."""
         return True
 
+    @abstractmethod
     def discover(
         self,
         *,

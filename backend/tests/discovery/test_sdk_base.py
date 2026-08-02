@@ -132,13 +132,9 @@ class TestBaseConnector:
             IncompleteConnector()  # Should raise TypeError
 
     def test_base_discover_raises_not_implemented(self):
-        """Calling discover() on base class should raise NotImplementedError."""
-        connector = BaseConnector.__new__(BaseConnector)
-        connector._config = ConnectorConfig(name="base")
-        from app.engines.source_connectors.sdk_utils import ConnectorLogger
-        connector._logger = ConnectorLogger("base")
-        with pytest.raises(NotImplementedError):
-            connector.discover()
+        """Base class cannot be instantiated due to abstract method."""
+        with pytest.raises(TypeError):
+            BaseConnector()  # Should raise TypeError for abstract class
 
 
 # ---------------------------------------------------------------------------

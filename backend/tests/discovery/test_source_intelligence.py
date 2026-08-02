@@ -294,20 +294,17 @@ class TestSourceIntelligenceAPI:
     def test_endpoint_exists_in_router(self):
         """The /api/v1/source-intelligence/sources route must be registered."""
         from app.main import app
-
-        def collect_paths(obj) -> list[str]:
-            """Recursively collect all route paths from an app/router tree."""
-            paths: list[str] = []
-            if hasattr(obj, "routes"):
-                for sub in obj.routes:
-                    if hasattr(sub, "path"):
-                        paths.append(sub.path)
-                    paths.extend(collect_paths(sub))
-            return paths
-
-        paths = collect_paths(app)
-        assert "/api/v1/source-intelligence/sources" in paths, \
-            f"Source intelligence endpoint not registered in router. Paths: {paths}"
+        # Use TestClient to verify the route is reachable (FastAPI's internal
+        # route tree uses _IncludedRouter which doesn't expose .path directly)
+        from fastapi.testclient import TestClient
+        client = TestClient(app)
+        r = client.options(
+            "/api/v1/source-intelligence/sources",
+            params={"industry": "Construction", "state": "TX"},
+        )
+        # If the route exists, we get 200 OPTIONS; if not, 404
+        assert r.status_code != 404, \
+            "Source intelligence endpoint not registered in router"
 
     def test_endpoint_returns_200(self):
         """Endpoint must return HTTP 200."""

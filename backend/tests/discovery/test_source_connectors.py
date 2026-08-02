@@ -125,11 +125,11 @@ class TestTexasProcurementConnector:
         assert len(results) > 0
 
     def test_discover_industry_no_match(self):
-        """Very specific industry that won't match any record."""
+        """Industry phrase with no matching keyword in any record."""
         c = TexasProcurementConnector()
         results, metadata = c.discover(
             state="TX", city="Dallas",
-            industry="Cryptocurrency Mining Engineering zzz999", limit=10
+            industry="AstroNauticalPropulsion xyz123!@#", limit=10
         )
         assert len(results) == 0
 

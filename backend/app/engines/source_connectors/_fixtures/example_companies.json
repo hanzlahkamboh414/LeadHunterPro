@@ -1,0 +1,32 @@
+[
+  {
+    "company_name": "Acme Construction LLC",
+    "website": "https://www.acmeconstruction.example.com",
+    "city": "Dallas",
+    "state": "TX",
+    "country": "USA",
+    "source_url": "https://www.acmeconstruction.example.com/about",
+    "industry_focus": "Commercial construction, general contracting",
+    "revenue_tier": "mid-market"
+  },
+  {
+    "company_name": "Lone Star Builders Inc.",
+    "website": "https://www.lonestarbuilders.example.com",
+    "city": "Houston",
+    "state": "TX",
+    "country": "USA",
+    "source_url": "https://www.lonestarbuilders.example.com",
+    "industry_focus": "Residential construction, renovations",
+    "revenue_tier": "small"
+  },
+  {
+    "company_name": "Texas General Contractors",
+    "website": "https://www.texasgeneral.example.com",
+    "city": "Austin",
+    "state": "TX",
+    "country": "USA",
+    "source_url": "https://www.texasgeneral.example.com/contact",
+    "industry_focus": "General contracting, project management",
+    "revenue_tier": "large"
+  }
+]

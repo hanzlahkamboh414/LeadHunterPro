@@ -13,6 +13,7 @@ from app.api.v1.email import router as email_router
 from app.api.v1.health import router as health_router
 from app.api.v1.leadership import router as leadership_router
 from app.api.v1.research import router as research_router
+from app.api.v1.source_intelligence import router as source_intelligence_router
 
 logger = logging.getLogger(__name__)
 
@@ -27,3 +28,4 @@ api_router.include_router(leadership_router)
 api_router.include_router(crawler_router)
 api_router.include_router(email_router)
 api_router.include_router(discovery_router)
+api_router.include_router(source_intelligence_router)

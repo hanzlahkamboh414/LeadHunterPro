@@ -14,6 +14,7 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 from app.engines.source_connectors.texas_procurement import TexasProcurementConnector
+from app.engines.source_connectors.agc_texas import AgcTexasConnector
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +90,7 @@ class ConstructionSourceRegistry:
 
 # Register built-in connectors
 ConstructionSourceRegistry.register(TexasProcurementConnector())
+ConstructionSourceRegistry.register(AgcTexasConnector())
 
 
 def get_connector(name: str) -> ConstructionSourceConnector | None:

@@ -5,102 +5,64 @@ companies from industry-specific public sources (procurement portals,
 trade directories, bid databases).
 
 No Google/Bing/DuckDuckGo – only purpose-built construction sources.
+
+All core SDK types live in ``sdk.py``; this package re-exports them
+for convenient top-level access.
 """
 
 from __future__ import annotations
 
-import logging
-from abc import ABC, abstractmethod
-from typing import Any
+# Core SDK types (canonical definitions live in sdk.py)
+from app.engines.source_connectors.sdk import (  # noqa: F401
+    BaseConnector,
+    CompanyResult,
+    ConnectorConfig,
+    ConstructionSourceRegistry,
+    ConnectorRegistry,
+    get_connector,
+    list_connectors,
+)
 
-from app.engines.source_connectors.texas_procurement import TexasProcurementConnector
-from app.engines.source_connectors.agc_texas import AgcTexasConnector
+# SDK utilities
+from app.engines.source_connectors.connector_logger import ConnectorLogger  # noqa: F401
+from app.engines.source_connectors.deduplicator import Deduplicator  # noqa: F401
+from app.engines.source_connectors.error_handler import ErrorHandler  # noqa: F401
+from app.engines.source_connectors.http_client import HTTPClient  # noqa: F401
+from app.engines.source_connectors.normalizer import Normalizer  # noqa: F401
+from app.engines.source_connectors.rate_limiter import RateLimiter  # noqa: F401
+from app.engines.source_connectors.retry_manager import (  # noqa: F401
+    RetryManager,
+    connector_retry,
+)
 
-logger = logging.getLogger(__name__)
+# Other components
+from app.engines.source_connectors.evidence import Evidence  # noqa: F401
+from app.engines.source_connectors.connector_manager import ConnectorManager  # noqa: F401
+from app.engines.source_connectors.mock_connector import MockConnector  # noqa: F401
 
+# Built-in connectors (trigger registration at import time)
+from app.engines.source_connectors.texas_procurement import TexasProcurementConnector  # noqa: F401
+from app.engines.source_connectors.agc_texas import AgcTexasConnector  # noqa: F401
 
-class ConstructionSourceConnector(ABC):
-    """Base class for all construction source connectors."""
-
-    @property
-    @abstractmethod
-    def name(self) -> str:
-        """Human-readable connector name (e.g. 'texas_procurement')."""
-        ...
-
-    @property
-    @abstractmethod
-    def description(self) -> str:
-        """One-line description of what this connector discovers."""
-        ...
-
-    @abstractmethod
-    def discover(
-        self,
-        *,
-        state: str | None = None,
-        city: str | None = None,
-        industry: str = "Construction Estimating",
-        limit: int = 50,
-    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        """Execute discovery and return (companies, metadata).
-
-        Args:
-            state: US state code (e.g. 'TX').
-            city: City name.
-            industry: Industry filter.
-            limit: Maximum companies to return.
-
-        Returns:
-            (list of company dicts, metadata dict)
-        """
-        ...
-
-    def is_available(self) -> bool:
-        """Return True if this connector can run in the current environment."""
-        return True
-
-
-class ConstructionSourceRegistry:
-    """Registry that holds all available construction source connectors."""
-
-    _connectors: dict[str, ConstructionSourceConnector] = {}
-
-    @classmethod
-    def register(cls, connector: ConstructionSourceConnector) -> None:
-        """Register a connector instance."""
-        cls._connectors[connector.name] = connector
-        logger.info("Registered connector: %s (%s)", connector.name, connector.description)
-
-    @classmethod
-    def get(cls, name: str) -> ConstructionSourceConnector | None:
-        """Get a connector by name."""
-        return cls._connectors.get(name)
-
-    @classmethod
-    def list_all(cls) -> list[ConstructionSourceConnector]:
-        """Return all registered connectors."""
-        return list(cls._connectors.values())
-
-    @classmethod
-    def list_names(cls) -> list[str]:
-        """Return names of all registered connectors."""
-        return list(cls._connectors.keys())
-
-
-# Register built-in connectors
-ConstructionSourceRegistry.register(TexasProcurementConnector())
-ConstructionSourceRegistry.register(AgcTexasConnector())
-
-
-def get_connector(name: str) -> ConstructionSourceConnector | None:
-    """Convenience function to look up a connector by name."""
-    return ConstructionSourceRegistry.get(name)
-
-
-def list_connectors() -> list[dict[str, str]]:
-    """Return a summary of all registered connectors."""
-    return [
-        {"name": c.name, "description": c.description}
-        for c in ConstructionSourceRegistry.list_all()
-    ]
+__all__ = [
+    "BaseConnector",
+    "CompanyResult",
+    "ConnectorConfig",
+    "ConnectorRegistry",
+    "ConstructionSourceRegistry",
+    "get_connector",
+    "list_connectors",
+    "ConnectorLogger",
+    "Deduplicator",
+    "ErrorHandler",
+    "HTTPClient",
+    "Normalizer",
+    "RateLimiter",
+    "RetryManager",
+    "connector_retry",
+    "Evidence",
+    "ConnectorManager",
+    "MockConnector",
+    "TexasProcurementConnector",
+    "AgcTexasConnector",
+]

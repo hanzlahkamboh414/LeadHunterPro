@@ -18,12 +18,11 @@ from pathlib import Path
 from typing import Any
 
 from app.discovery.sources.base_source import BaseSource
+from app.discovery.sources.status import SourceStatus
 
 logger = logging.getLogger(__name__)
 
-_FIXTURE_PATH = (
-    Path(__file__).parent.parent.parent / "fixtures" / "texas_procurement.json"
-)
+_FIXTURE_PATH = Path(__file__).parent.parent.parent / "fixtures" / "texas_procurement.json"
 
 
 class FixtureSource(BaseSource):
@@ -85,7 +84,7 @@ class FixtureSource(BaseSource):
         industry: str,
         location: str,
         limit: int,
-    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    ) -> tuple[SourceStatus, list[dict[str, Any]], dict[str, Any]]:
         """Return all fixture companies matching industry + location.
 
         Args:
@@ -94,7 +93,7 @@ class FixtureSource(BaseSource):
             limit: Maximum results.
 
         Returns:
-            Tuple of (matched companies, metadata).
+            Tuple of (status, matched companies, metadata).
         """
         from app.connectors.industry_expansion import expand_industry
         from app.connectors.texas_procurement import _parse_location
@@ -121,7 +120,8 @@ class FixtureSource(BaseSource):
             "all live sources failed)",
             len(matched),
         )
-        return matched[:limit], {
+        status = SourceStatus.SUCCESS if matched else SourceStatus.EMPTY
+        return status, matched[:limit], {
             **self._meta,
             "total_in_dataset": len(self._companies),
             "total_matched": len(matched),

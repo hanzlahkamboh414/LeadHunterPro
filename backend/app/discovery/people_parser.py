@@ -22,9 +22,7 @@ class PeopleParser:
         "CFO",
     ]
 
-    NAME_PATTERN = re.compile(
-        r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\b"
-    )
+    NAME_PATTERN = re.compile(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\b")
 
     def extract_candidates(
         self,

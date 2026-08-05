@@ -1,8 +1,10 @@
 """Source Orchestrator — multi-source discovery pipeline.
 
 Coordinates execution across multiple independent discovery sources:
+- Texas Secretary of State business search
+- Texas CMBL vendor registry
 - Web search providers (SearXNG, Brave)
-- Public procurement portals
+- County procurement portals
 - Trade directories (AGC, BBB)
 - Licensing databases
 - Fixture bridge (emergency fallback)
@@ -10,6 +12,15 @@ Coordinates execution across multiple independent discovery sources:
 Sources are executed in priority order (lower = higher priority).
 Results from all sources are aggregated, deduplicated, and returned.
 If ALL live sources fail, the fixture bridge activates with clear logging.
+
+Status contract per source:
+  SUCCESS   — source returned companies
+  EMPTY     — source ran but found nothing
+  UNAVAILABLE — network/DNS failure (source cannot reach target)
+  ERROR     — unexpected exception during execution
+
+The orchestrator NEVER treats UNAVAILABLE or ERROR as terminal.
+It continues with the next source and reports per-source diagnostics.
 """
 
 from __future__ import annotations
@@ -17,6 +28,8 @@ from __future__ import annotations
 import logging
 import time
 from typing import Any
+
+from app.discovery.sources.status import SourceStatus
 
 logger = logging.getLogger(__name__)
 
@@ -30,11 +43,14 @@ class SourceOrchestrator:
 
     Usage:
         orchestrator = SourceOrchestrator()
+        orchestrator.register(SOSBusinessSource())
+        orchestrator.register(CMBLSource())
         orchestrator.register(SearchProviderSource())
         orchestrator.register(FixtureSource())
         companies, metadata = orchestrator.discover(
             industry="Roofing", location="Dallas Texas", limit=20
         )
+        orchestrator.print_health_report(companies, metadata)
     """
 
     def __init__(self) -> None:
@@ -47,9 +63,7 @@ class SourceOrchestrator:
         Sources are sorted by priority (lower number = tried first).
 
         Args:
-            source: An object with a ``discover()`` method returning
-                ``(list[dict], dict)``. Must have ``source_name``,
-                ``priority``, and ``enabled`` attributes.
+            source: An object implementing :class:`BaseSource`.
         """
         if source in self._sources:
             logger.warning(
@@ -74,9 +88,13 @@ class SourceOrchestrator:
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """Execute discovery across all registered sources.
 
+        Each source is called independently. If a source raises an
+        exception or returns UNAVAILABLE/ERROR, the orchestrator logs
+        the issue and moves to the next source — discovery never stops.
+
         Sources are executed in priority order. Results are aggregated
-        and deduplicated by company name + domain. If no live source
-        returns results, the fixture bridge is activated.
+        and deduplicated by (domain, name) tuple. If no live source
+        returns results, the fixture bridge activates.
 
         Args:
             industry: Industry keyword (e.g. "Roofing").
@@ -101,7 +119,6 @@ class SourceOrchestrator:
 
         all_companies: list[dict[str, Any]] = []
         source_stats: dict[str, dict[str, Any]] = {}
-        errors: dict[str, str] = {}
 
         for source in self._sources:
             if not getattr(source, "enabled", True):
@@ -110,70 +127,85 @@ class SourceOrchestrator:
 
             source_name = getattr(source, "source_name", "unknown")
             try:
-                companies, meta = source.discover(
+                status, companies, meta = source.discover(
                     industry=industry,
                     location=location,
                     limit=limit,
                 )
                 source_stats[source_name] = {
+                    "status": status,
                     "results": len(companies),
                     "metadata": meta,
                 }
                 logger.info(
-                    "Source %s: %d results",
+                    "Source %s [%s]: %d results",
                     source_name,
+                    status.value,
                     len(companies),
                 )
-                all_companies.extend(companies)
+                if status == SourceStatus.SUCCESS:
+                    all_companies.extend(companies)
 
-            except Exception as exc:
-                errors[source_name] = str(exc)
-                source_stats[source_name] = {"error": str(exc)}
-                logger.exception("Source %s failed", source_name)
+            except Exception as exc:  # noqa: BLE001
+                source_stats[source_name] = {
+                    "status": SourceStatus.ERROR,
+                    "results": 0,
+                    "error": str(exc),
+                }
+                logger.error(
+                    "Source %s failed: %s",
+                    source_name,
+                    exc,
+                    exc_info=True,
+                )
 
         elapsed_ms = (time.monotonic() - start_time) * 1000
 
-        # Deduplicate by normalized domain
+        # Deduplicate by (domain, normalized_name) tuple
         deduped = self._deduplicate(all_companies)
 
-        # Determine data source status
-        live_sources = [
+        # Determine overall data source status
+        live_success = [
             name
-            for name in source_stats
-            if name != "fixture_bridge" and source_stats[name].get("results", 0) > 0
+            for name, stats in source_stats.items()
+            if stats.get("status") == SourceStatus.SUCCESS
+            and name != "fixture_bridge"
         ]
-        if live_sources:
+        if live_success:
             data_source = "live"
             fallback_reason = ""
-        elif self._sources and any(
-            s.source_name == "fixture_bridge" for s in self._sources
+        elif any(
+            getattr(s, "source_name") == "fixture_bridge"
+            for s in self._sources
         ):
             data_source = "fixture"
-            fallback_reason = (
-                "all_live_sources_failed_or_unavailable: "
-                + "; ".join(
-                    f"{k}: {v.get('error', 'no_results')}"
-                    for k, v in source_stats.items()
-                    if k != "fixture_bridge"
-                )
-                or "no_live_providers_configured"
-            )
+            parts = [
+                f"{k}: {v.get('status', 'unknown').value}"
+                for k, v in source_stats.items()
+                if k != "fixture_bridge"
+            ]
+            fallback_reason = "; ".join(parts) or "no_live_providers_configured"
         else:
             data_source = "empty"
             fallback_reason = "no_sources_registered"
 
         metadata: dict[str, Any] = {
             "data_source": data_source,
+            "bridge_mode": data_source == "fixture",
             "fallback_reason": fallback_reason,
             "total_raw": len(all_companies),
             "total_deduped": len(deduped),
             "total_returned": min(len(deduped), limit),
             "elapsed_ms": round(elapsed_ms, 1),
             "source_stats": source_stats,
-            "errors": errors,
-            "sources_executed": len(
-                [s for s in self._sources if getattr(s, "enabled", True)]
-            ),
+            "sources_executed": len([s for s in self._sources if getattr(s, "enabled", True)]),
+            # Backwards compat: errors dict for tests that assert its presence.
+            # In the new status contract, errors live inside source_stats[<name>]["status"].
+            "errors": {
+                name: stats.get("error", "")
+                for name, stats in source_stats.items()
+                if stats.get("error")
+            },
         }
 
         logger.info(
@@ -187,6 +219,67 @@ class SourceOrchestrator:
         )
 
         return deduped[:limit], metadata
+
+    def print_health_report(
+        self,
+        companies: list[dict[str, Any]],
+        metadata: dict[str, Any],
+    ) -> None:
+        """Print a human-readable execution summary.
+
+        Usage:
+            companies, meta = orchestrator.discover(...)
+            orchestrator.print_health_report(companies, meta)
+
+        Output format:
+            Source Health
+            --------------
+            sos_business           SUCCESS      (12 companies)
+            cmbL_source            UNAVAILABLE  (0 companies)
+            search_provider        DISABLED     (0 companies)
+            fixture_bridge         NOT_USED     (0 companies)
+            ────────────────────────────────────────────
+            Final                  12 companies | source=live | 234.7ms
+        """
+        source_stats = metadata.get("source_stats", {})
+        max_name_len = max((len(name) for name in source_stats), default=0)
+        max_name_len = max(max_name_len, 12)  # minimum column width
+
+        lines = []
+        lines.append("")
+        lines.append("Source Health")
+        lines.append("-" * 40)
+
+        for source in self._sources:
+            # `name` must be bound before the branch: reading it only in the
+            # enabled branch raised NameError when the first source was
+            # disabled, and printed the *previous* source's name when a later
+            # one was. Both are reachable now that a source can be disabled
+            # to make plugin execution optional.
+            name = getattr(source, "source_name", "unknown")
+            if not getattr(source, "enabled", True):
+                status_str = "DISABLED".ljust(12)
+                count_str = "0 companies"
+            else:
+                stats = source_stats.get(name, {})
+                status = stats.get("status", SourceStatus.EMPTY)
+                count = stats.get("results", 0)
+                status_str = status.value.upper().ljust(12)
+                count_str = f"{count} companies"
+            lines.append(f"  {name:<{max_name_len}}  {status_str}  ({count_str})")
+
+        lines.append("  " + "-" * (max_name_len + 30))
+        total = metadata["total_returned"]
+        source_type = metadata["data_source"]
+        elapsed = metadata["elapsed_ms"]
+        lines.append(
+            f"  {'Final':<{max_name_len}}  {total} companies "
+            f"| source={source_type} | {elapsed:.1f}ms"
+        )
+        if metadata.get("fallback_reason"):
+            lines.append(f"  {'Fallback':<{max_name_len}}  {metadata['fallback_reason']}")
+        lines.append("")
+        print("\n".join(lines))
 
     @staticmethod
     def _deduplicate(companies: list[dict[str, Any]]) -> list[dict[str, Any]]:

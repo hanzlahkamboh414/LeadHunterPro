@@ -10,23 +10,11 @@ class ResultCleaner:
 
         for leader in leaders:
 
-            name = (
-                leader.get("name", "")
-                .strip()
-                .lower()
-            )
+            name = leader.get("name", "").strip().lower()
 
-            title = (
-                leader.get("title", "")
-                .strip()
-                .lower()
-            )
+            title = leader.get("title", "").strip().lower()
 
-            text = (
-                leader.get("text", "")
-                .strip()
-                .lower()
-            )
+            text = leader.get("text", "").strip().lower()
 
             key = (name, title)
 

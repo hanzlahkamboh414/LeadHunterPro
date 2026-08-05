@@ -1,505 +1,413 @@
-# LeadHunter Pro - CLAUDE.md
-Version: 1.0
-Status: LOCKED
-Owner: Hanzlah (Product Owner)
-Architect: ChatGPT (CTO)
+# ======================================================================
+# LEADHUNTER PRO - CRITICAL PROJECT RULES (NEVER VIOLATE)
+# ======================================================================
+
+## 1. Fake Data Policy
+
+Fixtures are TEMPORARY BRIDGE DATA ONLY.
+
+Fixtures must NEVER become the primary discovery source.
+
+Always attempt LIVE discovery first.
+
+Only use fixtures when ALL live discovery methods fail.
+
+Whenever fixtures are returned, the response MUST clearly include:
+
+- data_source = "fixture"
+- bridge_mode = true
+- fallback_reason
+
+Never hide that fixture data is being used.
 
 ---
 
-# PROJECT MISSION
+## 2. Discovery Priority
 
-LeadHunter Pro is NOT a CRM.
+The discovery pipeline must always follow this order:
 
-LeadHunter Pro is NOT a web scraper.
-
-LeadHunter Pro is NOT an email finder.
-
-LeadHunter Pro is an AI-powered Lead Intelligence Platform built specifically for Construction Estimating companies.
-
-Mission:
-
-Find 20–25 high-quality opportunities that have the highest probability of needing construction estimating services.
-
-Success Metric:
-
-20 Leads
+User Query
 ↓
-
-1–2 Paying Clients
-
-Everything inside this project must contribute toward this mission.
-
-If a feature does not improve lead quality,
-DO NOT BUILD IT.
-
----
-
-# CORE PHILOSOPHY
-
-Simple beats Complex.
-
-Reliable beats Clever.
-
-Evidence beats Assumption.
-
-Quality beats Quantity.
-
-Architecture beats Speed.
-
-Never sacrifice architecture for short-term progress.
-
----
-
-# DEVELOPMENT RULES
-
-Claude NEVER decides architecture.
-
-Claude NEVER creates new folders.
-
-Claude NEVER creates extra modules.
-
-Claude NEVER changes folder structure.
-
-Claude ONLY implements approved sprint specifications.
-
-If something is missing,
-STOP
-and ask.
-
-Never invent.
-
----
-
-# ARCHITECTURE
-
-Layers
-
-API
-
+Search Strategy
 ↓
-
-Services
-
+Live Discovery
 ↓
-
-Repositories
-
+Website Crawl
 ↓
-
-Database
-
-Independent Engines
-
+Company Extraction
 ↓
-
-AI
-
-Dependencies always point downward.
-
-Never create circular imports.
-
-Never bypass repositories.
-
-Never access database directly from API.
-
----
-
-# FOLDER RESPONSIBILITIES
-
-## api/
-
-HTTP endpoints only.
-
-No business logic.
-
-No database logic.
-
-No AI.
-
----
-
-## services/
-
-Business logic only.
-
-Coordinates repositories and engines.
-
----
-
-## repositories/
-
-Database access only.
-
-No business logic.
-
-No AI.
-
----
-
-## database/
-
-Database session.
-
-Migrations.
-
-Base.
-
-Connection.
-
-Nothing else.
-
----
-
-## models/
-
-ORM models only.
-
----
-
-## schemas/
-
-Pydantic schemas only.
-
----
-
-## crawler/
-
-Website crawling.
-
-HTML download.
-
-No parsing.
-
-No AI.
-
----
-
-## email/
-
-Email discovery.
-
-Email validation.
-
-Email cleaning.
-
----
-
-## ai/
-
-AI Providers.
-
-Prompt templates.
-
-Gateway.
-
-Manager.
-
-Never crawl.
-
-Never scrape.
-
-Never access database.
-
----
-
-## engines/
-
-The intelligence layer.
-
-Contains:
-
-Discovery
-
-Research
-
-Compiler
-
-Intelligence
-
+Company Validation
+↓
 Ranking
-
-Each engine has ONE responsibility.
-
----
-
-# DISCOVERY ENGINE
-
-Purpose
-
-Find companies.
-
-Allowed
-
-Google Search
-
-Bing
-
-Directories
-
-Government websites
-
-Bid portals
-
-News
-
-Hiring
-
-Forbidden
-
-Lead Scoring
-
-AI Reasoning
-
-Database writes
-
----
-
-# RESEARCH ENGINE
-
-Purpose
-
-Research one company deeply.
-
-Collect
-
-Website
-
-Leadership
-
-Emails
-
-Phones
-
-Projects
-
-News
-
-Services
-
-Technology
-
-Hiring
-
-Output
-
-Structured Evidence
-
----
-
-# EVIDENCE COMPILER
-
-Python only.
-
-NO AI.
-
-Responsibilities
-
-Remove duplicates
-
-Normalize data
-
-Remove useless information
-
-Build structured JSON
-
-Prepare AI input
-
----
-
-# AI INTELLIGENCE ENGINE
-
-Input
-
-Structured Evidence
-
-Output
-
-Need Probability
-
-Confidence
-
-Reasoning
-
-Outreach Angle
-
-Summary
-
-AI NEVER performs crawling.
-
-AI NEVER performs scraping.
-
-AI NEVER invents data.
-
----
-
-# RANKING ENGINE
-
-Ranks leads.
-
-Chooses Top Leads.
-
-No crawling.
-
-No AI prompting.
-
----
-
-# DATABASE RULES
-
-Current Core Tables
-
-Company
-
-Leadership
-
-Research
-
-Evidence
-
-LeadIntelligence
-
-No additional tables without approval.
-
----
-
-# CODING STANDARDS
-
-Python 3.12+
-
-FastAPI
-
-SQLAlchemy 2.x
-
-Pydantic v2
-
-PostgreSQL
-
-Type hints everywhere
-
-Google Docstrings
-
-Black formatting
-
-Ruff compatible
-
-Structured logging
-
-No print()
-
-No TODO
-
-No placeholder code
-
-Production quality only.
-
----
-
-# IMPORT RULES
-
-Never use wildcard imports.
-
-Avoid circular imports.
-
-Prefer dependency injection.
-
-Keep modules loosely coupled.
-
----
-
-# ERROR HANDLING
-
-Raise meaningful exceptions.
-
-Never silently ignore errors.
-
-Always log unexpected failures.
-
----
-
-# TESTING RULES
-
-Every sprint must pass
-
-Syntax
-
-Imports
-
-API
-
-Database
-
-Basic integration
-
-before moving forward.
-
-No broken code allowed.
-
----
-
-# GIT RULES
-
-One Sprint
-
 ↓
+Results
 
-One Commit
-
-Commit Message Example
-
-Sprint 2.1 Company Discovery Completed
-
-Never mix multiple features into one commit.
+Do not bypass this pipeline.
 
 ---
 
-# SPRINT RULES
+## 3. Search Philosophy
 
-Claude implements ONLY the current sprint.
+LeadHunter Pro is NOT a Search API client.
 
-Never implement future sprint files.
+LeadHunter Pro is a REAL company discovery platform.
 
-Never create speculative code.
+Search APIs (Brave, SearXNG, Google CSE, Bing, etc.) are OPTIONAL discovery sources.
 
----
+They must NEVER become the core architecture.
 
-# PERFORMANCE RULES
-
-Optimize after correctness.
-
-Never prematurely optimize.
-
-Readable code is preferred.
+The discovery engine must continue working even if one provider disappears.
 
 ---
 
-# SECURITY RULES
+## 4. Architecture Rule
 
-Never hardcode secrets.
+Business Logic MUST NEVER depend on one provider.
 
-Always use environment variables.
+Correct:
 
-Validate every input.
+Discovery Engine
+↓
+Source Orchestrator
+↓
+Multiple Sources
+↓
+Crawler
+↓
+Extractor
+↓
+Results
 
-Never trust external data.
+Incorrect:
+
+Connector
+↓
+Brave API
+↓
+Results
+
+Every discovery source must be replaceable.
 
 ---
 
-# FINAL RULE
+## 5. Registry Rules
 
-If architecture and implementation conflict,
+If no search providers are registered:
 
-Architecture ALWAYS wins.
+DO NOT silently return fixtures.
 
-If sprint instructions conflict with CLAUDE.md,
+Always log:
 
-STOP and ask for clarification.
+NO SEARCH PROVIDERS REGISTERED
 
-Never guess.
+Also log WHY live discovery failed.
 
 ---
 
-END OF DOCUMENT
+## 6. Logging Standard
 
-This document is the Constitution of LeadHunter Pro.
+Every discovery execution MUST log:
 
-Every future sprint must follow it.
+- Providers Found
+- Provider Selected
+- Search Query
+- URLs Returned
+- Companies Crawled
+- Companies Accepted
+- Companies Rejected
+- Validation Results
+- Ranking Results
+- Fallback Reason
+
+Never log only "live=False".
+
+---
+
+## 7. Root Cause Policy
+
+Never fix symptoms first.
+
+Always identify:
+
+- Root Cause
+- Execution Path
+- Failure Point
+- Why It Happened
+- Permanent Fix
+
+Temporary fixes are not acceptable unless explicitly requested.
+
+---
+
+## 8. Search Provider Rule
+
+Search providers are infrastructure only.
+
+They DO NOT define discovery quality.
+
+Discovery quality comes from:
+
+- Search Strategy
+- Crawling
+- Extraction
+- Classification
+- Validation
+- Ranking
+
+NOT from Brave, SearXNG or any single provider.
+
+---
+
+## 9. Before Every Sprint
+
+Before writing production code, answer:
+
+1. What problem is being solved?
+2. Is this solving the root cause?
+3. Does this increase technical debt?
+4. Can the architecture be simplified?
+5. Does this move LeadHunter Pro closer to REAL company discovery?
+
+If the answer is NO,
+
+STOP.
+
+Review the architecture first.
+
+---
+
+## 10. Permanent Goal
+
+The Execute button must eventually perform REAL discovery.
+
+Target flow:
+
+Search Internet
+↓
+Find Companies
+↓
+Visit Websites
+↓
+Extract Company Information
+↓
+Extract Decision Makers
+↓
+Validate
+↓
+Rank
+↓
+Return Results
+
+It must NEVER become:
+
+Read Fixture JSON
+↓
+Return Cached Companies
+
+Fixtures exist only as an emergency bridge.
+
+---
+
+## 11. Founder Rule (Highest Priority)
+
+Whenever multiple implementation paths exist:
+
+Choose the solution that makes LeadHunter Pro a long-term production-grade company discovery platform.
+
+Never choose the easiest implementation if it weakens the architecture.
+
+If an architectural decision is uncertain:
+
+STOP implementation.
+
+Explain the trade-offs.
+
+Wait for approval before writing production code.
+
+---
+
+## 12. Never Repeat These Mistakes
+
+The following issues have already occurred and must never happen again:
+
+- Wrong module imports
+- Hidden fallback to fixtures
+- Fake or placeholder (.example.com) domains
+- Empty provider registry without clear diagnostics
+- Silent fallback to cached data
+- JSON corruption in production fixtures
+- Hardcoded connector dependencies
+- Provider-centric architecture
+- Fake "live" mode
+- Returning synthetic companies as production results
+
+Any future implementation must prevent these issues by design.s
+
+# Never implement more than one migration phase at a time.
+
+After each completed phase:
+
+- stop automatically
+- summarize work
+- report changed files
+- report test status
+- wait for user approval
+
+Never continue to the next phase without explicit approval.
+
+## 13. Git Safety Rule
+
+Claude must NEVER:
+
+- reset
+- restore
+- checkout
+- revert
+- clean
+- force push
+- delete commits
+
+unless the user explicitly approves.
+
+Before any destructive Git action:
+
+1. Explain the impact.
+2. Explain what will be lost.
+3. Wait for approval.
+
+Never assume rollback is safe.
+
+## 14. Production Code Rule
+
+Before creating any new module, class, service, or abstraction:
+
+1. Search the repository for existing implementations.
+2. Reuse existing production code whenever possible.
+3. Do not duplicate functionality.
+4. If duplication is unavoidable, explain why.
+
+Existing production code is always preferred over creating new code.
+
+## 15. Engineering Audit Rule
+
+Whenever a major architectural change is proposed:
+
+Do NOT implement immediately.
+
+First produce:
+
+- Root cause analysis
+- Existing reusable components
+- Duplicate components
+- Dead code
+- Migration strategy
+- Risks
+- Rollback strategy
+
+# 16. Implementation begins only after explicit approval.
+
+# Manual Verification Mode (Permanent Rule)
+
+When Bash / PowerShell execution is unavailable or the safety classifier blocks command execution:
+
+## 1. STOP immediately
+- Never retry the same command.
+- Never attempt another Bash command.
+- Never continue implementation.
+
+## 2. Send a Verification Card instead of plain text
+
+Every verification step MUST be presented in this format:
+
+====================================
+PHASE X.X — STEP N/TOTAL
+====================================
+
+Purpose:
+<one sentence explaining why this test matters>
+
+Command:
+<exact command to run>
+
+Expected PASS:
+<what success looks like>
+
+Paste Result Below:
+--------------------------------
+<paste terminal output here>
+--------------------------------
+
+Status:
+WAITING FOR USER
+
+Do not continue until the user provides the result.
+
+## 3. Sequential verification
+
+Only ONE verification step may be active.
+
+Never send Step N+1 before Step N has been verified.
+
+After receiving the user's result:
+
+- Analyze it.
+- Explain PASS / FAIL.
+- If FAIL:
+  - Explain the root cause.
+  - Fix only the proven issue.
+  - Generate ONE new verification card.
+- If PASS:
+  - Mark the step complete.
+  - Generate the next verification card.
+
+## 4. Never restart the verification session
+
+Maintain one continuous checklist throughout the conversation.
+
+Example:
+
+✅ Step 1 — Import Check
+⬜ Step 2 — Plugin Tests
+⬜ Step 3 — Discovery Tests
+⬜ Step 4 — Connector Tests
+⬜ Step 5 — Ruff
+⬜ Step 6 — Smoke Test
+
+Only update this checklist.
+
+Never create a new verification session.
+
+## 5. Bash failure rule
+
+If Bash/classifier is unavailable:
+
+DO NOT retry.
+
+Immediately generate the Verification Card for manual execution.
+
+Wait.
+
+## 6. No implementation while verification is pending
+
+Until the current verification step is confirmed PASS:
+
+- Do not implement new code.
+- Do not refactor.
+- Do not continue to the next phase.
+- Do not claim verification without evidence.
+
+## 7. Proof Requirement (Permanent)
+
+Every implementation must include:
+
+- Files created
+- Files modified
+- Why each file exists
+- Architecture impact
+- Assumptions made
+- Deviations from existing architecture
+- Manual verification commands
+- Verification checklist
+- WAIT FOR USER
+
+Implementation is never considered complete until all verification steps are confirmed.

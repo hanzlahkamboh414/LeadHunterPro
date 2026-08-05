@@ -67,6 +67,8 @@ def clean_companies(
             country=company.country,
             source=company.source,
             confidence=company.confidence,
+            source_url=company.source_url,
+            discovery_reason=company.discovery_reason,
         )
         cleaned.append(normalized)
         metrics.total_cleaned += 1

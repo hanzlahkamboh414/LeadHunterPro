@@ -71,6 +71,8 @@ def validate_companies(
             country=company.country,
             source=company.source,
             confidence=min(company.confidence + 0.15, 1.0),
+            source_url=company.source_url,
+            discovery_reason=company.discovery_reason,
         )
         valid.append(company)
         metrics.total_validated += 1

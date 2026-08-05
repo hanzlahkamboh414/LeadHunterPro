@@ -9,6 +9,7 @@ Components:
     - ConnectorConfig: Configuration container
     - BaseConnector: Abstract base class
     - ConnectorRegistry: Singleton registry for all connectors
+    - get_connector / list_connectors: Convenience accessors
 """
 
 from __future__ import annotations
@@ -182,6 +183,7 @@ class ConnectorRegistry:
     """Singleton registry for all connectors."""
 
     _connectors: dict[str, BaseConnector] = {}
+    _builtins_registered: bool = False
 
     @classmethod
     def register(cls, connector: BaseConnector) -> None:
@@ -204,6 +206,75 @@ class ConnectorRegistry:
         """Return names of all registered connectors."""
         return list(cls._connectors.keys())
 
+    @classmethod
+    def clear(cls) -> None:
+        """Clear all registered connectors (for testing).
+
+        .. note:: Do not call in production code.
+        """
+        cls._connectors.clear()
+        # Re-register builtins after clear so tests start with defaults
+        cls._builtins_registered = False
+        _register_builtin_connectors()
+
+
+# Backward-compatibility alias
+ConstructionSourceRegistry = ConnectorRegistry  # type: ignore[assignment,misc]
+
+
+# ---------------------------------------------------------------------------
+# Convenience functions
+# ---------------------------------------------------------------------------
+
+
+def get_connector(name: str) -> BaseConnector | None:
+    """Convenience function to look up a connector by name.
+
+    Args:
+        name: Connector identifier.
+
+    Returns:
+        The connector instance, or None if not found.
+    """
+    return ConnectorRegistry.get(name)
+
+
+def list_connectors() -> list[dict[str, str]]:
+    """Return a summary of all registered connectors.
+
+    Returns:
+        List of dicts with 'name' and 'description' keys.
+    """
+    return [
+        {"name": c.name, "description": c.description}
+        for c in ConnectorRegistry.list_all()
+    ]
+
 
 # Register built-in connectors here
 # ConnectorRegistry.register(MyNewConnector())
+
+
+# ---------------------------------------------------------------------------
+# Built-in connector registration
+# ---------------------------------------------------------------------------
+# These are imported lazily to avoid circular dependencies.
+# texas_procurement imports from base.py, so we register explicitly here.
+
+
+def _register_builtin_connectors() -> None:
+    """Register all built-in connectors at module load time."""
+    from app.engines.source_connectors.texas_procurement import (  # noqa: PLC0415
+        TexasProcurementConnector,
+    )
+    from app.engines.source_connectors.agc_texas import AgcTexasConnector  # noqa: PLC0415
+
+    # Only register if not already present
+    if "texas_procurement" not in ConnectorRegistry._connectors:
+        ConnectorRegistry.register(TexasProcurementConnector())
+    if "agc_texas" not in ConnectorRegistry._connectors:
+        ConnectorRegistry.register(AgcTexasConnector())
+
+
+# Trigger registration immediately
+_register_builtin_connectors()

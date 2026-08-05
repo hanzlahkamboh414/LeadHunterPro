@@ -35,6 +35,10 @@ class Settings(BaseSettings):
 
     OPENAI_MODEL: str = "gpt-5.5"
 
+    # Search Provider Configuration
+    SEARXNG_URL: str = ""  # Self-hosted SearXNG instance URL
+    BRAVE_SEARCH_API_KEY: str = ""  # Brave Search API key (optional)
+
     model_config = SettingsConfigDict(
         env_file=_ENV_PATH,
         env_file_encoding="utf-8",

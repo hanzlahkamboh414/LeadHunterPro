@@ -1,0 +1,251 @@
+# Unit 8 Pre-Implementation Review: Direct Website Discovery Plugin
+# LeadHunterPro — Sprint 2.3A
+# Following PROJECT_DEVELOPMENT_RULES.md and Unit 8 Specification
+
+---
+
+## 1. Unit Name
+**Sprint 2.3A — Unit 8: Direct Website Discovery Plugin**
+
+## 2. Objective
+Implement the production-ready `DirectWebsiteDiscoveryPlugin` that connects the infrastructure from Units 1–7 into a working Direct Website Discovery Plugin. The plugin integrates with the existing Plugin Framework and executes the complete discovery pipeline: candidate generation → deduplication → crawling → parsing → extraction → evidence collection → confidence calculation → company assembly.
+
+## 3. Why This Unit Exists
+Units 1–7 built the complete infrastructure layer (URL normalization, deduplication, confidence, evidence, extractor interfaces, candidate generator interface, config view). Unit 8 is the **capstone implementation** that wires this infrastructure into a production plugin conforming to `BaseDiscoveryPlugin`. Without Unit 8, the infrastructure is inert — no plugin exists to execute the pipeline.
+
+## 4. Architecture Placement
+```
+SourceOrchestrator (priority 40)
+    ↓
+PluginSource (capability=COMPANY_DISCOVERY)
+    ↓
+PluginManager.discover_all()
+    ↓
+DirectWebsiteDiscoveryPlugin (BaseDiscoveryPlugin)
+    ↓
+    ├── PluginConfigView → typed config access
+    ├── CandidateGenerator (e.g., BraveSearchGenerator) → list[Candidate]
+    ├── DuplicateURLFilter → deduplicated candidates
+    ├── HTTPCrawler → CrawlResponse
+    ├── HTMLParser → ParsedPage (PageContent protocol)
+    ├── FieldExtractor implementations (7) → list[ExtractionResult]
+    ├── EvidenceSet + FieldEvidence → provenance tracking
+    ├── Confidence calculation → per-field confidence
+    └── Company Assembly → list[dict] for SourceOrchestrator
+```
+
+**Dependencies (All Frozen — Verified):**
+- Unit 1: `normalize_url`, `canonical_key`, `extract_host`
+- Unit 2: `DuplicateURLFilter`
+- Unit 3: `Confidence`
+- Unit 4: `ExtractionResult`, `FieldEvidence`, `EvidenceSet`
+- Unit 5: `PageContent` Protocol, `ExtractionResult`, 7 `FieldExtractor` interfaces
+- Unit 6: `Candidate`, `CandidateGenerator` (ABC)
+- Unit 7: `PluginConfigView`, `make_config_view`
+- Framework: `BaseDiscoveryPlugin`, `PluginManager`, `PluginSource`, `SourceOrchestrator`
+- Crawlers: `HTTPCrawler`, `HTMLParser`, `RobotsManager`
+
+**No new dependencies. No frozen unit modifications.**
+
+## 5. Dependency Verification Table
+
+| Dependency | Source File | Status | How Unit 8 Uses It |
+|------------|-------------|--------|-------------------|
+| `BaseDiscoveryPlugin` | `app/discovery/plugins/base_plugin.py:122` | ✅ Exists | Parent class for `DirectWebsiteDiscoveryPlugin` |
+| `PluginConfigView`, `make_config_view` | `app/discovery/website/plugin_config_view.py:15,63` | ✅ Exists | Typed config access via `config.options` |
+| `CandidateGenerator`, `Candidate` | `app/discovery/website/candidates.py:63,188` | ✅ Exists | Generate website candidates from industry+location |
+| `DuplicateURLFilter` | `app/discovery/website/url_filter.py` | ✅ Exists | Deduplicate candidate URLs |
+| `HTTPCrawler` | `app/crawlers/http_crawler.py:37` | ✅ Exists | Async website crawling with robots/rate-limit |
+| `HTMLParser`, `ParsedPage` | `app/crawlers/html_parser.py:35,78` | ✅ Exists | Parse HTML → `PageContent` protocol |
+| `FieldExtractor` interfaces (7) | `app/discovery/website/extractors.py:153,222-317` | ✅ Exists | Extract fields from parsed pages |
+| `ExtractionResult`, `FieldEvidence`, `EvidenceSet` | `app/discovery/website/evidence.py` | ✅ Exists | Evidence collection and provenance |
+| `Confidence` | `app/discovery/website/confidence.py` | ✅ Exists | Per-field confidence scoring |
+| `BaseDiscoveryPlugin` | `app/discovery/plugins/base_plugin.py:122` | ✅ Exists | Parent contract: `discover(industry, location, limit)` |
+| `PluginManager` | `app/discovery/plugins/plugin_manager.py:104` | ✅ Exists | Called by `PluginSource` |
+| `PluginSource` | `app/discovery/sources/plugin_source.py:72` | ✅ Exists | Adapter to `SourceOrchestrator` |
+| `SourceOrchestrator` | `app/discovery/source_orchestrator.py:37` | ✅ Exists | Pipeline entry point |
+| `SourceStatus` | `app/discovery/sources/status.py:13` | ✅ Exists | Return status values |
+
+**All dependencies verified and exist. No missing dependencies.**
+
+## 6. Files to Create
+
+| Path | Purpose | Estimated LOC |
+|------|---------|---------------|
+| `backend/app/discovery/plugins/direct_website_discovery.py` | Main plugin + config dataclasses + generator adapter + extractor implementations | 300–400 |
+| `backend/tests/discovery/plugins/test_direct_website_discovery.py` | Unit + integration tests (mocked HTTP) | 200–300 |
+
+**Total: ~500–700 LOC** — within acceptable limits (Rule 7: <500 preferred, <500 acceptable with justification; plugin orchestrates 7+ components).
+
+## 7. Files to Modify
+
+| Path | Change |
+|------|--------|
+| `backend/app/discovery/plugins/__init__.py` | Add import and register `DirectWebsiteDiscoveryPlugin` (additive only) |
+
+## 8. Files That MUST Remain Untouched (Rule 4, Spec §4)
+
+**Units 1–7 (All Frozen):**
+- `app/discovery/website/url_normalizer.py` (Unit 1)
+- `app/discovery/website/url_filter.py` (Unit 2)
+- `app/discovery/website/confidence.py` (Unit 3)
+- `app/discovery/website/evidence.py` (Unit 4)
+- `app/discovery/website/extractors.py` (Unit 5)
+- `app/discovery/website/candidates.py` (Unit 6)
+- `app/discovery/website/plugin_config_view.py` (Unit 7)
+- All corresponding test files
+
+**Framework (Frozen):**
+- `app/discovery/plugins/base_plugin.py`
+- `app/discovery/plugins/plugin_manager.py`
+- `app/discovery/plugins/plugin_config.py`
+- `app/discovery/plugins/plugin_registry.py`
+- `app/discovery/sources/plugin_source.py`
+- `app/discovery/source_orchestrator.py`
+- `app/discovery/sources/status.py`
+
+**Crawlers (Frozen):**
+- `app/crawlers/http_crawler.py`
+- `app/crawlers/html_parser.py`
+- `app/crawlers/robots.py`
+- All crawler components
+
+**No modifications to any frozen unit permitted (Spec §4, §9, Rule 4).**
+
+## 9. Public API Additions (Spec §11)
+
+**Only:** `DirectWebsiteDiscoveryPlugin` class (internal to plugin module)
+**Exported via:** `app/discovery/plugins/__init__.py` registration only
+**No extra public helper classes.** Internal helpers remain private (Spec §11).
+
+## 10. Backward Compatibility Impact (Rule 12)
+
+**Zero Breaking Changes:**
+- Additive plugin registration only
+- No frozen unit modifications
+- No public API changes to existing units
+- `BaseDiscoveryPlugin` contract unchanged
+- `PluginSource`/`PluginManager`/`SourceOrchestrator` unchanged
+- All existing tests must pass unchanged
+
+## 11. Expected Test Plan (Spec §13)
+
+**Test File:** `backend/tests/discovery/plugins/test_direct_website_discovery.py`
+
+| Test Category | Test Cases |
+|---------------|------------|
+| Plugin Registration | Plugin registers with `PluginRegistry`; `PluginSource` attaches correctly |
+| Configuration Loading | `PluginConfigView` access via `config.options`; required keys raise; defaults work |
+| Candidate Pipeline | `CandidateGenerator` produces `Candidate` list; `DuplicateURLFilter` deduplicates |
+| Duplicate Filtering | Same URL (different schemes/www) → single candidate; `key` property used |
+| Crawler Integration (Mocked) | `HTTPCrawler` called with correct URLs; robots/rate-limit respected |
+| Parser Integration (Mocked) | `HTMLParser.parse()` → `ParsedPage` matching `PageContent` protocol |
+| Extractor Execution | All 7 extractors called; return `list[ExtractionResult]` with `FieldEvidence` |
+| Evidence Aggregation | `EvidenceSet` collects all `FieldEvidence`; per-field provenance tracked |
+| Confidence Calculation | Per-field confidence aggregated; overall company confidence computed |
+| Final Company Assembly | Company dicts with: name, website, city, state, source, confidence, source_url, discovery_reason |
+| Failure Handling | Crawler failures logged; remaining candidates processed; `SourceStatus` correct |
+| Metadata Generation | Metadata includes: candidates_generated, filtered, crawled, extracted, errors |
+
+**Regression Tests:** `python -m pytest tests/discovery/website/ tests/discovery/plugins/ -q` — all Units 1–7 + Unit 8 tests pass.
+
+## 12. Regression Plan (Rule 14)
+
+```bash
+cd backend
+# 1. Unit 8 tests only
+python -m pytest tests/discovery/plugins/test_direct_website_discovery.py -q
+
+# 2. Full Units 1–8 regression
+python -m pytest tests/discovery/website/ tests/discovery/plugins/ -q
+# Expected: All pass (Units 1-7: ~374 + Unit 8: ~50 = ~424)
+
+# 3. Plugin framework regression
+python -m pytest tests/discovery/test_plugin_framework.py -q
+
+# 4. Full discovery pipeline
+python -m pytest tests/discovery/ -q
+
+# 5. Ruff on changed files
+python -m ruff check app/discovery/plugins/direct_website_discovery.py tests/discovery/plugins/test_direct_website_discovery.py app/discovery/plugins/__init__.py
+
+# 6. Public API check
+python -c "from app.discovery.plugins import DirectWebsiteDiscoveryPlugin; print('OK')"
+```
+
+## 13. Ruff Plan
+
+```bash
+cd backend
+python -m ruff check app/discovery/plugins/direct_website_discovery.py tests/discovery/plugins/test_direct_website_discovery.py app/discovery/plugins/__init__.py
+```
+**Expected:** All checks passed (exit 0).
+
+## 14. Risks
+
+| Risk | Severity | Mitigation |
+|------|----------|------------|
+| **No concrete `CandidateGenerator` exists** (Unit 6 ships ABC only) | Critical | Implement `BraveSearchGenerator` adapter inside Unit 8 using existing `BraveSearchProvider` logic |
+| **No `FieldExtractor` implementations exist** (Unit 5 ships interfaces only) | Critical | Implement all 7 extractors inside Unit 8 as private classes |
+| **Sync plugin with async crawler** | High | Use `asyncio.run()` or `asyncio.get_event_loop().run_until_complete()` for `HTTPCrawler` calls; keep plugin `discover()` synchronous per `BaseDiscoveryPlugin` contract |
+| **Extractor implementations quality** | Medium | Start with regex/heuristic implementations; AI extraction deferred to 2.3B |
+| **Crawler failures stopping pipeline** | Medium | Spec §12: continue processing remaining candidates; log failures in metadata |
+| **Circular import risk** | Low | Unit 8 imports only allowed dependencies; no Units 1–7 import Unit 8 |
+| **Configuration via `PluginConfigView` only** | Low | Enforced by code review; no direct `config.options` access |
+
+## 15. Ambiguities & Questions
+
+| # | Ambiguity | Resolution Needed |
+|---|-----------|-------------------|
+| 1 | **Plugin name** — Spec line 125: `DFbYeRs2NDmaT1pcTMNzQmtrvhURGhLmg3` appears to be a placeholder/garbled string | Confirm actual plugin name (e.g., `"direct_website_discovery"`) |
+| 2 | **Plugin capabilities** — Spec §5 says "ONE production plugin" but doesn't specify which `PluginCapability` values | Confirm capabilities: at minimum `COMPANY_DISCOVERY`; likely also `WEBSITE_DISCOVERY` |
+| 3 | **Default generators** — Spec doesn't specify which `CandidateGenerator` implementations to include by default | Confirm: `BraveSearchGenerator` (primary), others optional? |
+| 3 | **Extractor implementations scope** — Spec §15 says "new extractors" out of scope, but Unit 5 has only interfaces | Clarify: Unit 8 MUST implement extractors (they don't exist elsewhere) or defer? |
+| 4 | **Confidence calculation** — Spec §6 step "Confidence Calculation" but no formula specified | Define: How to aggregate per-field `Confidence` into company-level confidence? |
+| 5 | **Company dict schema** — Spec §6 "Company Assembly" but exact dict keys not specified | Align with `SourceOrchestrator` expectation: `company_name`, `website`, `city`, `state`, `country`, `source`, `confidence`, `source_url`, `discovery_reason` |
+| 6 | **Error handling granularity** — Spec §12 "continue processing remaining candidates when possible" | Define: Which exceptions continue vs abort? |
+
+## 16. Acceptance Criteria (Spec §14)
+
+| # | Criterion | Verification |
+|---|-----------|--------------|
+| 1 | Plugin compiles | `python -c "from app.discovery.plugins import DirectWebsiteDiscoveryPlugin"` |
+| 2 | Plugin registers correctly | `PluginRegistry.get("direct_website_discovery")` returns instance |
+| 3 | All existing tests pass | `pytest tests/discovery/website/ tests/discovery/plugins/ -q` → all pass |
+| 4 | New tests pass | `pytest tests/discovery/plugins/test_direct_website_discovery.py -q` → all pass |
+| 5 | Ruff passes | `ruff check app/discovery/plugins/direct_website_discovery.py tests/discovery/plugins/test_direct_website_discovery.py app/discovery/plugins/__init__.py` |
+| 6 | Public API unchanged | No exports removed/renamed from Units 1–7 |
+| 7 | No frozen unit modified | `git diff` shows only new files + `__init__.py` registration |
+| 8 | No architecture violation | Dependency graph respects frozen boundaries |
+
+## 17. Estimated Implementation Scope
+
+| Component | Effort | Notes |
+|-----------|--------|-------|
+| `BraveSearchGenerator` (CandidateGenerator) | High | Adapt from `app/search_providers/brave.py:BraveSearchProvider` |
+| 7 `FieldExtractor` implementations | High | Regex/heuristic extraction from `PageContent` fields |
+| `DirectWebsiteDiscoveryPlugin` orchestrator | Medium | Pipeline wiring, config, error handling |
+| Config dataclasses (`BraveSearchConfig`, etc.) | Low | `PluginConfigView` pattern from Unit 7 |
+| Tests (mocked HTTP) | Medium | `pytest` + `unittest.mock` for crawler/parser |
+| **Total** | **~2–3 weeks** | Parallelizable: generators + extractors independent |
+
+**File count:** 2 new files + 1 modified
+**Test count estimate:** 50–60 tests
+
+## 18. Questions Requiring Clarification Before Implementation
+
+1. **Plugin name:** Is `DFbYeRs2NDmaT1pcTMNzQmtrvhURGhLmg3` a placeholder? What is the actual name?
+2. **Capabilities:** Which `PluginCapability` values? `COMPANY_DISCOVERY` + `WEBSITE_DISCOVERY`?
+3. **Default generators:** Only `BraveSearchGenerator` or also `SearXNGGenerator`, `DirectoryGenerator`?
+4. **Extractor implementations:** Confirmed — Unit 8 implements all 7?
+5. **Confidence aggregation formula:** How to combine per-field `Confidence` into company confidence?
+6. **Company dict keys:** Exact schema for returned dicts?
+7. **Sync/async boundary:** `discover()` is sync; `HTTPCrawler` is async — confirmed `asyncio.run()` pattern acceptable?
+
+---
+
+**READY FOR PRE-IMPLEMENTATION APPROVAL**
+
+**Blocking:** Questions 1–3 must be resolved before implementation starts. Questions 4–7 can be resolved during implementation with reasonable defaults documented.
+
+**Next Step:** Await clarification on Questions 1–3, then explicit approval to implement.

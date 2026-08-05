@@ -1,9 +1,10 @@
 from urllib.parse import urljoin
-from app.discovery.result_cleaner import ResultCleaner
+
 import requests
 from bs4 import BeautifulSoup
 
 from app.discovery.people_parser import PeopleParser
+from app.discovery.result_cleaner import ResultCleaner
 
 
 class LeadershipDiscovery:
@@ -24,6 +25,7 @@ class LeadershipDiscovery:
 
         self.people_parser = PeopleParser()
         self.cleaner = ResultCleaner()
+
     def discover(
         self,
         website: str,
@@ -43,9 +45,7 @@ class LeadershipDiscovery:
                 response = requests.get(
                     url,
                     timeout=10,
-                    headers={
-                        "User-Agent": "Mozilla/5.0"
-                    },
+                    headers={"User-Agent": "Mozilla/5.0"},
                     allow_redirects=True,
                 )
 

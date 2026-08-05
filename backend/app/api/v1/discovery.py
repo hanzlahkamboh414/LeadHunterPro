@@ -50,10 +50,7 @@ def discover_companies(
     db: Session = Depends(get_db),
 ) -> Any:
     """Discover companies from public web sources."""
-    results, metrics, diagnostic = engine.discover(
+    results, metrics = engine.discover(
         industry=industry, location=location, limit=limit
     )
-    if diagnostic is not None:
-        # Return structured diagnostic instead of empty list
-        return diagnostic.to_dict()
     return results

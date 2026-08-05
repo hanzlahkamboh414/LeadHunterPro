@@ -9,6 +9,7 @@ import pytest
 
 from app.discovery.sources.fixture_source import FixtureSource
 from app.discovery.sources.search_provider_source import SearchProviderSource
+from app.discovery.sources.status import SourceStatus
 from app.search_providers.registry import clear_registry, get_registry
 
 logger = logging.getLogger(__name__)
@@ -33,18 +34,19 @@ class TestFixtureSource:
     def test_discover_returns_companies(self):
         """discover() returns matching companies from fixture."""
         source = FixtureSource()
-        companies, meta = source.discover(
+        status, companies, meta = source.discover(
             industry="Roofing", location="Dallas Texas", limit=5
         )
         assert isinstance(companies, list)
         assert len(companies) <= 5
+        assert status == SourceStatus.SUCCESS
         assert meta["data_source"] == "fixture"
         assert meta["temporary"] is True
 
     def test_discover_state_filter(self):
         """State filter works correctly."""
         source = FixtureSource()
-        companies, _ = source.discover(
+        _, companies, _ = source.discover(
             industry="Roofing", location="Houston Texas", limit=20
         )
         # All returned should be TX
@@ -53,7 +55,7 @@ class TestFixtureSource:
     def test_discover_limit_respected(self):
         """Limit parameter truncates output."""
         source = FixtureSource()
-        companies, _ = source.discover(
+        _, companies, _ = source.discover(
             industry="General Contractor", location="TX", limit=3
         )
         assert len(companies) <= 3
@@ -62,8 +64,9 @@ class TestFixtureSource:
         """When fixture file is missing, discover returns empty gracefully."""
         bad_path = tmp_path / "nonexistent.json"
         source = FixtureSource(fixture_path=bad_path)
-        companies, meta = source.discover(industry="Roofing", location="TX", limit=5)
+        status, companies, meta = source.discover(industry="Roofing", location="TX", limit=5)
         assert companies == []
+        assert status == SourceStatus.EMPTY
         assert meta["data_source"] == "missing"
 
     def test_health_check(self):
@@ -92,10 +95,11 @@ class TestSearchProviderSource:
     def test_no_providers_returns_empty(self):
         """With no providers registered, returns empty without crashing."""
         source = SearchProviderSource()
-        companies, meta = source.discover(
+        status, companies, meta = source.discover(
             industry="Roofing", location="Dallas Texas", limit=10
         )
         assert companies == []
+        assert status.value == "empty"
         assert meta["error"] == "no_providers_configured"
 
     def test_attributes_set(self):
@@ -149,9 +153,10 @@ class TestSearchProviderSource:
         reg.register(MockProvider())
 
         source = SearchProviderSource()
-        companies, meta = source.discover(
+        status, companies, meta = source.discover(
             industry="Roofing", location="Dallas Texas", limit=5
         )
+        assert status.value == "success"
         assert len(companies) >= 1
         assert companies[0]["company_name"] == "Mock Roofing Co"
         assert companies[0]["website"] == "https://mockroofing.com"
@@ -183,7 +188,7 @@ class TestSearchProviderSource:
         reg.register(FailingProvider())
 
         source = SearchProviderSource()
-        companies, meta = source.discover(
+        status, companies, meta = source.discover(
             industry="Roofing", location="Dallas Texas", limit=5
         )
         assert companies == []
@@ -226,7 +231,7 @@ class TestSearchProviderSource:
         reg.register(EmptyProvider())
 
         source = SearchProviderSource()
-        companies, _ = source.discover(
+        _, companies, _ = source.discover(
             industry="Roofing", location="Austin Texas", limit=5
         )
         assert len(companies) == 1

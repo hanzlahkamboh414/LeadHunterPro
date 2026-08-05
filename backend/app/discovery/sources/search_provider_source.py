@@ -12,6 +12,7 @@ import logging
 from typing import Any
 
 from app.discovery.sources.base_source import BaseSource
+from app.discovery.sources.status import SourceStatus
 from app.search_providers.manager import SearchProviderManager
 from app.search_providers.models import SearchQuery
 
@@ -70,7 +71,7 @@ class SearchProviderSource(BaseSource):
                 "SearchProviderSource: no providers registered "
                 "(SEARXNG_URL and BRAVE_SEARCH_API_KEY not set)"
             )
-            return [], {
+            return SourceStatus.EMPTY, [], {
                 "source": self.source_name,
                 "error": "no_providers_configured",
                 "providers_available": [],
@@ -93,7 +94,7 @@ class SearchProviderSource(BaseSource):
             response = asyncio.run(self._manager.search(query))
         except Exception as exc:  # noqa: BLE001
             logger.error("SearchProviderSource: search exception: %s", exc)
-            return [], {
+            return SourceStatus.ERROR, [], {
                 "source": self.source_name,
                 "error": str(exc),
                 "providers_tried": [p.provider_name for p in enabled],
@@ -109,7 +110,7 @@ class SearchProviderSource(BaseSource):
         if not response.results:
             reason = response.error or "no_results"
             logger.debug("SearchProviderSource: no results — %s", reason)
-            return [], {
+            return SourceStatus.EMPTY, [], {
                 "source": self.source_name,
                 "status": response.status,
                 "error": reason,
@@ -135,7 +136,7 @@ class SearchProviderSource(BaseSource):
                 }
             )
 
-        return companies, {
+        return SourceStatus.SUCCESS, companies, {
             "source": self.source_name,
             "status": response.status,
             "results_count": len(companies),

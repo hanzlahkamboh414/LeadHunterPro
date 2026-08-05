@@ -121,12 +121,13 @@ class TexasProcurementConnector(BaseConnector):
         """Execute discovery following production pipeline.
 
         Uses SourceOrchestrator which:
-        1. Tries SearchProviderSource (live web search) first
-        2. Falls back to FixtureSource when no providers are configured
+        1. Runs registered discovery plugins first (when any are registered)
+        2. Tries SearchProviderSource (live web search) next
+        3. Falls back to FixtureSource when no providers are configured
            or all fail
-        3. Aggregates, deduplicates, and classifies results
-        4. Applies industry expansion matching
-        5. Validates URLs and ranks by confidence
+        4. Aggregates, deduplicates, and classifies results
+        5. Applies industry expansion matching
+        6. Validates URLs and ranks by confidence
 
         Args:
             industry: Industry search term (e.g. "Roofing").
@@ -143,12 +144,22 @@ class TexasProcurementConnector(BaseConnector):
             limit,
         )
 
-        # Step 1: Run SourceOrchestrator (live search + fixture fallback)
+        # Step 1: Run SourceOrchestrator (plugins + live search + fixture fallback)
+        from app.discovery.plugins.base_plugin import PluginCapability
         from app.discovery.source_orchestrator import SourceOrchestrator
         from app.discovery.sources.fixture_source import FixtureSource
+        from app.discovery.sources.plugin_source import attach_plugin_source
         from app.discovery.sources.search_provider_source import SearchProviderSource
 
         orchestrator = SourceOrchestrator()
+        # Plugin framework, attached only when a company-discovery plugin is
+        # registered. With an empty registry this is a logged no-op and the
+        # pipeline below is unchanged. COMPANY_DISCOVERY is passed explicitly
+        # so a future leadership/email plugin cannot leak into this stage.
+        attach_plugin_source(
+            orchestrator,
+            capability=PluginCapability.COMPANY_DISCOVERY,
+        )
         orchestrator.register(SearchProviderSource())
         orchestrator.register(FixtureSource())
         companies, orch_metadata = orchestrator.discover(

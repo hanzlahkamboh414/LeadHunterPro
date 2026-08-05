@@ -1,0 +1,13 @@
+{
+        "company_name": "Lone Star Roofing Solutions",
+        "website": "https://www.lonestarroofing.example.com",
+        "city": "Dallas",
+        "state": "TX",
+        "country": "USA",
+        "source_url": "https://www.lonestarroofing.example.com/about",
+        "industry_focus": "Residential and commercial roofing, shingle replacement, TPO installation",
+        "revenue_tier": "mid-market",
+        "trade_category": "roofing",
+        "data_provenance": "county_bid_record",
+        "verified": True,
+    }

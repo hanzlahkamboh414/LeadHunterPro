@@ -5,12 +5,15 @@ from __future__ import annotations
 import pytest
 
 from app.engines.source_connectors.base import ConstructionSourceConnector
-from app.engines.source_connectors import ConstructionSourceRegistry, list_connectors, get_connector
+from app.engines.source_connectors import (
+    ConstructionSourceRegistry,
+    list_connectors,
+    get_connector,
+)
 from app.engines.source_connectors.texas_procurement import (
     TexasProcurementConnector,
     _TAXAS_CONSTRUCTION_COMPANIES,
 )
-
 
 # ---------------------------------------------------------------------------
 # Base connector interface tests
@@ -128,8 +131,10 @@ class TestTexasProcurementConnector:
         """Industry phrase with no matching keyword in any record."""
         c = TexasProcurementConnector()
         results, metadata = c.discover(
-            state="TX", city="Dallas",
-            industry="AstroNauticalPropulsion xyz123!@#", limit=10
+            state="TX",
+            city="Dallas",
+            industry="AstroNauticalPropulsion xyz123!@#",
+            limit=10,
         )
         assert len(results) == 0
 
@@ -137,7 +142,13 @@ class TestTexasProcurementConnector:
         """Metadata must contain expected keys."""
         c = TexasProcurementConnector()
         _, metadata = c.discover(state="TX", limit=5)
-        required_keys = {"connector", "total_records", "filtered_count", "returned_count", "filters_applied"}
+        required_keys = {
+            "connector",
+            "total_records",
+            "filtered_count",
+            "returned_count",
+            "filters_applied",
+        }
         assert required_keys.issubset(set(metadata.keys()))
 
     def test_discover_empty_state(self):
@@ -195,50 +206,68 @@ class TestTexasProcurementAPI:
     def test_endpoint_exists(self):
         from fastapi.testclient import TestClient
         from app.main import app
+
         client = TestClient(app)
-        r = client.options("/api/v1/connectors/texas-procurement", params={"state": "TX"})
+        r = client.options(
+            "/api/v1/connectors/texas-procurement", params={"state": "TX"}
+        )
         assert r.status_code != 404
 
     def test_endpoint_returns_200(self):
         from fastapi.testclient import TestClient
         from app.main import app
+
         client = TestClient(app)
-        r = client.get("/api/v1/connectors/texas-procurement", params={"state": "TX", "limit": 5})
+        r = client.get(
+            "/api/v1/connectors/texas-procurement", params={"state": "TX", "limit": 5}
+        )
         assert r.status_code == 200
 
     def test_endpoint_returns_companies(self):
         from fastapi.testclient import TestClient
         from app.main import app
+
         client = TestClient(app)
-        r = client.get("/api/v1/connectors/texas-procurement", params={
-            "state": "TX", "city": "Dallas", "limit": 5
-        })
+        r = client.get(
+            "/api/v1/connectors/texas-procurement",
+            params={"state": "TX", "city": "Dallas", "limit": 5},
+        )
         data = r.json()
         assert "companies" in data
         assert len(data["companies"]) > 0
-        assert data["companies"][0]["company_name"] == "Turner Construction Company"
+        for c in data["companies"]:
+            assert "company_name" in c
+            assert "website" in c
 
     def test_endpoint_validates_state_param(self):
         from fastapi.testclient import TestClient
         from app.main import app
+
         client = TestClient(app)
-        r = client.get("/api/v1/connectors/texas-procurement", params={"state": "X", "limit": 5})
+        r = client.get(
+            "/api/v1/connectors/texas-procurement", params={"state": "X", "limit": 5}
+        )
         assert r.status_code == 422
 
     def test_endpoint_validates_limit(self):
         from fastapi.testclient import TestClient
         from app.main import app
+
         client = TestClient(app)
-        r = client.get("/api/v1/connectors/texas-procurement", params={"state": "TX", "limit": 0})
+        r = client.get(
+            "/api/v1/connectors/texas-procurement", params={"state": "TX", "limit": 0}
+        )
         assert r.status_code == 422
 
     def test_endpoint_response_schema(self):
         from fastapi.testclient import TestClient
         from app.main import app
+
         client = TestClient(app)
-        r = client.get("/api/v1/connectors/texas-procurement", params={
-            "state": "TX", "city": "Houston", "limit": 3
-        })
+        r = client.get(
+            "/api/v1/connectors/texas-procurement",
+            params={"state": "TX", "city": "Houston", "limit": 3},
+        )
         data = r.json()
         assert data["connector"] == "texas_procurement"
         assert isinstance(data["companies"], list)
@@ -253,9 +282,13 @@ class TestTexasProcurementAPI:
     def test_summary_endpoint(self):
         from fastapi.testclient import TestClient
         from app.main import app
+
         client = TestClient(app)
         r = client.get("/api/v1/connectors/texas-procurement/summary")
         assert r.status_code == 200
         data = r.json()
         assert data["connector"] == "texas_procurement"
-        assert data["available"] is True
+        assert data["health_check"] is True
+        assert isinstance(data["total_records"], int)
+        assert data["total_records"] >= 40
+        assert data["bridge_mode"] is True

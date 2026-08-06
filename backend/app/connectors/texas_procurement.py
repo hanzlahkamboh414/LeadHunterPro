@@ -150,6 +150,13 @@ class TexasProcurementConnector(BaseConnector):
         from app.discovery.sources.fixture_source import FixtureSource
         from app.discovery.sources.plugin_source import attach_plugin_source
         from app.discovery.sources.search_provider_source import SearchProviderSource
+        from app.discovery.website.registration import register_website_discovery
+
+        # Register the Direct Website Discovery plugin before the
+        # orchestrator is assembled. Config-gated and idempotent: with no
+        # live search origin configured it is a logged no-op, and the
+        # pipeline below runs exactly as it did before (CLAUDE.md §1, §5).
+        register_website_discovery()
 
         orchestrator = SourceOrchestrator()
         # Plugin framework, attached only when a company-discovery plugin is
@@ -176,7 +183,17 @@ class TexasProcurementConnector(BaseConnector):
             "Expanded industry %r to %d keywords", industry, len(expanded_keywords)
         )
 
-        # Step 3: Apply local filtering (state, city, keyword match)
+        # Step 3: Apply local filtering (state, city, keyword match).
+        # Project heterogeneous source dicts onto the connector's expected
+        # keys first so no record is dropped for schema reasons: the website
+        # discovery plugin emits name/services/evidence and no location,
+        # while search/fixture sources emit company_name/industry_focus.
+        # Missing location is filled from the queried state/city — the same
+        # heuristic SearchProviderSource applies, and only when the source
+        # supplied no location of its own (CLAUDE.md §1 provenance kept).
+        companies = [
+            self._normalize_company(c, state=state, city=city) for c in companies
+        ]
         matched: list[dict[str, Any]] = []
         for company in companies:
             if state and company.get("state", "").upper() != state.upper():
@@ -360,6 +377,54 @@ class TexasProcurementConnector(BaseConnector):
             len(response.results),
         )
         return companies
+
+    def _normalize_company(
+        self,
+        company: dict[str, Any],
+        *,
+        state: str,
+        city: str,
+    ) -> dict[str, Any]:
+        """Project a source company dict onto the connector's expected schema.
+
+        The orchestrator aggregates heterogeneous dicts: search and fixture
+        sources emit ``company_name``/``industry_focus``/``trade_category``
+        and their own location, while the website discovery plugin emits
+        ``name``/``services``/``evidence`` and no location fields. This
+        adapter maps every variant onto the keys ``_build_result`` and the
+        Step-3 filters consume, so plugin records are not silently dropped.
+
+        Location is filled from the queried *state*/*city* only when the
+        source supplied none — the same heuristic SearchProviderSource
+        applies to its search results. Provenance is preserved by aliasing
+        the plugin's ``discovered_by`` into ``data_provenance``.
+
+        Args:
+            company: Raw company dict from any source.
+            state: Query-parsed state code (e.g. ``"TX"``).
+            city: Query-parsed city (may be empty).
+
+        Returns:
+            A dict in the connector's expected schema (originals intact).
+        """
+        normalized = dict(company)
+        services = company.get("services", [])
+        services_text = (
+            " ".join(services) if isinstance(services, list) else str(services or "")
+        ).strip()
+        normalized["company_name"] = company.get("company_name") or company.get(
+            "name", ""
+        )
+        normalized["industry_focus"] = (
+            company.get("industry_focus") or services_text or company.get("title", "")
+        )
+        normalized["trade_category"] = company.get("trade_category", "")
+        normalized["state"] = company.get("state") or state
+        normalized["city"] = company.get("city") or city
+        normalized["data_provenance"] = company.get("data_provenance") or company.get(
+            "discovered_by", ""
+        )
+        return normalized
 
     def _build_result(
         self,

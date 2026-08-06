@@ -374,3 +374,78 @@ class TestConnectorIntegration:
         connector = TexasProcurementConnector()
         results, _ = connector.search("Plumbing", "TX", 50)
         assert all(r.company_name and len(r.company_name) >= 3 for r in results)
+
+
+class TestNormalizeCompany:
+    """The adapter projects heterogeneous source dicts onto the connector schema.
+
+    The website discovery plugin emits ``name``/``services``/``evidence``
+    with no location; search and fixture sources emit
+    ``company_name``/``industry_focus`` with their own location. Without
+    this projection, plugin records would be silently dropped by the
+    Step-3 state/city/keyword filters (CLAUDE.md §12).
+    """
+
+    def _connector(self):
+        return TexasProcurementConnector()
+
+    def test_maps_plugin_shape_onto_connector_schema(self):
+        """A plugin company record becomes filterable and consumable."""
+        company = self._connector()._normalize_company(
+            {
+                "name": "Acme Roofing",
+                "website": "https://acme.com/",
+                "services": ["Roofing", "Commercial Roofing"],
+                "evidence": ["evidence"],
+                "discovered_by": "brave_search",
+            },
+            state="TX",
+            city="dallas",
+        )
+        assert company["company_name"] == "Acme Roofing"
+        assert company["industry_focus"] == "Roofing Commercial Roofing"
+        assert company["trade_category"] == ""
+        assert company["state"] == "TX"
+        assert company["city"] == "dallas"
+        assert company["data_provenance"] == "brave_search"
+
+    def test_keeps_source_location_when_present(self):
+        """Existing location/fields are never overridden by the query."""
+        company = self._connector()._normalize_company(
+            {
+                "company_name": "Dallas Roof Co",
+                "website": "https://dallasroof.com/",
+                "industry_focus": "roofing",
+                "trade_category": "roofing",
+                "state": "TX",
+                "city": "Dallas",
+                "data_provenance": "live:3",
+            },
+            state="ZZ",
+            city="nowhere",
+        )
+        assert company["state"] == "TX"
+        assert company["city"] == "Dallas"
+        assert company["industry_focus"] == "roofing"
+        assert company["data_provenance"] == "live:3"
+
+    def test_fills_missing_location_from_query_only(self):
+        """Missing city stays empty when the query has none."""
+        company = self._connector()._normalize_company(
+            {"name": "Solo Firm", "website": "https://solo.com/"},
+            state="TX",
+            city="",
+        )
+        assert company["company_name"] == "Solo Firm"
+        assert company["state"] == "TX"
+        assert company["city"] == ""
+
+    def test_empty_services_do_not_clobber_other_fields(self):
+        """An empty services list yields a blank industry_focus, not garbage."""
+        company = self._connector()._normalize_company(
+            {"name": "Firm", "website": "https://firm.com/", "services": []},
+            state="TX",
+            city="",
+        )
+        assert company["company_name"] == "Firm"
+        assert company["industry_focus"] == ""

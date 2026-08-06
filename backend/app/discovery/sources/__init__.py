@@ -10,6 +10,7 @@ stops discovery — the orchestrator continues with the next source.
 from __future__ import annotations
 
 from app.discovery.sources.base_source import BaseSource
+from app.discovery.sources.directory_crawl_source import DirectoryCrawlSource
 from app.discovery.sources.fixture_source import FixtureSource
 from app.discovery.sources.search_provider_source import SearchProviderSource
 
@@ -30,6 +31,7 @@ from app.discovery.sources.search_provider_source import SearchProviderSource
 
 __all__ = [
     "BaseSource",
+    "DirectoryCrawlSource",
     "FixtureSource",
     "SearchProviderSource",
 ]

@@ -147,6 +147,7 @@ class TexasProcurementConnector(BaseConnector):
         # Step 1: Run SourceOrchestrator (plugins + live search + fixture fallback)
         from app.discovery.plugins.base_plugin import PluginCapability
         from app.discovery.source_orchestrator import SourceOrchestrator
+        from app.discovery.sources.directory_crawl_source import DirectoryCrawlSource
         from app.discovery.sources.fixture_source import FixtureSource
         from app.discovery.sources.plugin_source import attach_plugin_source
         from app.discovery.sources.search_provider_source import SearchProviderSource
@@ -167,6 +168,12 @@ class TexasProcurementConnector(BaseConnector):
             orchestrator,
             capability=PluginCapability.COMPANY_DISCOVERY,
         )
+        # DirectoryCrawlSource (priority 20) runs BEFORE search providers
+        # (50) and the fixture bridge (999): it is the API-free primary
+        # path (Blueprint §6 Phase 3). When it returns UNAVAILABLE — e.g.
+        # the sandbox blocks seed-host DNS — the orchestrator simply
+        # continues with the next source; it is never terminal.
+        orchestrator.register(DirectoryCrawlSource())
         orchestrator.register(SearchProviderSource())
         orchestrator.register(FixtureSource())
         companies, orch_metadata = orchestrator.discover(

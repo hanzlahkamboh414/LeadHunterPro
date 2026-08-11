@@ -8,20 +8,15 @@ No crawling is performed — only source selection and ranking.
 from __future__ import annotations
 
 import logging
-import re
-from urllib.parse import quote
 
 from app.engines.source_intelligence.source_models import (
-    NATIONAL_SOURCES,
-    TRADE_ASSOCIATIONS,
     LICENSING_BOARDS,
+    NATIONAL_SOURCES,
     NEWS_SOURCES,
-    CHAMBER_PATTERNS,
-    CrawlStrategy,
+    TRADE_ASSOCIATIONS,
     SourcePlannerRequest,
     SourcePlannerResult,
     SourceRecord,
-    SourceType,
 )
 
 logger = logging.getLogger(__name__)
@@ -67,11 +62,18 @@ def _match_licensing_board(state_abbr: str | None) -> list[dict]:
 
 
 def _build_chamber_sources(city: str | None, state_abbr: str | None) -> list[dict]:
-    """Generate placeholder chamber-of-commerce entries for the location."""
+    """Record a chamber-of-commerce entry for the location (no fabricated URL).
+
+    The entry exists for provenance only. A generic
+    ``https://<city>-<state>.com/chamber`` URL would be fabricated, not
+    verified, so emitting it as a crawl seed would send real crawls at
+    placeholder domains (CLAUDE.md §12). The entry therefore carries no
+    URL and no company-discovery support, and the DirectoryCrawlSource
+    drops it. Verified chamber directories are a later curated increment
+    (Blueprint §8 rec 1).
+    """
     if not city:
         return []
-    city_slug = re.sub(r"[^a-z0-9]+", "-", city.lower()).strip("-")
-    state_part = f"-{state_abbr.lower()}" if state_abbr else ""
     return [
         {
             "name": f"{city.title()} Chamber of Commerce",
@@ -80,10 +82,10 @@ def _build_chamber_sources(city: str | None, state_abbr: str | None) -> list[dic
             "city": city,
             "priority": 8,
             "crawl_strategy": "html_scraper",
-            "supports_company_discovery": True,
+            "supports_company_discovery": False,
             "supports_contact": True,
-            "url": f"https://www.{city_slug}{state_part}.com/chamber",
-            "notes": f"Local business network for {city}{f', {state_abbr}' if state_abbr else ''}.",
+            "url": "",
+            "notes": f"Local business network for {city}{f', {state_abbr}' if state_abbr else ''} — per-city directory requires curation.",
         }
     ]
 

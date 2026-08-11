@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import pytest
 from typing import Any
 
 from app.discovery.source_orchestrator import SourceOrchestrator
@@ -278,6 +279,18 @@ class TestDeduplication:
 
 class TestFixtureFallbackDetection:
     """Test that data_source='fixture' is set when only fixture bridge runs."""
+
+    @pytest.fixture(autouse=True)
+    def _fixture_env_test_mode(self, monkeypatch):
+        """Accuracy-first Phase 1: fixture bridge needs LEADHUNTER_ENV=test.
+
+        In live mode the fixture source is disabled entirely, so these
+        fallback tests exercise it under test mode (fixture use in live mode
+        is covered by tests/verification/test_phase1_modes_and_tiers.py).
+        """
+        from app.core.config import settings
+
+        monkeypatch.setattr(settings, "LEADHUNTER_ENV", "test")
 
     def test_fixture_bridge_sets_data_source(self):
         """When only fixture_bridge source runs, data_source is 'fixture'."""

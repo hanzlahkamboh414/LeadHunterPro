@@ -141,7 +141,14 @@ class ContractorClassifier:
             Dict with 'accepted' (bool), 'trade_category' (str),
             'reject_reason' (str or None).
         """
-        text = f"{name} {title} {description} {industry_hint}".lower()
+        # The page's own content (name/title/description), not the query.
+        # The industry hint is the SEARCH context, not evidence a page is
+        # a contractor: it may confirm a trade the page already states,
+        # but it must never manufacture acceptance from nothing (see the
+        # hint block below). Otherwise any page crawled under a "Roofing"
+        # query — a login page, an association homepage — would be accepted
+        # as a roofing contractor (CLAUDE.md §7).
+        text = f"{name} {title} {description}".lower()
 
         # Check for rejection keywords first
         for pattern, reason in _REJECT_PATTERNS:
@@ -184,12 +191,15 @@ class ContractorClassifier:
             if matches:
                 trade_score[trade] = len(matches)
 
-        # Also check industry_hint against trade patterns
+        # The industry hint only disambiguates a trade the page's own
+        # content already matched — never creates one. A real roofing
+        # contractor's page states its trade; a "Member Login" page does
+        # not, so no amount of hint should turn it into a roofing company.
         if industry_hint:
             hint_lower = industry_hint.lower()
             for trade, pattern in _TRADE_PATTERNS.items():
-                if pattern.search(hint_lower):
-                    trade_score[trade] = trade_score.get(trade, 0) + 5
+                if trade in trade_score and pattern.search(hint_lower):
+                    trade_score[trade] += 5
 
         if not trade_score:
             return {

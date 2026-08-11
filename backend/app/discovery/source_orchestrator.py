@@ -144,6 +144,13 @@ class SourceOrchestrator:
                     len(companies),
                 )
                 if status == SourceStatus.SUCCESS:
+                    for company in companies:
+                        # Tag each record with the source that produced it so a
+                        # downstream consumer that filters the aggregate (e.g. a
+                        # connector's state/city/industry filter) can still label
+                        # data_source from what actually survives, not from raw
+                        # per-source statuses (CLAUDE.md §1).
+                        company.setdefault("_discovery_source", source_name)
                     all_companies.extend(companies)
 
             except Exception as exc:  # noqa: BLE001
@@ -176,6 +183,7 @@ class SourceOrchestrator:
             fallback_reason = ""
         elif any(
             getattr(s, "source_name") == "fixture_bridge"
+            and getattr(s, "enabled", True)
             for s in self._sources
         ):
             data_source = "fixture"
@@ -290,6 +298,12 @@ class SourceOrchestrator:
         accidentally dropping genuinely different businesses that
         happen to share a name (e.g. "Acme Roofing" in Dallas vs Houston).
 
+        Duplicates are MERGED, not silently discarded (Phase 2 Step 4, F):
+        the first-seen record is kept as the primary and the duplicate's
+        evidence + provenance are folded into it, so no source's evidence is
+        lost and conflicting location is recorded explicitly rather than
+        first-wins. The ``(domain, name)`` key is unchanged.
+
         Args:
             companies: Raw company dicts from all sources.
 
@@ -298,7 +312,9 @@ class SourceOrchestrator:
         """
         from urllib.parse import urlparse
 
-        seen: set[tuple[str, str]] = set()
+        from app.engines.verification.acceptance_gate import merge_company_records
+
+        seen: dict[tuple[str, str], int] = {}
         unique: list[dict[str, Any]] = []
 
         for company in companies:
@@ -309,15 +325,17 @@ class SourceOrchestrator:
 
             key = (domain, name)
             if key in seen:
+                idx = seen[key]
+                unique[idx] = merge_company_records(unique[idx], company)
                 logger.debug(
-                    "Deduplicated: %s (%s / %s)",
+                    "Deduplicated (evidence merged): %s (%s / %s)",
                     company.get("company_name", "?"),
                     domain,
                     name,
                 )
                 continue
 
-            seen.add(key)
+            seen[key] = len(unique)
             unique.append(company)
 
         return unique

@@ -32,6 +32,7 @@ import asyncio
 import json
 import logging
 import re
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -102,10 +103,24 @@ class TexasProcurementConnector(BaseConnector):
     priority = 10
     enabled = True
 
-    def __init__(self) -> None:
-        """Initialize the Texas Procurement connector."""
+    def __init__(
+        self,
+        *,
+        ai_engine: Any | None = None,
+    ) -> None:
+        """Initialize the Texas Procurement connector.
+
+        Args:
+            ai_engine: Optional Phase 3 Step 2 AI engine (injectable in
+                tests). When ``None`` the connector lazily creates a real
+                ``AIEngine`` on first use; if construction fails AI
+                intelligence is skipped and deterministic acceptance is
+                unaffected (AI must never break discovery).
+        """
         self._companies, self._fixture_meta = _load_fixture_data()
         self._live_results: list[dict[str, Any]] = []
+        self._ai_engine: Any | None = ai_engine
+        self._ai_engine_resolved: bool = ai_engine is not None
         logger.info(
             "TexasProcurementConnector initialized: %d fixture records, live=%s",
             len(self._companies),
@@ -183,6 +198,22 @@ class TexasProcurementConnector(BaseConnector):
         )
         data_source = orch_metadata.get("data_source", "empty")
 
+        # Inc9: enrich location-less candidates from their own websites
+        # BEFORE the Step-3 filter. Search and website-plugin sources emit
+        # no location by design (accuracy-first, Phase 2 Step 3); crawling
+        # each candidate's site fills city/state/address from REAL page
+        # evidence so the filter and LocationVerifier act on proof, never
+        # the query. Honest by construction: unreachable or no-address
+        # pages stay un-enriched and are dropped downstream (§12). The
+        # import is function-local to keep aiohttp out of this module's
+        # import graph (same boundary DirectoryCrawlSource draws).
+        from app.discovery.website.enricher import WebsiteEnricher
+
+        companies, enrich_meta = WebsiteEnricher().enrich(
+            companies, industry=industry, limit=limit
+        )
+        orch_metadata = {**orch_metadata, "enrichment": enrich_meta}
+
         # Step 2: Parse location and expand industry for matching
         city, state = _parse_location(location)
         expanded_keywords = expand_industry(industry)
@@ -195,9 +226,10 @@ class TexasProcurementConnector(BaseConnector):
         # keys first so no record is dropped for schema reasons: the website
         # discovery plugin emits name/services/evidence and no location,
         # while search/fixture sources emit company_name/industry_focus.
-        # Missing location is filled from the queried state/city — the same
-        # heuristic SearchProviderSource applies, and only when the source
-        # supplied no location of its own (CLAUDE.md §1 provenance kept).
+        # Location is never filled from the query (Phase 2 Step 3): the
+        # parsed state/city below remain SEARCH TARGETS for this filter only,
+        # and are not written into records. Records carry only a
+        # source-supplied location, else empty/unknown.
         companies = [
             self._normalize_company(c, state=state, city=city) for c in companies
         ]
@@ -222,14 +254,100 @@ class TexasProcurementConnector(BaseConnector):
             location,
         )
 
-        # Step 4: Build results with validation and ranking
+        # Step 4: Acceptance gate, then build results with validation and
+        # ranking. Only gate-passing records become accepted ConnectorResults
+        # (Phase 2 Step 4): a manufacturer/supplier/association, a record with
+        # an invalid/placeholder/aggregator website, or a Tier-4 fixture is
+        # never a live verified lead. Evidence gaps (missing email/phone/
+        # decision maker, unknown website/location) are NOT rejections.
+        is_bridge = data_source == "fixture"
         results: list[ConnectorResult] = []
         discovery_reasons: list[str] = []
+        accepted_count = 0
 
         for company in matched[:limit]:
-            result, reason = self._build_result(company, industry, expanded_keywords)
+            gate = self._verify_company(company, location)
+
+            # ADR-002 bridge carve-out: when ALL live discovery failed the
+            # fixture bridge is surfaced as labeled bridge data (never as a
+            # live-verified lead). Hard rejections are excluded even here.
+            bridge_fixture = (
+                is_bridge
+                and company.get("_discovery_source") == "fixture_bridge"
+                and not gate.hard_rejected
+            )
+            if not gate.accepted and not bridge_fixture:
+                logger.debug(
+                    "Gate did not accept %s: %s",
+                    company.get("company_name", "?"),
+                    "; ".join(gate.reasons),
+                )
+                continue
+            accepted_count += 1
+
+            # Verified location comes ONLY from LocationVerifier evidence
+            # (gate.city/state) — never from the query or source claims.
+            result, reason = self._build_result(
+                company,
+                industry,
+                expanded_keywords,
+                verified_city=gate.city or "",
+                verified_state=gate.state or "",
+            )
+            # Additive verification metadata — ConnectorResult's frozen
+            # dataclass contract is preserved (Phase 2 Step 4, G).
+            result = replace(
+                result,
+                metadata={
+                    **result.metadata,
+                    "verification_status": gate.verification_status.value,
+                    "verification_confidence": gate.verification_confidence,
+                    "source_tier": gate.source_tier,
+                    "gate_accepted": gate.accepted,
+                    "verification": gate.to_dict(),
+                },
+            )
+            # Phase 3 Step 2: additive AI intelligence (ai/qualification
+            # namespaces only) for gate-accepted records. Rejected, unknown,
+            # and bridge-free branches are never consulted — the deterministic
+            # verification verdict above stays authoritative.
+            result = self._attach_ai_intelligence(
+                result, company, gate, industry, location
+            )
             results.append(result)
             discovery_reasons.append(reason)
+
+        logger.info(
+            "Gate: %d of %d matched companies accepted",
+            accepted_count,
+            len(matched[:limit]),
+        )
+
+        # The orchestrator labels data_source from its raw aggregate, but
+        # Step 3 can drop every live-sourced record (e.g. a crawl returned
+        # companies outside the queried city/industry), leaving a result set
+        # that is entirely fixture bridge data. The label must reflect what
+        # is actually returned (CLAUDE.md §1): fixture-only output is never
+        # "live". Per-record provenance is the orchestrator's
+        # "_discovery_source" tag, applied when the aggregate was built.
+        returned_companies = matched[:limit]
+        live_survivors = [
+            c
+            for c in returned_companies
+            if c.get("_discovery_source")
+            and c["_discovery_source"] != "fixture_bridge"
+        ]
+        if returned_companies and data_source == "live" and not live_survivors:
+            data_source = "fixture"
+            orch_metadata = {
+                **orch_metadata,
+                "data_source": "fixture",
+                "bridge_mode": True,
+                "fallback_reason": (
+                    "live_sources_returned_no_surviving_results; "
+                    "returned records are fixture bridge data"
+                ),
+            }
 
         # Step 5: Compile metadata
         metadata: dict[str, Any] = {
@@ -401,15 +519,20 @@ class TexasProcurementConnector(BaseConnector):
         adapter maps every variant onto the keys ``_build_result`` and the
         Step-3 filters consume, so plugin records are not silently dropped.
 
-        Location is filled from the queried *state*/*city* only when the
-        source supplied none — the same heuristic SearchProviderSource
-        applies to its search results. Provenance is preserved by aliasing
-        the plugin's ``discovered_by`` into ``data_provenance``.
+        Location is NEVER filled from the queried *state*/*city*
+        (accuracy-first, Phase 2 Step 3): the search query is search intent,
+        not company location evidence. Only a source-supplied
+        ``state``/``city`` survives; otherwise the fields stay empty
+        (unknown) and are verified deterministically downstream.
+        Provenance is preserved by aliasing the plugin's ``discovered_by``
+        into ``data_provenance``.
 
         Args:
             company: Raw company dict from any source.
-            state: Query-parsed state code (e.g. ``"TX"``).
-            city: Query-parsed city (may be empty).
+            state: Query-parsed state code — a search TARGET only, never
+                written into the record.
+            city: Query-parsed city — a search TARGET only, never written
+                into the record.
 
         Returns:
             A dict in the connector's expected schema (originals intact).
@@ -426,18 +549,163 @@ class TexasProcurementConnector(BaseConnector):
             company.get("industry_focus") or services_text or company.get("title", "")
         )
         normalized["trade_category"] = company.get("trade_category", "")
-        normalized["state"] = company.get("state") or state
-        normalized["city"] = company.get("city") or city
+        # ACCURACY-FIRST: location is never filled from the query. Only a
+        # source-supplied city/state survives; otherwise empty = unknown.
+        normalized["state"] = company.get("state") or ""
+        normalized["city"] = company.get("city") or ""
         normalized["data_provenance"] = company.get("data_provenance") or company.get(
             "discovered_by", ""
         )
         return normalized
+
+    def _verify_company(
+        self,
+        company: dict[str, Any],
+        query_location: str,
+    ) -> "AcceptanceResult":
+        """Run the deterministic Phase 2 verification stack on one company.
+
+        Offline by design: identity verification uses a no-op fetcher so no
+        network request occurs at discovery time (official-site confirmation
+        is deployment-host work — Blueprint §9.4). Placeholder/invalid/
+        aggregator websites still reject deterministically WITHOUT a fetch;
+        every other website becomes ``unknown`` (an evidence gap, not a
+        rejection). City/state on the returned gate result come ONLY from
+        LocationVerifier evidence — never from the query (Phase 2 Step 3/4).
+
+        Args:
+            company: Normalized company dict (connector schema).
+            query_location: Raw query location string — a SEARCH TARGET only.
+
+        Returns:
+            An ``AcceptanceResult``; never raises.
+        """
+        from app.engines.verification.acceptance_gate import AcceptanceGate
+        from app.engines.verification.identity_verifier import (
+            FetchOutcome,
+            IdentityVerifier,
+        )
+        from app.engines.verification.industry_verifier import IndustryVerifier
+        from app.engines.verification.location_verifier import LocationVerifier
+
+        source = company.get("_discovery_source") or self.connector_name
+        source_url = company.get("source_url", "") or company.get("website", "")
+        company_name = company.get("company_name", "")
+        website = company.get("website", "")
+        title = company.get("title", "") or company_name
+        description = (
+            company.get("description", "") or company.get("industry_focus", "")
+        )
+        address = company.get("address", "")
+
+        def _offline_fetcher(url: str) -> FetchOutcome:  # noqa: ARG001
+            """No-op fetch: offline discovery-time gating (Blueprint §9.4)."""
+            return FetchOutcome(ok=False, status_code=0, page_text="")
+
+        identity = IdentityVerifier(fetcher=_offline_fetcher).verify(
+            company_name=company_name,
+            website=website,
+            source=source,
+            source_url=source_url,
+        )
+        industry = IndustryVerifier().verify(
+            company_name=company_name,
+            title=title,
+            description=description,
+            website=website,
+            source=source,
+            source_url=source_url,
+        )
+        evidence_texts = [t for t in (description, title, address) if t]
+        location = LocationVerifier().verify(
+            city=company.get("city", ""),
+            state=company.get("state", ""),
+            evidence_texts=evidence_texts,
+            query=query_location,
+            source=source,
+            source_url=source_url,
+        )
+        return AcceptanceGate().evaluate(
+            record=company,
+            identity=identity,
+            industry=industry,
+            location=location,
+        )
+
+    def _ai_engine_for(self) -> Any | None:
+        """Return the AI engine for gate-accepted reviews (lazy, once).
+
+        Phase 3 Step 2: resolved on first use and reused for the connector's
+        lifetime. If construction fails (e.g. no AI provider configured) the
+        engine is permanently skipped for this connector — ``None`` — so AI
+        can never break deterministic discovery.
+        """
+        if self._ai_engine_resolved:
+            return self._ai_engine
+        self._ai_engine_resolved = True
+        try:
+            from app.engines.ai_engine import AIEngine  # noqa: PLC0415
+
+            self._ai_engine = AIEngine()
+        except Exception as exc:  # noqa: BLE001 — AI must never break discovery
+            logger.warning(
+                "AI engine unavailable; AI intelligence skipped after "
+                "deterministic acceptance (verdict unchanged): %s",
+                exc,
+            )
+            self._ai_engine = None
+        return self._ai_engine
+
+    def _attach_ai_intelligence(
+        self,
+        result: ConnectorResult,
+        company: dict[str, Any],
+        gate: Any,
+        industry: str,
+        location: str,
+    ) -> ConnectorResult:
+        """Attach additive AI intelligence to a gate-accepted result (Phase 3 Step 2).
+
+        Connects the deterministic :class:`AcceptanceGate` result to
+        ``AIEngine.intelligence_for`` at the repository's only production
+        junction where ``gate.accepted is True`` is known (the Step-4 loop of
+        ``search``). AI runs ONLY for accepted records; rejected, unknown,
+        and bridge fixture data never consult AI. Everything AI produces
+        lives under its own ``ai`` / ``qualification`` metadata namespaces and
+        is merged additively — the ``verification`` namespace stays
+        authoritative and the frozen ``ConnectorResult`` contract is
+        preserved. Returns *result* unchanged when AI is not applicable.
+        """
+        if not (gate is not None and gate.accepted):
+            return result
+        engine = self._ai_engine_for()
+        if engine is None:
+            return result
+        try:
+            intelligence = engine.intelligence_for(
+                record=company,
+                gate=gate,
+                query={"industry": industry, "location": location},
+            )
+        except Exception as exc:  # noqa: BLE001 — AI must never break discovery
+            logger.warning(
+                "AI intelligence failed for %s; verification unchanged: %s",
+                company.get("company_name", "?"),
+                exc,
+            )
+            return result
+        if not intelligence:
+            return result
+        return replace(result, metadata={**result.metadata, **intelligence})
 
     def _build_result(
         self,
         company: dict[str, Any],
         search_industry: str,
         expanded_keywords: set[str],
+        *,
+        verified_city: str | None = None,
+        verified_state: str | None = None,
     ) -> tuple[ConnectorResult, str]:
         """Build a ConnectorResult with meaningful discovery reason.
 
@@ -445,12 +713,21 @@ class TexasProcurementConnector(BaseConnector):
             company: Raw company data dictionary.
             search_industry: Original industry search term.
             expanded_keywords: Set of expanded keywords used for matching.
+            verified_city: Optional LocationVerifier-verified city. When
+                provided it REPLACES the record's claim on the result
+                (Phase 2 Step 4: location comes only from evidence).
+            verified_state: Optional LocationVerifier-verified state.
 
         Returns:
             Tuple of (ConnectorResult, discovery_reason_string).
         """
         trade_cat = company.get("trade_category", "")
-        city = company.get("city", "")
+        # Phase 2 Step 4: the result's location is the VERIFIED one when the
+        # acceptance gate ran; otherwise the source-supplied value survives.
+        city = verified_city if verified_city is not None else company.get("city", "")
+        state = (
+            verified_state if verified_state is not None else company.get("state", "")
+        )
         industry_focus = company.get("industry_focus", "")
         website = company.get("website", "")
 
@@ -470,7 +747,9 @@ class TexasProcurementConnector(BaseConnector):
             company_name=company.get("company_name", ""),
             website=verified_url or website,
             city=city,
-            state=company.get("state", "TX"),
+            # Accuracy-first (Phase 2 Step 3): no TX default — state comes
+            # only from the record (which is never filled from the query).
+            state=state,
             country=company.get("country", "USA"),
             source=self.connector_name,
             source_url=company.get("source_url", website),

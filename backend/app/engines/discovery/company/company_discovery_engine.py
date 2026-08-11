@@ -96,6 +96,10 @@ class CompanyDiscoveryEngine:
                     confidence=cr.confidence,
                     source_url=cr.source_url,
                     discovery_reason=f"Discovered via {cr.source} connector",
+                    # Phase 3 Step 4: verification + AI intelligence metadata
+                    # already attached by the connector survives the model
+                    # conversion verbatim (never recomputed here).
+                    metadata=dict(cr.metadata),
                 )
             )
 

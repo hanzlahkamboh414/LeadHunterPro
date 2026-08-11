@@ -15,6 +15,19 @@ from app.search_providers.registry import clear_registry, get_registry
 logger = logging.getLogger(__name__)
 
 
+@pytest.fixture(autouse=True)
+def _fixture_env_test_mode(monkeypatch):
+    """Accuracy-first Phase 1: FixtureSource is enabled only in demo/test mode.
+
+    These tests exercise the fixture dataset itself, so they run under
+    LEADHUNTER_ENV=test where the bridge is permitted. Fixture use in live
+    mode is covered by tests/verification/test_phase1_modes_and_tiers.py.
+    """
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "LEADHUNTER_ENV", "test")
+
+
 # ---------------------------------------------------------------------------
 # Test: FixtureSource
 # ---------------------------------------------------------------------------
@@ -238,5 +251,8 @@ class TestSearchProviderSource:
         c = companies[0]
         assert "company_name" in c
         assert "website" in c
-        assert c["state"] == "TX"
+        # The search query "Austin Texas" is search intent, never company
+        # location evidence — the record stays unknown until verified.
+        assert c["state"] == ""
+        assert c["city"] == ""
         assert c["country"] == "USA"

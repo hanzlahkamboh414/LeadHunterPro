@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-
 # ---------------------------------------------------------------------------
 # Type definitions
 # ---------------------------------------------------------------------------
@@ -265,17 +264,9 @@ LICENSING_BOARDS: dict[str, list[dict]] = {
             "source_type": "licensing_board",
             "state": "TX",
             "priority": 1,
-            "url": "https://www.tdlnr.texas.gov",
+            "url": "https://www.tdlr.texas.gov",
             "supports_company_discovery": True,
             "supports_contact": True,
-        },
-        {
-            "name": "Texas State Gambling Commission – not relevant",
-            "source_type": "government",
-            "state": "TX",
-            "priority": 20,
-            "notes": "Placeholder – not used for construction.",
-            "supports_company_discovery": False,
         },
     ],
     "CA": [
@@ -284,7 +275,7 @@ LICENSING_BOARDS: dict[str, list[dict]] = {
             "source_type": "licensing_board",
             "state": "CA",
             "priority": 1,
-            "url": "https://www.slbt.ca.gov",
+            "url": "https://www.cslb.ca.gov",
             "supports_company_discovery": True,
             "supports_contact": True,
         },

@@ -17,6 +17,36 @@ router = APIRouter(prefix="/discovery", tags=["Discovery"])
 engine = CompanyDiscoveryEngine()
 
 
+def _company_payload(c: CompanyDiscoveryResult) -> dict[str, Any]:
+    """Serialize one CompanyDiscoveryResult for the discovery surface.
+
+    Phase 3 Step 4: additive passthrough of the gate + AI intelligence
+    namespaces already carried in ``result.metadata`` (attached by the
+    connector in Phase 3 Step 2 and carried verbatim through the engine,
+    cleaner and validator). Curation keeps internal provenance keys out of the
+    response. Records without AI data (rejected / unknown / bridge fixtures)
+    emit empty ``ai`` / ``qualification`` dicts — never invented.
+    """
+    return {
+        "company_name": c.company_name,
+        "website": c.website,
+        "city": c.city,
+        "state": c.state,
+        "country": c.country,
+        "source": c.source,
+        "confidence": c.confidence,
+        "source_url": c.source_url,
+        "discovery_reason": c.discovery_reason,
+        # Phase 3 Step 4: gate + AI intelligence namespaces (additive).
+        "verification_status": c.metadata.get("verification_status", ""),
+        "verification_confidence": c.metadata.get("verification_confidence", 0.0),
+        "gate_accepted": c.metadata.get("gate_accepted", False),
+        "verification": c.metadata.get("verification", {}),
+        "ai": c.metadata.get("ai", {}),
+        "qualification": c.metadata.get("qualification", {}),
+    }
+
+
 @router.get(
     "/companies",
     summary="Discover construction companies",
@@ -53,4 +83,4 @@ def discover_companies(
     results, metrics = engine.discover(
         industry=industry, location=location, limit=limit
     )
-    return results
+    return [_company_payload(c) for c in results]

@@ -1,10 +1,13 @@
 """Website scraping engine – fetches and parses web pages."""
 
 import logging
+import re
 from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
+
+from app.email.email_cleaner import EMAIL_CLEAN_PATTERN, clean_emails
 
 logger = logging.getLogger(__name__)
 
@@ -53,11 +56,7 @@ class WebsiteEngine:
         description = meta_desc.get("content", "") if meta_desc else ""
         text = soup.get_text(" ")
 
-        import re
-        emails = sorted(set(re.findall(
-            r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
-            text,
-        )))
+        emails = clean_emails(EMAIL_CLEAN_PATTERN.findall(text))
 
         phones_raw = re.findall(r"\+?\d[\d\s().-]{7,}\d", text)
         phones = sorted(set(phones_raw))

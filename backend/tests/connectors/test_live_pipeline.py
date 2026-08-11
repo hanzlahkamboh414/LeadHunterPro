@@ -181,6 +181,24 @@ class TestContractorClassifier:
         assert "accepted" in result
         assert "trade_category" in result
 
+    def test_hint_does_not_accept_non_contractor_page(self, classifier):
+        """A login page must not become a roofing company via the hint.
+
+        Root-cause regression (Inc8): the industry hint is the QUERY, not
+        page evidence. "Member Login" has no trade content, so a "Roofing"
+        hint must not manufacture an acceptance — a page crawled under a
+        "Roofing" query that never states a trade is rejected.
+        """
+        result = classifier.classify(
+            name="Member Login",
+            title="Member Login - ABC Texas",
+            description="Sign in to access member benefits.",
+            url="https://www.abctexas.org/member-login",
+            industry_hint="roofing",
+        )
+        assert result["accepted"] is False
+        assert result["trade_category"] == ""
+
 
 # ---------------------------------------------------------------------------
 # Test: CompanyExtractor
@@ -227,6 +245,26 @@ class TestCompanyExtractor:
         html = "123 Main St, Dallas, TX 75201"
         profile = extractor.extract("https://example.com", html)
         assert profile.city == "Dallas" or profile.state == "TX"
+
+    def test_city_state_requires_comma_and_uppercase(self, extractor):
+        """HTML noise like 'chro ME' must not be extracted as city/state.
+
+        Root-cause regression (Inc8): the old location pattern was
+        case-insensitive with an optional comma, so noise from "through
+        ... member" was extracted as city='chro', state='ME' — and every
+        real crawled company then failed the connector's state filter.
+        A real "City, TX" still requires ", " and an uppercase code.
+        """
+        html = "anyway, chro ME works only here; Dallas TX is not matched either"
+        profile = extractor.extract("https://example.com", html)
+        assert profile.city == ""
+        assert profile.state == ""
+
+    def test_city_state_still_matches_real_address(self, extractor):
+        """A genuine Title-case 'City, ST' address is still extracted."""
+        html = "Headquartered in Houston, TX and serving the metro area."
+        profile = extractor.extract("https://example.com", html)
+        assert profile.state == "TX"
 
     def test_rejected_when_no_trade_match(self, extractor):
         """Profile rejected when no trade category matched."""
@@ -312,6 +350,7 @@ class TestFetchLiveIntegration:
         results = connector._fetch_live("Roofing", "Dallas Texas", 10)
         assert results == []
 
+    @pytest.mark.network
     def test_search_prefers_live_over_fixture(self):
         """When live data exists, search() uses it instead of fixtures."""
         mock_results = [
@@ -335,6 +374,7 @@ class TestFetchLiveIntegration:
         names = [r.company_name for r in results]
         assert any("Live" in n for n in names)
 
+    @pytest.mark.network
     def test_search_falls_back_to_fixture_when_live_fails(self):
         """When all providers fail, falls back to fixture data."""
         _make_mock_provider(error="Connection refused")
@@ -356,6 +396,7 @@ class TestFetchLiveIntegration:
 class TestEndToEndDiscovery:
     """Test the complete discovery flow from query to output."""
 
+    @pytest.mark.network
     def test_discovery_pipeline_with_live_data(self):
         """Full pipeline: search → classify → validate → rank → output."""
         mock_results = [
@@ -384,17 +425,19 @@ class TestEndToEndDiscovery:
         # Metrics should indicate we attempted live search
         assert metrics.total_found >= 0
 
+    @pytest.mark.network
     def test_connector_metadata_indicates_data_source(self):
         """Metadata clearly indicates whether results are live or fixture."""
         clear_registry()
         connector = TexasProcurementConnector()
-        results, metadata = connector.search("Roofing", "Dallas Texas", 10)
+        _, metadata = connector.search("Roofing", "Dallas Texas", 10)
 
         # Should always have data_source key
         assert "data_source" in metadata
         # Should be either "live" or "fixture"
         assert metadata["data_source"] in ("live", "fixture")
 
+    @pytest.mark.network
     def test_result_structure_matches_spec(self):
         """Each result has all required fields per output schema."""
         clear_registry()

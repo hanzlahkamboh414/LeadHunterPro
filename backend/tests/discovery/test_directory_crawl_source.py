@@ -185,6 +185,22 @@ _MEMBER_URLS = {
     "jones": "https://www.texascontractor.com/member/jones-plumbing",
 }
 
+# A non-contractor page (association login) — no trade content and no
+# reject keyword (deliberately: no "directory"/"association" wording), so
+# the ONLY thing that can drop it is the Inc8 classifier fix — a page
+# with no trade content is rejected even when the query hint says
+# "Roofing".
+LOGIN_HTML = """
+<html><head>
+<title>Member Login - ABC Texas</title>
+<meta name="description"
+ content="Sign in to access member benefits and your account.">
+</head>
+<body><h1>Member Login</h1>
+<p>Please sign in with your association account.</p>
+</body></html>
+"""
+
 
 # ---------------------------------------------------------------------------
 # Fake planner
@@ -333,6 +349,56 @@ class TestDiscovery:
         assert len(companies) == 1
         assert companies[0]["website"] == acme
         assert meta["pages_attempted"] == 2  # seed + one same-site member
+
+    def test_login_and_membership_links_are_not_followed(self):
+        """'member-login'/'membership' flows are not company profiles.
+
+        Root-cause regression (Inc8): these non-member paths were followed
+        as member links, producing "Member Login"/"Membership" pages as
+        companies. Only a real member profile link is followed.
+        """
+        acme = _MEMBER_URLS["acme"]
+        login = "https://www.texascontractor.com/member-login"
+        membership = "https://www.texascontractor.com/membership"
+        _STUB_STATE["pages"] = {
+            _SEED_URL: _directory_html([acme, login, membership]),
+            acme: ACME_HTML,
+            login: LOGIN_HTML,
+            membership: LOGIN_HTML,
+        }
+        source = _source_with(_seed())
+
+        _, companies, meta = source.discover(
+            industry="Roofing", location="Dallas Texas", limit=10
+        )
+
+        # Seed + the one real member page; login/membership never fetched.
+        assert meta["pages_attempted"] == 2
+        assert [c["company_name"] for c in companies] == ["Acme Roofing LLC"]
+
+    def test_login_page_content_is_rejected_even_when_followed(self):
+        """A member-path page with no trade content is dropped at the gate.
+
+        Root-cause regression (Inc8): "Member Login" was accepted as a
+        roofing company purely because the query hint said "Roofing". The
+        hint must not manufacture a trade — a page with no trade content
+        is rejected by the extract→classify gate even if its URL looks
+        like a member profile.
+        """
+        login_like = "https://www.texascontractor.com/member/abc-association"
+        _STUB_STATE["pages"] = {
+            _SEED_URL: _directory_html([login_like]),
+            login_like: LOGIN_HTML,
+        }
+        source = _source_with(_seed())
+
+        _, companies, meta = source.discover(
+            industry="Roofing", location="Dallas Texas", limit=10
+        )
+
+        assert companies == []
+        # Seed index page + the login page both rejected at the gate.
+        assert meta["companies_rejected"] == 2
 
     def test_limit_is_respected(self):
         acme, jones = _MEMBER_URLS["acme"], _MEMBER_URLS["jones"]

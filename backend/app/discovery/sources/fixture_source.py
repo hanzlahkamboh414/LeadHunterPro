@@ -17,8 +17,10 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from app.core.config import settings
 from app.discovery.sources.base_source import BaseSource
 from app.discovery.sources.status import SourceStatus
+from app.engines.verification.source_tiers import SourceTier
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +37,12 @@ class FixtureSource(BaseSource):
     source_name = "fixture_bridge"
     description = "Curated fixture dataset (emergency bridge only)"
     priority = 999  # Lowest priority — always last
-    enabled = True
+    source_tier = int(SourceTier.FIXTURE)
+
+    # ``enabled`` is resolved at construction time from LEADHUNTER_ENV
+    # (instance attribute shadows nothing — BaseSource declares the class
+    # default). Fixture data is permitted ONLY in demo/test mode and is
+    # completely excluded from live/accuracy mode (CLAUDE.md §1).
 
     def __init__(self, fixture_path: Path | None = None) -> None:
         """Initialize the fixture source.
@@ -44,6 +51,7 @@ class FixtureSource(BaseSource):
             fixture_path: Path to the fixture JSON file.
                 Defaults to app/fixtures/texas_procurement.json.
         """
+        self.enabled = settings.LEADHUNTER_ENV in ("demo", "test")
         self._path = fixture_path or _FIXTURE_PATH
         self._companies: list[dict[str, Any]] = []
         self._meta: dict[str, Any] = {}
@@ -120,9 +128,20 @@ class FixtureSource(BaseSource):
             "all live sources failed)",
             len(matched),
         )
-        status = SourceStatus.SUCCESS if matched else SourceStatus.EMPTY
-        return status, matched[:limit], {
+        # Every fixture record is explicitly labeled Tier 4 so a downstream
+        # stage can never mistake it for a verified live source. Records are
+        # copied so the shared dataset is never mutated by downstream tagging
+        # (CLAUDE.md §1).
+        stamped: list[dict[str, Any]] = []
+        for company in matched[:limit]:
+            record = dict(company)
+            record.setdefault("source_tier", self.source_tier)
+            stamped.append(record)
+
+        status = SourceStatus.SUCCESS if stamped else SourceStatus.EMPTY
+        return status, stamped, {
             **self._meta,
+            "source_tier": self.source_tier,
             "total_in_dataset": len(self._companies),
             "total_matched": len(matched),
             "fallback_reason": "no_live_sources_available",

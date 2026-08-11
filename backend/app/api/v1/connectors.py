@@ -11,6 +11,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
+from app.connectors.connector_result import ConnectorResult
 from app.connectors.texas_procurement import TexasProcurementConnector
 from app.database.session import get_db
 
@@ -19,6 +20,39 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/connectors", tags=["Connectors"])
 
 _connector = TexasProcurementConnector()
+
+
+def _company_payload(c: ConnectorResult) -> dict[str, Any]:
+    """Serialize one ConnectorResult for the Execute/discovery surface.
+
+    Phase 3 Step 3: additive passthrough of the gate + AI intelligence
+    namespaces already carried in ``c.metadata``. The response shape is
+    unchanged — only ``verification``, ``ai`` and ``qualification`` (plus
+    their flat gate aliases) are surfaced alongside the pre-existing keys,
+    so deterministic verification stays authoritative and AI data survives to
+    the final output. Records without AI data (rejected / unknown / bridge
+    fixtures) emit empty ``ai``/``qualification`` dicts rather than inventing
+    any.
+    """
+    return {
+        "company_name": c.company_name,
+        "website": c.website,
+        "city": c.city,
+        "state": c.state,
+        "country": c.country,
+        "source_url": c.source_url,
+        "industry_focus": c.metadata.get("industry_focus", ""),
+        "revenue_tier": c.metadata.get("revenue_tier", ""),
+        "trade_category": c.metadata.get("trade_category", ""),
+        "discovery_reason": c.metadata.get("discovery_reason", ""),
+        # Phase 3 Step 3: gate + AI intelligence namespaces (additive).
+        "verification_status": c.metadata.get("verification_status", ""),
+        "verification_confidence": c.metadata.get("verification_confidence", 0.0),
+        "gate_accepted": c.metadata.get("gate_accepted", False),
+        "verification": c.metadata.get("verification", {}),
+        "ai": c.metadata.get("ai", {}),
+        "qualification": c.metadata.get("qualification", {}),
+    }
 
 
 @router.get(
@@ -48,21 +82,7 @@ def discover_texas_procurement(
     )
     return {
         **metadata,
-        "companies": [
-            {
-                "company_name": c.company_name,
-                "website": c.website,
-                "city": c.city,
-                "state": c.state,
-                "country": c.country,
-                "source_url": c.source_url,
-                "industry_focus": c.metadata.get("industry_focus", ""),
-                "revenue_tier": c.metadata.get("revenue_tier", ""),
-                "trade_category": c.metadata.get("trade_category", ""),
-                "discovery_reason": c.metadata.get("discovery_reason", ""),
-            }
-            for c in companies
-        ],
+        "companies": [_company_payload(c) for c in companies],
     }
 
 

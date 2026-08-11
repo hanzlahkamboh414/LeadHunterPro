@@ -109,6 +109,31 @@ class DirectoryCrawlSource(BaseSource):
         "vendor",
     )
 
+    #: Path tokens that mark a NON-member page — a login, signup, account
+    #: or join flow — which is not a company profile even though its path
+    #: may also carry a member token ("member-login", "membership/join").
+    #: These were being followed as if they were member profiles, yielding
+    #: "Member Login"/"Membership" pages as companies (CLAUDE.md §7).
+    _NON_MEMBER_PATH_TOKENS: tuple[str, ...] = (
+        "login",
+        "signin",
+        "sign-in",
+        "signup",
+        "sign-up",
+        "register",
+        "registration",
+        "membership",
+        "join",
+        "account",
+        "cart",
+        "checkout",
+        "subscribe",
+        "newsletter",
+        "forgot",
+        "reset",
+        "logout",
+    )
+
     def __init__(
         self,
         *,
@@ -424,6 +449,9 @@ class DirectoryCrawlSource(BaseSource):
             if not host or host != seed_host:
                 continue
             path = urlparse(link).path.lower()
+            if any(token in path for token in self._NON_MEMBER_PATH_TOKENS):
+                # A login/membership/account flow is not a company profile.
+                continue
             if any(token in path for token in self._MEMBER_PATH_TOKENS):
                 candidates.append(link)
                 if len(candidates) >= self.MAX_LINKS_PER_SEED:

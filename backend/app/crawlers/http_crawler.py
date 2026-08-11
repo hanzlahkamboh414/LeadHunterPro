@@ -12,8 +12,10 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
+from dataclasses import replace
 from typing import Any, Self
 
 from app.crawlers.base import BaseCrawler, CrawlRequest
@@ -124,7 +126,7 @@ class HTTPCrawler(BaseCrawler):
         if cached is not None:
             logger.debug("Cache hit for %s", url)
             response = cached
-            response.cached = True
+            response = replace(response, cached=True)
             return response
 
         # Execute with retry
@@ -144,7 +146,7 @@ class HTTPCrawler(BaseCrawler):
             )
 
         elapsed_ms = (time.monotonic() - start_time) * 1000
-        response.response_time_ms = elapsed_ms
+        response = replace(response, response_time_ms=elapsed_ms)
 
         # Cache successful responses
         if response.successful:
@@ -193,21 +195,17 @@ class HTTPCrawler(BaseCrawler):
                     allow_redirects=request.follow_redirects,
                 ) as response:
                     content = await response.read()
-                    elapsed_ms = (
-                        response.request_info.elapsed.total_seconds() or 0
-                    ) * 1000
 
                     return CrawlResponse(
-                        url=response.url.string,
+                        url=str(response.url),
                         status_code=response.status,
                         content=content,
                         headers=dict(response.headers),
                         successful=200 <= response.status < 300,
                         robots_compliant=True,
-                        response_time_ms=elapsed_ms,
                     )
 
-            except aiohttp.ClientTimeoutError:
+            except asyncio.TimeoutError:
                 raise CrawlerTimeout(f"Request to {request.url} timed out")
             except aiohttp.ClientResponseError as exc:
                 if exc.status >= 500:

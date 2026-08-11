@@ -9,6 +9,7 @@ import pytest
 from app.crawlers.base import CrawlRequest
 from app.crawlers.config import CrawlerConfig
 from app.crawlers.http_crawler import HTTPCrawler
+from app.crawlers.response import CrawlResponse
 
 
 class TestHTTPCrawler:
@@ -35,11 +36,14 @@ class TestHTTPCrawler:
         with patch.object(crawler._robots, "is_allowed") as mock_robots:
             mock_robots.return_value = MagicMock(allowed=True)
             with patch.object(crawler, "_fetch_with_retry") as mock_fetch:
-                # Return a response that will be mutated by crawl()
-                mock_response = MagicMock()
-                mock_response.successful = True
-                mock_response.status_code = 200
-                mock_fetch.return_value = mock_response
+                mock_fetch.return_value = CrawlResponse(
+                    url="https://example.com",
+                    status_code=200,
+                    content=b"<html>ok</html>",
+                    headers={},
+                    successful=True,
+                    robots_compliant=True,
+                )
                 request = CrawlRequest(url="https://example.com")
                 result = await crawler.crawl(request)
                 assert result.successful is True

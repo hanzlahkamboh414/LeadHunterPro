@@ -7,7 +7,7 @@ search provider is configured (Blueprint §6 Phase 4, §7):
         → SourceOrchestrator
             → DirectoryCrawlSource  (SUCCESS — real planner, stubbed network)
             → SearchProviderSource  (EMPTY   — registry cleared, no keys)
-            → FixtureSource         (runs, but data_source stays "live")
+            → FixtureSource         (disabled in live mode — accuracy-first)
 
 Everything is the real production pipeline except the network: HTTPCrawler
 is replaced at its origin module so no DNS/TCP occurs (the sandbox blocks

@@ -8,7 +8,7 @@ here; results are plain dataclasses suitable for API responses.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 
 SUPPORTED_SOURCES = Literal[
@@ -36,6 +36,11 @@ class CompanyDiscoveryResult:
     confidence: float = 0.5
     source_url: str = ""
     discovery_reason: str = ""
+    # Phase 3 Step 4: additive passthrough of the connector's per-record
+    # metadata (deterministic ``verification`` + additive ``ai`` /
+    # ``qualification``) so it reaches the discovery API output. Never
+    # recomputed here — carried verbatim from the source ConnectorResult.
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
     def normalized_website(self) -> str:

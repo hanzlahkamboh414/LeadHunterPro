@@ -213,6 +213,7 @@ class TestTexasProcurementAPI:
         )
         assert r.status_code != 404
 
+    @pytest.mark.network
     def test_endpoint_returns_200(self):
         from fastapi.testclient import TestClient
         from app.main import app
@@ -223,6 +224,7 @@ class TestTexasProcurementAPI:
         )
         assert r.status_code == 200
 
+    @pytest.mark.network
     def test_endpoint_returns_companies(self):
         from fastapi.testclient import TestClient
         from app.main import app
@@ -259,6 +261,7 @@ class TestTexasProcurementAPI:
         )
         assert r.status_code == 422
 
+    @pytest.mark.network
     def test_endpoint_response_schema(self):
         from fastapi.testclient import TestClient
         from app.main import app

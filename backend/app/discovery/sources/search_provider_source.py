@@ -124,8 +124,12 @@ class SearchProviderSource(BaseSource):
                 {
                     "company_name": result.title,
                     "website": result.url,
-                    "city": city or "",
-                    "state": state,
+                    # ACCURACY-FIRST (Phase 2 Step 3): the query is search
+                    # intent, never company location evidence. A search
+                    # result carries NO city/state unless the result itself
+                    # proves one — empty means unknown, not filled from query.
+                    "city": "",
+                    "state": "",
                     "country": "USA",
                     "trade_category": "",  # Classified downstream
                     "industry_focus": result.snippet or result.title,

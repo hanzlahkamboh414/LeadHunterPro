@@ -1,0 +1,1 @@
+"""Offline tests for the email discovery / format-validation wiring (Increment 1)."""

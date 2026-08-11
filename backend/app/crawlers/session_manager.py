@@ -36,8 +36,7 @@ class SessionManager:
             import aiohttp
 
             self._session = aiohttp.ClientSession(
-                timer=None,
-                auto_decompress=False,
+                auto_decompress=True,
                 trust_env=True,
             )
         return self._session

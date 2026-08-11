@@ -43,6 +43,7 @@ class TestTexasProcurementConnector:
         """Health check returns True when fixtures loaded."""
         assert connector.health_check() is True
 
+    @pytest.mark.network
     def test_search_returns_results(self, connector):
         """Search returns valid results."""
         results, _ = connector.search("Roofing", "Dallas Texas", 20)
@@ -50,6 +51,7 @@ class TestTexasProcurementConnector:
         assert len(results) >= 1
         assert all(isinstance(r, ConnectorResult) for r in results)
 
+    @pytest.mark.network
     def test_search_roofing_dallas(self, connector):
         """Roofing Dallas returns roofing contractors."""
         results, _ = connector.search("Roofing", "Dallas Texas", 20)
@@ -60,6 +62,7 @@ class TestTexasProcurementConnector:
                 or "roofing" in r.metadata.get("trade_category", "").lower()
             )
 
+    @pytest.mark.network
     def test_search_plumbing_houston(self, connector):
         """Plumbing Houston returns plumbing contractors."""
         results, _ = connector.search("Plumbing", "Houston Texas", 20)
@@ -69,11 +72,13 @@ class TestTexasProcurementConnector:
             trade = r.metadata.get("trade_category", "").lower()
             assert "plumb" in focus or "plumb" in trade or "pipe" in focus
 
+    @pytest.mark.network
     def test_search_electrical_austin(self, connector):
         """Electrical Austin returns electrical contractors."""
         results, _ = connector.search("Electrical", "Austin Texas", 20)
         assert len(results) >= 1
 
+    @pytest.mark.network
     def test_search_hvac_statewide(self, connector):
         """HVAC Texas returns HVAC contractors statewide."""
         results, _ = connector.search("HVAC", "TX", 50)
@@ -81,11 +86,13 @@ class TestTexasProcurementConnector:
         # All should be in TX
         assert all(r.state == "TX" for r in results)
 
+    @pytest.mark.network
     def test_search_limit_respected(self, connector):
         """Limit parameter is respected."""
         results, _ = connector.search("Roofing", "TX", 5)
         assert len(results) <= 5
 
+    @pytest.mark.network
     def test_discovery_reason_meaningful(self, connector):
         """Discovery reasons are human-readable."""
         results, _ = connector.search("Roofing", "Dallas Texas", 5)
@@ -94,6 +101,7 @@ class TestTexasProcurementConnector:
             assert len(reason) > 0
             assert "Matched" in reason or "contractor" in reason.lower()
 
+    @pytest.mark.network
     def test_source_metadata_indicates_fixture(self, connector):
         """Metadata indicates fixture-based data source."""
         _, metadata = connector.search("Roofing", "TX", 10)
@@ -104,11 +112,13 @@ class TestTexasProcurementConnector:
         # Either fallback_reason or data_source confirms bridge
         assert sm.get("data_source") == "fixture" or "fallback" in sm.get("fallback_reason", "").lower()
 
+    @pytest.mark.network
     def test_search_empty_industry(self, connector):
         """Empty industry returns empty results."""
         results, _ = connector.search("", "TX", 10)
         assert len(results) == 0
 
+    @pytest.mark.network
     def test_search_unknown_city(self, connector):
         """Unknown city returns empty results."""
         results, _ = connector.search("Roofing", "NonExistentCity ZZ", 10)
@@ -312,48 +322,56 @@ class TestFixtureData:
 class TestConnectorIntegration:
     """Integration tests for connector with expanded dataset."""
 
+    @pytest.mark.network
     def test_roofing_returns_results(self):
         """Roofing query returns results."""
         connector = TexasProcurementConnector()
         results, _ = connector.search("Roofing", "Dallas Texas", 20)
         assert len(results) >= 1
 
+    @pytest.mark.network
     def test_plumbing_returns_results(self):
         """Plumbing query returns results."""
         connector = TexasProcurementConnector()
         results, _ = connector.search("Plumbing", "Houston Texas", 20)
         assert len(results) >= 1
 
+    @pytest.mark.network
     def test_electrical_returns_results(self):
         """Electrical query returns results."""
         connector = TexasProcurementConnector()
         results, _ = connector.search("Electrical", "Austin Texas", 20)
         assert len(results) >= 1
 
+    @pytest.mark.network
     def test_hvac_returns_results(self):
         """HVAC query returns results."""
         connector = TexasProcurementConnector()
         results, _ = connector.search("HVAC", "TX", 50)
         assert len(results) >= 5
 
+    @pytest.mark.network
     def test_general_contractor_returns_results(self):
         """General Contractor query returns results."""
         connector = TexasProcurementConnector()
         results, _ = connector.search("General Contractor", "TX", 50)
         assert len(results) >= 10
 
+    @pytest.mark.network
     def test_concrete_returns_results(self):
         """Concrete query returns results."""
         connector = TexasProcurementConnector()
         results, _ = connector.search("Concrete", "Dallas Texas", 20)
         assert len(results) >= 1
 
+    @pytest.mark.network
     def test_painting_returns_results(self):
         """Painting query returns results."""
         connector = TexasProcurementConnector()
         results, _ = connector.search("Painting", "Houston Texas", 20)
         assert len(results) >= 1
 
+    @pytest.mark.network
     def test_no_duplicates(self):
         """Results from single connector have no duplicate domains."""
         connector = TexasProcurementConnector()
@@ -363,12 +381,14 @@ class TestConnectorIntegration:
         assert len(results) > 0
         assert all(r.website for r in results)
 
+    @pytest.mark.network
     def test_all_results_have_websites(self):
         """All results have non-empty websites."""
         connector = TexasProcurementConnector()
         results, _ = connector.search("Roofing", "TX", 50)
         assert all(r.website for r in results)
 
+    @pytest.mark.network
     def test_all_results_have_names(self):
         """All results have non-empty names."""
         connector = TexasProcurementConnector()
@@ -390,7 +410,12 @@ class TestNormalizeCompany:
         return TexasProcurementConnector()
 
     def test_maps_plugin_shape_onto_connector_schema(self):
-        """A plugin company record becomes filterable and consumable."""
+        """A plugin company record becomes filterable and consumable.
+
+        The plugin record carries no location, so state/city stay empty —
+        accuracy-first: the query is a search target, never written into the
+        record (see ``_normalize_company`` docstring).
+        """
         company = self._connector()._normalize_company(
             {
                 "name": "Acme Roofing",
@@ -405,8 +430,8 @@ class TestNormalizeCompany:
         assert company["company_name"] == "Acme Roofing"
         assert company["industry_focus"] == "Roofing Commercial Roofing"
         assert company["trade_category"] == ""
-        assert company["state"] == "TX"
-        assert company["city"] == "dallas"
+        assert company["state"] == ""
+        assert company["city"] == ""
         assert company["data_provenance"] == "brave_search"
 
     def test_keeps_source_location_when_present(self):
@@ -429,15 +454,19 @@ class TestNormalizeCompany:
         assert company["industry_focus"] == "roofing"
         assert company["data_provenance"] == "live:3"
 
-    def test_fills_missing_location_from_query_only(self):
-        """Missing city stays empty when the query has none."""
+    def test_missing_location_stays_empty_from_query_only(self):
+        """Missing location stays empty even when the query names a target.
+
+        Accuracy-first: the query is a search target, never location
+        evidence — only a source-supplied state/city survives.
+        """
         company = self._connector()._normalize_company(
             {"name": "Solo Firm", "website": "https://solo.com/"},
             state="TX",
             city="",
         )
         assert company["company_name"] == "Solo Firm"
-        assert company["state"] == "TX"
+        assert company["state"] == ""
         assert company["city"] == ""
 
     def test_empty_services_do_not_clobber_other_fields(self):

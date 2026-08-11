@@ -69,6 +69,9 @@ def clean_companies(
             confidence=company.confidence,
             source_url=company.source_url,
             discovery_reason=company.discovery_reason,
+            # Phase 3 Step 4: verification + AI metadata survives dedup
+            # normalization unchanged.
+            metadata=dict(company.metadata),
         )
         cleaned.append(normalized)
         metrics.total_cleaned += 1

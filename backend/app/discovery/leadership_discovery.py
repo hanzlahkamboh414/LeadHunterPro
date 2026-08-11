@@ -5,6 +5,7 @@ from bs4 import BeautifulSoup
 
 from app.discovery.people_parser import PeopleParser
 from app.discovery.result_cleaner import ResultCleaner
+from app.email.domain_verifier import verify_email_domains
 
 
 class LeadershipDiscovery:
@@ -57,15 +58,14 @@ class LeadershipDiscovery:
                     "html.parser",
                 )
 
-                candidates = self.people_parser.extract_candidates(
+                records = self.people_parser.extract_candidates(
                     soup,
+                    page_url=url,
                 )
 
-                for candidate in candidates:
-
-                    candidate["page"] = url
-
-                    leaders.append(candidate)
+                for record in records:
+                    record.emails = verify_email_domains(record.emails)
+                    leaders.append(record.to_dict())
 
             except Exception:
                 continue

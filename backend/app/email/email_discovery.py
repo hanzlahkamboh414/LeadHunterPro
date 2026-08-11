@@ -1,8 +1,17 @@
-import re
+"""Email discovery — harvest emails from a company website.
+
+Extraction reuses the canonical format pattern and the existing format
+validators in ``app.email`` (rule #14 — no new validation logic), so only
+plausible, deduplicated, lowercased addresses leave this layer.
+"""
+
+from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin
+
+from app.email.email_cleaner import EMAIL_CLEAN_PATTERN, clean_emails
+from app.email.email_validator import is_valid_email
 
 
 class EmailDiscovery:
@@ -15,14 +24,10 @@ class EmailDiscovery:
         "/about-us",
     ]
 
-    EMAIL_PATTERN = re.compile(
-        r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
-    )
-
     def discover(
         self,
         website: str,
-    ):
+    ) -> dict:
 
         emails = set()
 
@@ -55,13 +60,13 @@ class EmailDiscovery:
 
                 html = response.text
 
-                # Regex Emails
-                found = self.EMAIL_PATTERN.findall(html)
+                # Regex Emails (canonical pattern from app/email/email_cleaner)
+                found = EMAIL_CLEAN_PATTERN.findall(html)
 
                 for email in found:
                     emails.add(email.lower())
 
-                # mailto:
+                # mailto: — reject malformed single addresses (format tier)
                 for a in soup.find_all(
                     "a",
                     href=True,
@@ -81,12 +86,16 @@ class EmailDiscovery:
                             .lower()
                         )
 
-                        emails.add(email)
+                        if is_valid_email(email):
+                            emails.add(email)
 
             except Exception:
                 continue
 
+        # Batch format check + dedupe + lowercase (format tier)
+        cleaned = clean_emails(sorted(emails))
+
         return {
-            "emails": sorted(emails),
-            "count": len(emails),
+            "emails": cleaned,
+            "count": len(cleaned),
         }

@@ -47,6 +47,11 @@ from app.search_providers.searxng import (
     SearXNGHTTPError,
     SearXNGProvider,
 )
+from app.search_providers.tavily import (
+    TavilyAPIError,
+    TavilyAuthError,
+    TavilySearchProvider,
+)
 
 __all__ = [
     "BaseSearchProvider",
@@ -56,6 +61,9 @@ __all__ = [
     "SearXNGConfigError",
     "SearXNGHTTPError",
     "SearXNGProvider",
+    "TavilyAPIError",
+    "TavilyAuthError",
+    "TavilySearchProvider",
     "SearchProviderRegistry",
     "SearchQuery",
     "SearchResponse",
@@ -95,6 +103,13 @@ def _auto_register_providers() -> None:
         provider = BraveSearchProvider(api_key=brave_key)
         registry.register(provider)
         logger.info("Auto-registered Brave Search provider")
+
+    # Tavily Search — register if API key is configured
+    tavily_key = getattr(settings, "TAVILY_SEARCH_API_KEY", "")
+    if tavily_key:
+        provider = TavilySearchProvider(api_key=tavily_key)
+        registry.register(provider)
+        logger.info("Auto-registered Tavily Search provider")
 
 
 _auto_register_providers()

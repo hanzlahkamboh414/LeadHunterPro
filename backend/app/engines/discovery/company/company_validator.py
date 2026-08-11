@@ -73,6 +73,9 @@ def validate_companies(
             confidence=min(company.confidence + 0.15, 1.0),
             source_url=company.source_url,
             discovery_reason=company.discovery_reason,
+            # Phase 3 Step 4: verification + AI metadata survives validation
+            # unchanged — only confidence is boosted here.
+            metadata=dict(company.metadata),
         )
         valid.append(company)
         metrics.total_validated += 1

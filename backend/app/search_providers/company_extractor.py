@@ -26,9 +26,13 @@ _ADDRESS_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# "City, ST" with a mandatory comma and an UPPERCASE state code, and no
+# case-insensitivity. The loose variant (optional comma, IGNORECASE)
+# matched HTML noise — e.g. "chro, ME" from "through ... member" — so a
+# state is now only accepted when it looks like an address: a Title-case
+# city immediately followed by ", " and a two-letter uppercase code.
 _CTY_STATE_PATTERN = re.compile(
-    r"(?:,\s*|^)([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s*,?\s*([A-Z]{2})\s*(?:\d{5})?",
-    re.IGNORECASE,
+    r"(?<![A-Za-z])([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s*,\s*([A-Z]{2})(?![A-Za-z])"
 )
 
 # Keywords that indicate non-contractor businesses (to reject)
@@ -528,20 +532,29 @@ class CompanyExtractor:
             Trade category string, or empty if unclassified.
         """
         text = f"{title} {industry_focus}".lower()
-        if context and context.get("industry_hint"):
-            text += f" {context['industry_hint'].lower()}"
 
-        best_match = ""
-        best_score = 0
-
+        # Classify from the page's own content only. The industry hint is
+        # the QUERY context, not page evidence — it may confirm a trade the
+        # page already states, but it must never manufacture a trade from
+        # nothing (a "Member Login" page must not become "roofing" just
+        # because the query said "Roofing" — CLAUDE.md §7). Mirrors the
+        # ContractorClassifier's hint handling.
+        content_scores: dict[str, int] = {}
         for trade, pattern in self._trade_patterns.items():
-            matches = pattern.findall(text)
-            score = len(matches)
-            if score > best_score:
-                best_score = score
-                best_match = trade
+            score = len(pattern.findall(text))
+            if score:
+                content_scores[trade] = score
 
-        return best_match
+        if context and context.get("industry_hint"):
+            hint = context["industry_hint"].lower()
+            for trade, pattern in self._trade_patterns.items():
+                if trade in content_scores and pattern.search(hint):
+                    content_scores[trade] += 5
+
+        if not content_scores:
+            return ""
+
+        return max(content_scores, key=content_scores.get)
 
     def _check_rejection(
         self,

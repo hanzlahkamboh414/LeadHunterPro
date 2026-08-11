@@ -337,11 +337,6 @@ Paste Result Below:
 <paste terminal output here>
 --------------------------------
 
-Status:
-WAITING FOR USER
-
-Do not continue until the user provides the result.
-
 ## 3. Sequential verification
 
 Only ONE verification step may be active.
@@ -377,15 +372,13 @@ Only update this checklist.
 
 Never create a new verification session.
 
-## 5. Bash failure rule
+## If Bash is temporarily unavailable:
 
-If Bash/classifier is unavailable:
+- Continue all non-Bash work.
+- Queue verification commands.
+- Resume verification when Bash becomes available.
 
-DO NOT retry.
-
-Immediately generate the Verification Card for manual execution.
-
-Wait.
+Only stop if no meaningful implementation work remains.
 
 ## 6. No implementation while verification is pending
 
@@ -411,3 +404,20 @@ Every implementation must include:
 - WAIT FOR USER
 
 Implementation is never considered complete until all verification steps are confirmed.
+
+## If the Bash safety classifier rejects a command:
+
+- Attempt the command only once.
+- Do not repeatedly retry the same command.
+- Continue implementation immediately.
+- Queue the verification.
+- Retry only after a substantial implementation milestone has completed.
+
+Repeated retries of the same blocked command are prohibited.
+Never enter WAITING FOR USER mode after a temporary tool failure.
+
+Only enter WAITING FOR USER if:
+
+- user approval is required,
+- a frozen component must change,
+- or implementation is impossible.

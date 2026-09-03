@@ -74,6 +74,11 @@ class Settings(BaseSettings):
     AI_BASE_URL: str = "https://router.bynara.id/v1"
     AI_MODEL: str = "agnes-2.0-flash"
     AI_API_KEY: str = Field(default="", repr=False)  # secret — see note above
+    # Second AI key for the deep-research stage. Lets one key carry the main
+    # pipeline (screening/refine/person/intent/scoring) while a second key
+    # carries the deep-dive growth research, so they do not throttle each other.
+    # Optional: falls back to AI_API_KEY when unset.
+    AI_API_KEY_2: str = Field(default="", repr=False)  # secret
 
     # Search Provider Configuration
     SEARXNG_URL: str = ""

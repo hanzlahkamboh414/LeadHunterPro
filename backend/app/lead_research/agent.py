@@ -24,6 +24,22 @@ from app.lead_research.scoring import LeadScorer
 
 logger = logging.getLogger(__name__)
 
+#: Industry keywords that flag a company as construction-related, triggering
+#: the deep-dive (growth/need) research stage.
+_CONSTRUCTION_KEYWORDS = (
+    "contractor", "construction", "general contractor", "subcontractor",
+    "gc", "builder", "building", "estimating", "preconstruction",
+    "develop", "developer", "site work", "paving", "concrete", "asphalt",
+    "excavat", "earthwork", "demolition", "framing", "roofing", "electrical",
+    "plumbing", "mechanical", "hvac", "masonry", "steel", "civil",
+)
+
+
+def _is_construction(industry: str) -> bool:
+    """Return True if an industry string indicates construction-related work."""
+    ind = (industry or "").lower()
+    return any(kw in ind for kw in _CONSTRUCTION_KEYWORDS)
+
 
 def _is_free_mail(domain: str) -> bool:
     """Check if domain is a free email provider."""
@@ -123,6 +139,26 @@ class AILeadResearchAgent:
         except Exception as exc:
             logger.error("Stage 2 failed for %s: %s", email, exc)
             source_errors["person_research"] = str(exc)
+
+        # Stage 1b: deep-dive (only for qualifying leads)
+        # If the company is construction-related and we have a name + reachable
+        # person, run the growth/need queries (hiring, expansion, bid-win).
+        if (
+            dossier.company.name
+            and _is_construction(dossier.company.industry)
+            and dossier.person.bound
+        ):
+            try:
+                deep_facts = self._company.research_deep(
+                    domain=dossier.refined_domain or domain,
+                    company_name=dossier.company.name,
+                )
+                if deep_facts:
+                    dossier.company.facts.extend(deep_facts)
+                    sources_checked.append("deep_research")
+            except Exception as exc:
+                logger.error("Deep research failed for %s: %s", email, exc)
+                source_errors["deep_research"] = str(exc)
 
         # Stage 3: intent + timing
         try:

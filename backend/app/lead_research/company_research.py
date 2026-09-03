@@ -19,7 +19,7 @@ import re
 from typing import Any, Callable, Protocol
 
 from app.lead_research.models import AIEvidence, CompanyProfile
-from app.lead_research.prompts import company_research_prompt
+from app.lead_research.prompts import company_research_prompt, deep_research_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +199,18 @@ class CompanyResearcher:
             self._ai_ask = AIGateway().ask
         return self._ai_ask
 
+    def _get_deep_ai_ask(self) -> AIAskFn:
+        """AI callable for the deep-research stage, on the second key.
+
+        Uses ``AI_API_KEY_2`` (falling back to the primary key) so deep
+        research runs on its own rate limit, parallel to the main pipeline.
+        When a test injects ``ai_ask``, that fake is reused (no network).
+        """
+        if self._ai_ask is not None:
+            return self._ai_ask
+        from app.ai.gateway import make_ai_ask
+        return make_ai_ask()
+
     def _get_search(self) -> SearchFn:
         if self._search is not None:
             return self._search
@@ -310,36 +322,78 @@ class CompanyResearcher:
         result["original_domain"] = domain
         return result
 
+    def research_deep(self, domain: str, company_name: str) -> list[AIEvidence]:
+        """Stage 1b — deep-dive growth/need signals for a qualifying lead.
+
+        Runs the 6 growth queries (hiring, expansion, bid-win, news, license,
+        maps) and returns an AI-cited list of growth facts. Returns ``[]`` on
+        any failure (graceful — deep dive is additive, never fatal).
+        """
+        search_fn = self._get_search()
+        search_results = self._gather_search(
+            search_fn, "", domain, queries=self._deep_queries(domain)
+        )
+
+        prompt = deep_research_prompt(
+            domain=domain,
+            company_name=company_name,
+            search_results=_format_search_results(search_results),
+        )
+
+        # Deep research runs on its own lane (AI_API_KEY_2) so it does not
+        # share a rate limit with the main pipeline.
+        ai_fn = self._get_deep_ai_ask()
+        try:
+            raw = ai_fn(prompt)
+        except Exception as exc:
+            logger.error("Deep research AI call failed for %s: %s", domain, exc)
+            return []
+
+        data = _parse_ai_json(raw)
+        if not data:
+            return []
+
+        return [_dict_to_evidence(f) for f in data.get("facts", []) if isinstance(f, dict)]
+
     # -- private helpers ----
 
-    def _gather_search(self, search_fn: SearchFn, email: str, domain: str) -> list[dict[str, str]]:
-        """Run multiple search queries and merge unique results.
-
-        Search breadth (Medium+ scope):
-        1. Email lookup
-        2. Domain/company homepage
-        3. LinkedIn company profile
-        4. Google Maps / business listing
-        5. BBB (Better Business Bureau)
-        6. Texas contractor license
-        7. News / recent activity
-        8. Hiring signals (growth -> estimation load)
-        9. New office / expansion
-        10. Recent bid win (authentication + timing)
-        """
-        queries = [
+    def _screening_queries(self, email: str, domain: str) -> list[str]:
+        """Fast screening queries — identity + verification (used on every lead)."""
+        return [
             f'"{email}"',
             domain,
             f'"{domain}" company',
             f'"{domain}" site:linkedin.com/company',
-            f'"{domain}" "google maps" OR "google business"',
             f'"{domain}" site:bbb.org',
+        ]
+
+    def _deep_queries(self, domain: str) -> list[str]:
+        """Deep-dive queries — growth/need signals (only for qualifying leads)."""
+        return [
+            f'"{domain}" "google maps" OR "google business"',
             f'"{domain}" Texas contractor license',
             f'"{domain}" news construction',
             f'"{domain}" hiring estimator OR "cost estimator" OR "project manager"',
             f'"{domain}" "new office" OR expansion OR "opening location"',
             f'"{domain}" "awarded" OR "low bidder" OR "bid award" OR "contract award"',
         ]
+
+    def _gather_search(
+        self,
+        search_fn: SearchFn,
+        email: str,
+        domain: str,
+        queries: list[str] | None = None,
+    ) -> list[dict[str, str]]:
+        """Run multiple search queries and merge unique results.
+
+        Two-stage search breadth:
+        - Screening (5 queries): email, domain, company, LinkedIn, BBB
+        - Deep (6 queries, via ``research_deep``): maps, license, news,
+          hiring, expansion, bid-win
+        """
+        if queries is None:
+            queries = self._screening_queries(email, domain)
         seen_urls: set[str] = set()
         results: list[dict[str, str]] = []
         for q in queries:

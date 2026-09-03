@@ -52,6 +52,57 @@ If the company cannot be identified at all, set company_name to "" and explain i
 """
 
 
+def deep_research_prompt(
+    domain: str,
+    company_name: str,
+    search_results: str,
+) -> str:
+    """Stage 1b — deep-dive growth/need signals (only for qualifying leads).
+
+    Extracts hiring, expansion, and recent bid-win signals that indicate
+    estimation demand and urgency.
+    """
+    return f"""\
+You are a preconstruction sales analyst for The Best Estimator LLC (Texas).
+
+TASK: Deep-dive the growth and need signals for this company to judge whether
+they likely need estimation services, and how urgent. Return structured JSON facts.
+
+INPUT:
+- Domain: {domain}
+- Company name: {company_name}
+- Search results (from growth/bid/hiring/news queries):
+{search_results}
+
+LOOK FOR AND REPORT:
+1. HIRING — is the company hiring estimators, project managers, or construction staff?
+   (indicates growth -> estimation load). Report the role + where (LinkedIn jobs, Indeed, etc.).
+2. EXPANSION — any new office, larger facility, or location opening? (more workload -> more bids)
+3. RECENT BID WIN — any contract award or low-bidder win, and HOW RECENT (days vs months)?
+   Recency raises urgency.
+4. ACTIVE BIDDING — plan-deposit lists, open RFPs, bid announcements.
+5. NEWS — recent news indicating growth or new projects.
+
+RULES:
+1. Every fact MUST cite source_url. If you cannot cite, mark it "unverified".
+2. Do NOT invent facts. If a signal was not found, DO NOT claim it — just omit it.
+3. Return ONLY valid JSON matching this exact schema — no markdown, no commentary:
+
+{{
+  "facts": [
+    {{
+      "claim": "string — one growth/need signal fact (include recency if known)",
+      "source_url": "string — URL that backs this claim",
+      "source_type": "string — website | search_result | directory | news | other",
+      "confidence": "verified or unverified"
+    }}
+  ]
+}}
+
+If no growth/need signals are found, return {{"facts": []}}.
+"""
+
+
 def person_research_prompt(
     email: str,
     refined_domain: str,

@@ -228,7 +228,7 @@ def test_research_gathers_multiple_search_queries():
         refine_domain=make_fake_refine("acme.com"),
     )
     researcher.research("john@acme.com", "acme.com")
-    assert len(seen) == 11  # email, domain, company, LinkedIn, maps, BBB, license, news, hiring, expansion, bid-win
+    assert len(seen) == 5  # screening: email, domain, company, LinkedIn, BBB
 
 
 def test_research_fetches_home_about_contact():
@@ -291,3 +291,83 @@ def test_research_with_domain_returns_dict():
     assert result["refined_domain"] == "acme.com"
     assert result["original_domain"] == "acme.comz"
     assert result["name"] == "Acme Construction"
+
+
+# ---------------------------------------------------------------------------
+# CompanyResearcher.research_deep  (Stage 1b / multi-key lane)
+# ---------------------------------------------------------------------------
+
+def test_research_deep_returns_evidence():
+    """research_deep runs deep queries and returns cited AIEvidence."""
+    researcher = CompanyResearcher(
+        ai_ask=make_fake_ai({
+            "facts": [
+                {"claim": "Hiring estimator (LinkedIn)", "source_url": "https://linkedin.com/jobs/x", "source_type": "search_result", "confidence": "verified"},
+                {"claim": "Won bid 2 days ago", "source_url": "https://news.com/award", "source_type": "news", "confidence": "verified"},
+            ]
+        }),
+        search=make_fake_search(),
+        fetch_page=make_fake_fetch(),
+        refine_domain=make_fake_refine("acme.com"),
+    )
+    facts = researcher.research_deep("acme.com", "Acme Construction")
+    assert len(facts) == 2
+    assert facts[0].claim == "Hiring estimator (LinkedIn)"
+    assert facts[0].confidence == "verified"
+    assert facts[1].source_url == "https://news.com/award"
+
+
+def test_research_deep_runs_deep_queries():
+    """research_deep issues the 6 deep-dive queries (not the 5 screening ones)."""
+    seen = []
+
+    def tracking_search(query: str) -> list[dict[str, str]]:
+        seen.append(query)
+        return []
+
+    researcher = CompanyResearcher(
+        ai_ask=make_fake_ai({"facts": []}),
+        search=tracking_search,
+        fetch_page=make_fake_fetch(),
+        refine_domain=make_fake_refine("acme.com"),
+    )
+    researcher.research_deep("acme.com", "Acme Construction")
+    assert len(seen) == 6
+    # Deep queries target growth/need signals, not identity screening
+    joined = " ".join(seen).lower()
+    assert "license" in joined
+    assert "hiring" in joined
+    assert "bid" in joined or "award" in joined
+
+
+def test_research_deep_reuses_injected_ai():
+    """Injected ai_ask is reused for the deep lane (test path of multi-key)."""
+    calls = []
+
+    def capturing_ai(prompt: str) -> str:
+        calls.append(prompt)
+        return json.dumps({"facts": [{"claim": "expanding", "source_url": "", "source_type": "other", "confidence": "unverified"}]})
+
+    researcher = CompanyResearcher(
+        ai_ask=capturing_ai,
+        search=make_fake_search(),
+        fetch_page=make_fake_fetch(),
+        refine_domain=make_fake_refine("acme.com"),
+    )
+    researcher.research_deep("acme.com", "Acme Construction")
+    assert len(calls) == 1
+    assert "Acme Construction" in calls[0]
+
+
+def test_research_deep_ai_error_returns_empty():
+    """Deep-research AI failure returns [] (additive, never fatal)."""
+    def boom(prompt: str) -> str:
+        raise RuntimeError("deep key down")
+
+    researcher = CompanyResearcher(
+        ai_ask=boom,
+        search=make_fake_search(),
+        fetch_page=make_fake_fetch(),
+        refine_domain=make_fake_refine("acme.com"),
+    )
+    assert researcher.research_deep("acme.com", "Acme Construction") == []

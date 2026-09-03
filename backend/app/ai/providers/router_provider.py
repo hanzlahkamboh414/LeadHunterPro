@@ -45,9 +45,12 @@ class RouterProvider(BaseAIProvider):
     time, so the class carries no vendor-specific knowledge at all.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, api_key: str | None = None) -> None:
+        # Allow a specific key to be injected (e.g. the second key for deep
+        # research). Falls back to the primary configured key.
+        key = api_key if api_key else settings.AI_API_KEY
         self._client = openai.OpenAI(
-            api_key=settings.AI_API_KEY,
+            api_key=key,
             base_url=settings.AI_BASE_URL,
         )
         self._model = settings.AI_MODEL
@@ -55,7 +58,7 @@ class RouterProvider(BaseAIProvider):
             "RouterProvider ready: base_url=%s model=%s (key length %d, value never logged)",
             settings.AI_BASE_URL,
             self._model,
-            len(settings.AI_API_KEY),
+            len(key),
         )
 
     def generate(self, prompt: str) -> str:

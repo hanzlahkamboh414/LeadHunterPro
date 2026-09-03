@@ -88,6 +88,16 @@ class AILeadResearchAgent:
         source_errors: dict[str, str] = {}
 
         # Stage 0: triage
+        # Derive the domain from the email when the lead's registered-domain
+        # field is empty (plan-holder rows often omit it for personal/free-mail
+        # boxes). Without this, free-mail and generic triage below would
+        # silently miss those leads and run the full (expensive) research
+        # pipeline on a gmail/aol address — and worse, let a name be bound from
+        # an unverifiable local-part (e.g. "bonwaterinc" -> "Bonadiman Water").
+        if not (domain or "").strip() and "@" in (email or ""):
+            domain = email.split("@", 1)[1].strip()
+            dossier.domain = domain
+
         if _is_free_mail(domain):
             # Free-mail domains (gmail/yahoo/hotmail) are NOT deleted — they
             # are kept at second priority (nurture) so a person can still be

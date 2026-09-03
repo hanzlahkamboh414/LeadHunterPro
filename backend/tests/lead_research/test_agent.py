@@ -124,6 +124,18 @@ def test_triage_generic_email_goes_to_generic_section():
     assert dossier.sources_checked == []
 
 
+def test_empty_domain_free_mail_is_derived_and_triaged():
+    """A free-mail lead with an empty registered-domain field is still triaged
+    to nurture (domain derived from the email) instead of running the full
+    pipeline — which could otherwise bind a name from the local part."""
+    agent = _make_agent()
+    dossier = agent.research("dadoduffy@aol.com", "")
+    assert dossier.recommendation == "nurture"
+    assert "free mail" in dossier.fit.lower()
+    assert dossier.domain == "aol.com"
+    assert dossier.sources_checked == []
+
+
 def test_company_ai_failure_still_runs_pipeline():
     """Stage 1 AI failure → graceful degradation, pipeline continues."""
     company = CompanyResearcher(

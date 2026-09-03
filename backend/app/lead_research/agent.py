@@ -149,6 +149,10 @@ class AILeadResearchAgent:
             and _is_construction(dossier.company.industry)
             and dossier.person.bound
         ):
+            # Recorded as checked whether or not it finds facts, so a run where
+            # the deep lane found no growth signals is distinguishable from one
+            # where it never ran (CLAUDE.md §6 — honest logging).
+            sources_checked.append("deep_research")
             try:
                 deep_facts = self._company.research_deep(
                     domain=dossier.refined_domain or domain,
@@ -156,7 +160,8 @@ class AILeadResearchAgent:
                 )
                 if deep_facts:
                     dossier.company.facts.extend(deep_facts)
-                    sources_checked.append("deep_research")
+                else:
+                    logger.info("Deep research for %s returned no growth signals", email)
             except Exception as exc:
                 logger.error("Deep research failed for %s: %s", email, exc)
                 source_errors["deep_research"] = str(exc)

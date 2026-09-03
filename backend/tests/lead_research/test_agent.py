@@ -189,3 +189,52 @@ def test_dossier_to_dict_roundtrip():
     assert dossier2.email == dossier.email
     assert dossier2.company.name == dossier.company.name
     assert dossier2.potential_score == dossier.potential_score
+
+
+def test_deep_research_recorded_even_when_empty():
+    """Deep-research lane shows in sources_checked even if it finds no signals."""
+    # Company returns no deep facts (simulates 'no growth signals found')
+    company = CompanyResearcher(
+        ai_ask=make_fake_ai({
+            "company_name": "Acme Construction",
+            "industry": "General Contractor",
+            "location": "Dallas, TX",
+            "website": "https://acme.com",
+            "facts": [{"claim": "GC", "source_url": "https://acme.com", "source_type": "website", "confidence": "verified"}],
+        }),
+        search=make_fake_search(),
+        fetch_page=make_fake_fetch(),
+        refine_domain=make_fake_refine("acme.com"),
+    )
+    # Spy on research_deep so the real multi-key lane is NOT invoked
+    original = company.research_deep
+    company.research_deep = lambda domain, company_name: []  # no signals
+    assert original is not None  # sanity: method existed
+
+    person = PersonResearcherAI(
+        deterministic=None,
+        ai_ask=make_fake_ai({
+            "person_name": "Jane Doe", "person_role": "Owner", "role_relevance": True, "bound": True,
+            "evidence": [{"claim": "Owner", "source_url": "https://acme.com", "source_type": "website", "confidence": "verified"}],
+        }),
+        search=make_fake_search(),
+        fetch_page=make_fake_fetch(),
+    )
+    intent = IntentTimingAnalyzer(ai_ask=make_fake_ai({
+        "needs_estimation": "yes", "signal": "", "reason": "", "evidence": [],
+        "timing_window": "unknown", "timing_reason": "", "timing_events": [],
+    }))
+    scorer = LeadScorer(ai_ask=make_fake_ai({
+        "fit": "partial", "potential_score": 5.0, "recommendation": "nurture", "reasoning": "",
+    }))
+
+    agent = AILeadResearchAgent(
+        company_researcher=company, person_researcher=person,
+        intent_analyzer=intent, scorer=scorer,
+    )
+    dossier = agent.research("jane@acme.com", "acme.com")
+    assert dossier.company.name == "Acme Construction"
+    assert dossier.person.bound is True
+    # Deep lane was attempted and recorded, even though it found nothing
+    assert "deep_research" in dossier.sources_checked
+    assert dossier.source_errors.get("deep_research") is None

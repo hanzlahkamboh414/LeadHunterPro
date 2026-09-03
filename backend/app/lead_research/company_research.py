@@ -381,14 +381,25 @@ class CompanyResearcher:
     # -- private helpers ----
 
     def _screening_queries(self, email: str, domain: str) -> list[str]:
-        """Fast screening queries — identity + verification (used on every lead)."""
-        return [
-            f'"{email}"',
-            domain,
-            f'"{domain}" company',
-            f'"{domain}" site:linkedin.com/company',
-            f'"{domain}" site:bbb.org',
-        ]
+        """Fast screening queries — identity + verification (used on every lead).
+
+        Queries are only emitted when their anchor term is present. An empty
+        ``domain`` would otherwise produce a bare ``site:`` query (e.g.
+        ``"" site:linkedin.com/company``), which Tavily rejects with HTTP 400
+        "Query cannot consist only of site: operators" — the empty quoted
+        string is stripped, leaving only the site: operator.
+        """
+        queries: list[str] = []
+        if (email or "").strip():
+            queries.append(f'"{email}"')
+        if (domain or "").strip():
+            queries.extend([
+                domain,
+                f'"{domain}" company',
+                f'"{domain}" site:linkedin.com/company',
+                f'"{domain}" site:bbb.org',
+            ])
+        return queries
 
     def _deep_queries(self, domain: str) -> list[str]:
         """Deep-dive queries — growth/need signals (only for qualifying leads)."""

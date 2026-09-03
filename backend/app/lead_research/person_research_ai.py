@@ -349,15 +349,25 @@ class PersonResearcherAI:
         adapter call owns its event loop, so threads are safe) — same win as
         company_research: sequential queries collapse into ~one round.
         """
-        queries = [
-            f'"{email}"',
-            f'"{domain}" company team',
-            f'"{domain}" about contact',
-            f'"{domain}" site:linkedin.com',
-        ]
+        # Queries are only emitted when their anchor term is present: an empty
+        # ``domain`` would otherwise produce a bare ``site:`` query (Tavily 400
+        # "cannot consist only of site: operators"), and an empty ``email`` a
+        # bare ``""`` ("Query is missing").
+        queries: list[str] = []
+        if (email or "").strip():
+            queries.append(f'"{email}"')
+        if (domain or "").strip():
+            queries.extend([
+                f'"{domain}" company team',
+                f'"{domain}" about contact',
+                f'"{domain}" site:linkedin.com',
+            ])
         if company_name:
             queries.append(f'"{company_name}" site:linkedin.com/in')
-            queries.append(f'"{company_name}" "{email.split("@")[0]}"')
+            if (email or "").strip():
+                local = email.split("@")[0].strip()
+                if local:
+                    queries.append(f'"{company_name}" "{local}"')
             queries.append(f'"{company_name}" estimator OR estimating OR "cost engineer"')
         seen_urls: set[str] = set()
         results: list[dict[str, str]] = []

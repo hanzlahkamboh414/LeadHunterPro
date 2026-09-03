@@ -241,7 +241,7 @@ def test_gathers_multiple_search_queries():
         fetch_page=make_fake_fetch(),
     )
     researcher.research("jane@acme.com", "acme.com")
-    assert len(seen) == 3  # email, domain team, domain about contact
+    assert len(seen) == 4  # email, domain team, domain about contact, linkedin
 
 
 def test_fetches_team_pages():

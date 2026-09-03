@@ -228,7 +228,7 @@ def test_research_gathers_multiple_search_queries():
         refine_domain=make_fake_refine("acme.com"),
     )
     researcher.research("john@acme.com", "acme.com")
-    assert len(seen) == 3  # email, domain, domain company
+    assert len(seen) == 8  # email, domain, company, LinkedIn, maps, BBB, license, news
 
 
 def test_research_fetches_home_about_contact():

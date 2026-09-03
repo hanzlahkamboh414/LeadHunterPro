@@ -313,11 +313,26 @@ class CompanyResearcher:
     # -- private helpers ----
 
     def _gather_search(self, search_fn: SearchFn, email: str, domain: str) -> list[dict[str, str]]:
-        """Run multiple search queries and merge unique results."""
+        """Run multiple search queries and merge unique results.
+
+        Search breadth (Medium scope):
+        1. Email lookup
+        2. Domain/company homepage
+        3. LinkedIn company profile
+        4. Google Maps / business listing
+        5. BBB (Better Business Bureau)
+        6. Texas contractor license
+        7. News / recent activity
+        """
         queries = [
             f'"{email}"',
             domain,
             f'"{domain}" company',
+            f'"{domain}" site:linkedin.com/company',
+            f'"{domain}" "google maps" OR "google business"',
+            f'"{domain}" site:bbb.org',
+            f'"{domain}" Texas contractor license',
+            f'"{domain}" news construction',
         ]
         seen_urls: set[str] = set()
         results: list[dict[str, str]] = []
@@ -333,11 +348,14 @@ class CompanyResearcher:
         return results
 
     def _gather_site(self, fetch_fn: FetchPageFn, domain: str) -> str:
-        """Fetch homepage and a few likely subpages."""
+        """Fetch homepage and likely subpages for company info."""
         urls_to_try = [
             f"https://{domain}",
             f"https://{domain}/about",
             f"https://{domain}/contact",
+            f"https://{domain}/services",
+            f"https://{domain}/projects",
+            f"https://{domain}/careers",
         ]
         all_content = ""
         for url in urls_to_try:

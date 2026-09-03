@@ -38,8 +38,21 @@ def _run_provider(provider: Any, query: str, num: int) -> list[dict[str, Any]]:
     import asyncio
 
     async def _do():
-        resp = await provider.search(SearchQuery(keywords=query, num_results=num))
-        return resp
+        try:
+            resp = await provider.search(SearchQuery(keywords=query, num_results=num))
+            return resp
+        finally:
+            # Each query runs in its own event loop (asyncio.run below). A
+            # provider that lazily caches an aiohttp session would otherwise
+            # reuse a session bound to a now-closed loop on the next query,
+            # producing "Event loop is closed" timeouts. Close it so the next
+            # loop creates a fresh session.
+            close = getattr(provider, "close", None)
+            if callable(close):
+                try:
+                    await close()
+                except Exception:
+                    pass
 
     try:
         resp = asyncio.run(_do())

@@ -218,7 +218,7 @@ class PersonResearcherAI:
     ) -> PersonFindings:
         """AI-based person attribution when deterministic fails."""
         search_fn = self._get_search()
-        search_results = self._gather_search(search_fn, email, refined_domain)
+        search_results = self._gather_search(search_fn, email, refined_domain, company_name)
 
         fetch_fn = self._get_fetch_page()
         site_content = self._gather_site(fetch_fn, refined_domain)
@@ -286,13 +286,25 @@ class PersonResearcherAI:
 
     # -- private helpers ----
 
-    def _gather_search(self, search_fn: SearchFn, email: str, domain: str) -> list[dict[str, str]]:
-        """Run multiple search queries and merge unique results."""
+    def _gather_search(self, search_fn: SearchFn, email: str, domain: str, company_name: str = "") -> list[dict[str, str]]:
+        """Run multiple search queries and merge unique results.
+
+        Search breadth (Medium scope):
+        1. Exact email lookup
+        2. Company team/about/contact
+        3. LinkedIn company + person
+        4. Industry association membership
+        """
         queries = [
             f'"{email}"',
             f'"{domain}" company team',
             f'"{domain}" about contact',
+            f'"{domain}" site:linkedin.com',
         ]
+        if company_name:
+            queries.append(f'"{company_name}" site:linkedin.com/in')
+            queries.append(f'"{company_name}" "{email.split("@")[0]}"')
+            queries.append(f'"{company_name}" estimator OR estimating OR "cost engineer"')
         seen_urls: set[str] = set()
         results: list[dict[str, str]] = []
         for q in queries:
@@ -314,6 +326,8 @@ class PersonResearcherAI:
             f"https://{domain}/contact",
             f"https://{domain}/team",
             f"https://{domain}/our-team",
+            f"https://{domain}/leadership",
+            f"https://{domain}/people",
         ]
         all_content = ""
         for url in urls_to_try:

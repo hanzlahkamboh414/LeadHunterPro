@@ -17,6 +17,13 @@ import os
 # Ensure backend is on path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+# Load .env (TAVILY_SEARCH_API_KEY, AI_API_KEY, etc.)
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
+except ImportError:
+    pass
+
 
 def cmd_research(args: argparse.Namespace) -> int:
     """Research a single email+domain."""

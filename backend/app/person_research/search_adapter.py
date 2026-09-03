@@ -32,6 +32,74 @@ class RegistryIndexedSearch:
                 return results
         return []
 
+    def search_many(self, queries: list[str]) -> list[list[dict[str, Any]]]:
+        """Run MANY queries concurrently inside ONE event loop.
+
+        This is the correct concurrency primitive for the aiohttp-backed
+        providers: each provider holds a shared lazy ``aiohttp`` session, and
+        that session must live in the SAME loop that uses it. Running one
+        ``asyncio.run`` per query in parallel threads would bind the shared
+        session to a first thread's loop and then fail every other thread
+        with a cross-loop ``CancelledError``/``Event loop is closed``.
+
+        So all queries run together via ``asyncio.gather`` in a single loop,
+        then every provider session is closed inside that same loop — the
+        exact pattern ``PlanHolderSource._default_search`` already relies on.
+
+        Returns one list of result-dicts per query (same length/order as
+        ``queries``); a failed query yields ``[]``.
+        """
+        if not queries:
+            return []
+        import asyncio
+
+        from app.search_providers.manager import SearchProviderManager
+        from app.search_providers.models import SearchQuery
+        from app.search_providers.registry import get_registry
+
+        manager = SearchProviderManager()
+
+        async def _run_all() -> list[Any]:
+            try:
+                responses = await asyncio.gather(
+                    *[
+                        manager.search(SearchQuery(keywords=q, num_results=self._max))
+                        for q in queries
+                    ],
+                    return_exceptions=True,
+                )
+            finally:
+                for provider in get_registry().get_enabled():
+                    close = getattr(provider, "close", None)
+                    if close:
+                        try:
+                            await close()
+                        except Exception:  # noqa: BLE001 — closing is best-effort
+                            pass
+            return responses
+
+        try:
+            responses = asyncio.run(_run_all())
+        except Exception:  # noqa: BLE001 — a batch failure is not fatal
+            return [[] for _ in queries]
+
+        out: list[list[dict[str, Any]]] = []
+        for resp in responses:
+            if isinstance(resp, Exception) or not resp or not getattr(resp, "results", None):
+                out.append([])
+                continue
+            out.append(
+                [
+                    {
+                        "url": r.url,
+                        "snippet": r.snippet or "",
+                        "title": r.title or "",
+                    }
+                    for r in resp.results[: self._max]
+                ]
+            )
+        return out
+
 
 def _run_provider(provider: Any, query: str, num: int) -> list[dict[str, Any]]:
     """Run one (possibly async) provider, returning url/snippet/title dicts."""

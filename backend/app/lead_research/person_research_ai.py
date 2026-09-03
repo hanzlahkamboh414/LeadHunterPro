@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Protocol
 
 from app.lead_research.models import AIEvidence, PersonFindings
@@ -42,6 +43,21 @@ class FetchPageFn(Protocol):
 class DeterministicResearchFn(Protocol):
     """Signature matching ``ResearchService.research``."""
     def __call__(self, email: str, domain: str, **kw: Any) -> Any: ...
+
+
+# ---------------------------------------------------------------------------
+# Concurrency helpers (kept local for isolation — same bounded policy as
+# company_research: real providers rate-limit, each worker owns its loop).
+# ---------------------------------------------------------------------------
+
+_MAX_SEARCH_WORKERS = 5
+
+
+def _search_workers(n: int) -> int:
+    """Bounded worker count for a batch of ``n`` queries."""
+    if n <= 1:
+        return 1
+    return min(_MAX_SEARCH_WORKERS, n)
 
 
 # ---------------------------------------------------------------------------
@@ -158,8 +174,12 @@ class PersonResearcherAI:
             return self._search
         try:
             from app.person_research.search_adapter import RegistryIndexedSearch
-            adapter = RegistryIndexedSearch()
-            return lambda q: adapter(q)
+            # Return the adapter directly (not wrapped in a lambda) so that
+            # ``search_many`` is exposed — _gather_search prefers it for the
+            # single-loop concurrent path. A lambda would strip the attribute
+            # and force the threaded fallback, which breaks aiohttp's shared
+            # session across event loops.
+            return RegistryIndexedSearch()
         except Exception:
             return lambda q: []
 
@@ -317,13 +337,17 @@ class PersonResearcherAI:
     # -- private helpers ----
 
     def _gather_search(self, search_fn: SearchFn, email: str, domain: str, company_name: str = "") -> list[dict[str, str]]:
-        """Run multiple search queries and merge unique results.
+        """Run multiple search queries (CONCURRENTLY) and merge unique results.
 
         Search breadth (Medium scope):
         1. Exact email lookup
         2. Company team/about/contact
         3. LinkedIn company + person
         4. Industry association membership
+
+        Queries are independent network calls run in a thread pool (each
+        adapter call owns its event loop, so threads are safe) — same win as
+        company_research: sequential queries collapse into ~one round.
         """
         queries = [
             f'"{email}"',
@@ -337,19 +361,41 @@ class PersonResearcherAI:
             queries.append(f'"{company_name}" estimator OR estimating OR "cost engineer"')
         seen_urls: set[str] = set()
         results: list[dict[str, str]] = []
-        for q in queries:
-            try:
-                for r in search_fn(q):
+
+        # Preferred path: the real adapter runs all queries concurrently in ONE
+        # event loop (thread-safe — providers hold a shared aiohttp session that
+        # must stay in one loop). Fall back to a threaded fan-out for injected
+        # plain-callable seams (test fakes, no aiohttp).
+        many = getattr(search_fn, "search_many", None)
+        if many is not None:
+            batches = many(list(queries))
+            for batch in batches:
+                for r in batch:
                     url = r.get("url", "")
                     if url and url not in seen_urls:
                         seen_urls.add(url)
                         results.append(r)
+            return results
+
+        def _one(q: str) -> list[dict[str, str]]:
+            try:
+                return list(search_fn(q))
             except Exception as exc:
                 logger.debug("Search query %r failed: %s", q, exc)
+                return []
+
+        with ThreadPoolExecutor(max_workers=_search_workers(len(queries))) as ex:
+            futures = [ex.submit(_one, q) for q in queries]
+            for fut in as_completed(futures):
+                for r in fut.result():
+                    url = r.get("url", "")
+                    if url and url not in seen_urls:
+                        seen_urls.add(url)
+                        results.append(r)
         return results
 
     def _gather_site(self, fetch_fn: FetchPageFn, domain: str) -> str:
-        """Fetch homepage and likely team/about pages."""
+        """Fetch homepage and likely team/about pages (CONCURRENTLY)."""
         urls_to_try = [
             f"https://{domain}",
             f"https://{domain}/about",
@@ -359,12 +405,21 @@ class PersonResearcherAI:
             f"https://{domain}/leadership",
             f"https://{domain}/people",
         ]
-        all_content = ""
-        for url in urls_to_try:
+
+        def _one(url: str) -> str:
             try:
                 page = fetch_fn(url)
                 if getattr(page, "ok", False):
-                    all_content += _truncate_html(getattr(page, "html", ""), max_chars=4000) + "\n"
+                    return _truncate_html(getattr(page, "html", ""), max_chars=4000) + "\n"
             except Exception:
-                continue
-        return all_content or "(website not reachable)"
+                pass
+            return ""
+
+        chunks: list[str] = []
+        with ThreadPoolExecutor(max_workers=min(7, len(urls_to_try))) as ex:
+            futures = [ex.submit(_one, u) for u in urls_to_try]
+            for fut in as_completed(futures):
+                chunk = fut.result()
+                if chunk:
+                    chunks.append(chunk)
+        return "".join(chunks) or "(website not reachable)"

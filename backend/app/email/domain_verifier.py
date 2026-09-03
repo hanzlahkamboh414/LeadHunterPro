@@ -33,6 +33,12 @@ MX_LOOKUP_URL = "https://dns.google/resolve"
 #: DNS record type for MX answers (RFC 1035).
 _MX_RECORD_TYPE = 15
 
+#: Public IPv4 DNS resolvers tried in order for fast native MX lookups.
+#: Chosen over the system resolver and HTTPS-DoH, both of which are slow on
+#: some networks (notably a Windows IPv6 connect-hang before IPv4 fallback).
+#: dnspython is already a dependency, so the fast path needs no new packages.
+_FAST_DNS_RESOLVERS = ("9.9.9.9", "1.1.1.1", "8.8.8.8")
+
 #: Resolver failures that count as "unresolved". Captured at import so a
 #: monkeypatched ``requests`` (offline tests) still resolves the tuple.
 _NETWORK_ERRORS = (requests.RequestException, ValueError)
@@ -67,6 +73,30 @@ def domain_has_mx(domain: str, *, timeout: int = 10) -> bool:
         entry.get("type") == _MX_RECORD_TYPE
         for entry in data.get("Answer") or []
     )
+
+
+def domain_has_mx_fast(domain: str, *, timeout: float = 3.0) -> bool:
+    """True when *domain* has an MX record, via fast native UDP DNS.
+
+    Uses dnspython against a short list of public IPv4 resolvers. This avoids
+    the slow HTTPS-DoH / IPv6-hang path that :func:`domain_has_mx` takes,
+    which can block for ~20s per lookup on networks where the resolver host's
+    IPv6 is unreachable. Failures are honest ``False`` (unresolved) — never a
+    guess, matching the domain tier's accuracy rules.
+    """
+    import dns.resolver  # local import: dnspython is an optional-ish dep
+
+    for ns in _FAST_DNS_RESOLVERS:
+        try:
+            resolver = dns.resolver.Resolver()
+            resolver.nameservers = [ns]
+            resolver.timeout = timeout
+            resolver.lifetime = timeout + 1.0
+            resolver.resolve(domain, "MX")
+            return True
+        except Exception:  # noqa: BLE001 - a resolver failure is unresolved
+            continue
+    return False
 
 
 def verify_email_domains(emails: list[LeadEmail]) -> list[LeadEmail]:

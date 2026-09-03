@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Protocol
 
 from app.lead_research.models import AIEvidence, CompanyProfile
@@ -78,11 +79,14 @@ def default_refine_domain(
     3. Else try replacing the final TLD with common alternatives and check MX.
     4. Return the best guess (original if nothing better).
 
-    ``mx_check`` defaults to ``domain_has_mx`` from ``app.email.domain_verifier``.
+    ``mx_check`` defaults to the fast native resolver ``domain_has_mx_fast``
+    (dnspython over public IPv4 DNS) — the HTTPS-DoH ``domain_has_mx`` is
+    correct but ~20s per lookup on some networks, which would dominate per-lead
+    latency.
     """
     if mx_check is None:
-        from app.email.domain_verifier import domain_has_mx
-        mx_check = domain_has_mx
+        from app.email.domain_verifier import domain_has_mx_fast
+        mx_check = domain_has_mx_fast
 
     norm = _normalize_domain(domain)
     if not norm:
@@ -137,6 +141,25 @@ def _truncate_html(html: str, max_chars: int = 8000) -> str:
     # Collapse whitespace
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned[:max_chars]
+
+
+# ---------------------------------------------------------------------------
+# Concurrency helpers
+# ---------------------------------------------------------------------------
+
+#: Cap on parallel search workers. Real search providers (Tavily) rate-limit,
+#: and each worker spins its own event loop, so we parallelize the big win
+#: (sequential -> one round) without hammering the provider with unbounded
+#: threads. 5 stays well under typical per-minute limits while collapsing
+#: 5-6 sequential queries into ~1 round-trip.
+_MAX_SEARCH_WORKERS = 5
+
+
+def _search_workers(n: int) -> int:
+    """Bounded worker count for a batch of ``n`` queries."""
+    if n <= 1:
+        return 1
+    return min(_MAX_SEARCH_WORKERS, n)
 
 
 # ---------------------------------------------------------------------------
@@ -214,11 +237,11 @@ class CompanyResearcher:
     def _get_search(self) -> SearchFn:
         if self._search is not None:
             return self._search
-        # Fallback: try RegistryIndexedSearch
+        # Fallback: try RegistryIndexedSearch (callable AND exposes ``search_many``
+        # for the concurrent path used by _gather_search).
         try:
             from app.person_research.search_adapter import RegistryIndexedSearch
-            adapter = RegistryIndexedSearch()
-            return lambda q: adapter(q)
+            return RegistryIndexedSearch()
         except Exception:
             return lambda q: []
 
@@ -385,30 +408,59 @@ class CompanyResearcher:
         domain: str,
         queries: list[str] | None = None,
     ) -> list[dict[str, str]]:
-        """Run multiple search queries and merge unique results.
+        """Run multiple search queries (CONCURRENTLY) and merge unique results.
 
         Two-stage search breadth:
         - Screening (5 queries): email, domain, company, LinkedIn, BBB
         - Deep (6 queries, via ``research_deep``): maps, license, news,
           hiring, expansion, bid-win
+
+        The queries are independent network calls, so they run in a thread
+        pool instead of one-after-another. Each search adapter call spins its
+        own event loop (see search_adapter), so threads are safe; this is the
+        biggest single reduction in per-lead latency (11-16 queries -> ~1
+        round). ``seen_urls`` is only touched by the collecting thread, so
+        dedup stays race-free.
         """
         if queries is None:
             queries = self._screening_queries(email, domain)
         seen_urls: set[str] = set()
         results: list[dict[str, str]] = []
-        for q in queries:
-            try:
-                for r in search_fn(q):
+
+        # Preferred path: the real adapter runs all queries concurrently in ONE
+        # event loop (thread-safe — providers hold a shared aiohttp session that
+        # must stay in one loop). Fall back to a threaded fan-out for injected
+        # plain-callable seams (test fakes, no aiohttp).
+        many = getattr(search_fn, "search_many", None)
+        if many is not None:
+            batches = many(list(queries))
+            for batch in batches:
+                for r in batch:
                     url = r.get("url", "")
                     if url and url not in seen_urls:
                         seen_urls.add(url)
                         results.append(r)
+            return results
+
+        def _one(q: str) -> list[dict[str, str]]:
+            try:
+                return list(search_fn(q))
             except Exception as exc:
                 logger.debug("Search query %r failed: %s", q, exc)
+                return []
+
+        with ThreadPoolExecutor(max_workers=_search_workers(len(queries))) as ex:
+            futures = [ex.submit(_one, q) for q in queries]
+            for fut in as_completed(futures):
+                for r in fut.result():
+                    url = r.get("url", "")
+                    if url and url not in seen_urls:
+                        seen_urls.add(url)
+                        results.append(r)
         return results
 
     def _gather_site(self, fetch_fn: FetchPageFn, domain: str) -> str:
-        """Fetch homepage and likely subpages for company info."""
+        """Fetch homepage and likely subpages for company info (CONCURRENTLY)."""
         urls_to_try = [
             f"https://{domain}",
             f"https://{domain}/about",
@@ -417,12 +469,21 @@ class CompanyResearcher:
             f"https://{domain}/projects",
             f"https://{domain}/careers",
         ]
-        all_content = ""
-        for url in urls_to_try:
+
+        def _one(url: str) -> str:
             try:
                 page = fetch_fn(url)
                 if getattr(page, "ok", False):
-                    all_content += _truncate_html(getattr(page, "html", ""), max_chars=4000) + "\n"
+                    return _truncate_html(getattr(page, "html", ""), max_chars=4000) + "\n"
             except Exception:
-                continue
-        return all_content or "(website not reachable)"
+                pass
+            return ""
+
+        chunks: list[str] = []
+        with ThreadPoolExecutor(max_workers=min(6, len(urls_to_try))) as ex:
+            futures = [ex.submit(_one, u) for u in urls_to_try]
+            for fut in as_completed(futures):
+                chunk = fut.result()
+                if chunk:
+                    chunks.append(chunk)
+        return "".join(chunks) or "(website not reachable)"

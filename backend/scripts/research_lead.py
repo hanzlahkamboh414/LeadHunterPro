@@ -27,10 +27,14 @@ except ImportError:
 
 def cmd_research(args: argparse.Namespace) -> int:
     """Research a single email+domain."""
+    import time
+
     from app.lead_research.service import LeadResearchService
 
     svc = LeadResearchService()
+    t0 = time.time()
     dossier = svc.research(args.email, args.domain)
+    elapsed = time.time() - t0
 
     print(json.dumps(dossier.to_dict(), indent=2))
 
@@ -45,8 +49,33 @@ def cmd_research(args: argparse.Namespace) -> int:
     print(f"Score:        {dossier.potential_score}")
     print(f"Recommendation: {dossier.recommendation}")
     print(f"Sources:      {', '.join(dossier.sources_checked)}")
+    print(f"Elapsed:      {elapsed:.1f}s")
     if dossier.source_errors:
         print(f"Errors:       {dossier.source_errors}")
+
+    # Qualification basis — the evidence behind the recommendation
+    print("\n--- Qualification Basis ---")
+    print("COMPANY (verified facts):")
+    for f in dossier.company.facts[:6]:
+        tag = f"[{f.confidence}]" if f.confidence else "[unverified]"
+        print(f"  {tag} {f.claim}")
+        if f.source_url:
+            print(f"        src: {f.source_url}")
+    print("PERSON (attribution evidence):")
+    if dossier.person.evidence:
+        for e in dossier.person.evidence[:4]:
+            tag = f"[{e.confidence}]" if e.confidence else "[unverified]"
+            print(f"  {tag} {e.claim}")
+            if e.source_url:
+                print(f"        src: {e.source_url}")
+    else:
+        print("  (no person attribution evidence)")
+    print("INTENT signal:")
+    print(f"  {dossier.intent.signal or '(none)'}")
+    if dossier.intent.reason:
+        print(f"  reason: {dossier.intent.reason}")
+    print("TIMING window:")
+    print(f"  {dossier.timing.window} -- {dossier.timing.reason}")
 
     return 0
 
@@ -70,15 +99,20 @@ def cmd_batch(args: argparse.Namespace) -> int:
     # Summary table
     contact_now = [r for r in results if r.recommendation == "contact_now"]
     nurture = [r for r in results if r.recommendation == "nurture"]
+    generic = [r for r in results if r.recommendation == "generic"]
     skip = [r for r in results if r.recommendation == "skip"]
 
     print(f"\nContact Now: {len(contact_now)}")
     for r in contact_now:
         print(f"  [+] {r.email} -- {r.company.name} -- {r.person.name} -- score={r.potential_score}")
 
-    print(f"\nNurture: {len(nurture)}")
+    print(f"\nNurture (2nd priority): {len(nurture)}")
     for r in nurture:
         print(f"  [~] {r.email} -- {r.company.name} -- score={r.potential_score}")
+
+    print(f"\nGeneric (separate section): {len(generic)}")
+    for r in generic:
+        print(f"  [G] {r.email} -- {r.fit}")
 
     print(f"\nSkip: {len(skip)}")
     for r in skip:
@@ -106,7 +140,7 @@ def cmd_list(args: argparse.Namespace) -> int:
 
     print(f"\n--- Stored Leads ({len(leads)}) ---")
     for lead in leads:
-        rec_icon = {"contact_now": "[+]", "nurture": "[~]", "skip": "[-]"}.get(lead.recommendation, "?")
+        rec_icon = {"contact_now": "[+]", "nurture": "[~]", "generic": "[G]", "skip": "[-]"}.get(lead.recommendation, "?")
         print(f"  {rec_icon} {lead.email} -- {lead.company.name or '(unknown)'} -- score={lead.potential_score} -- {lead.recommendation}")
 
     return 0

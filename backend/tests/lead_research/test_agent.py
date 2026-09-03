@@ -108,18 +108,18 @@ def test_full_pipeline_happy_path():
     assert dossier.source_errors == {}
 
 
-def test_triage_free_mail_skips_all():
+def test_triage_free_mail_goes_to_nurture():
     agent = _make_agent()
     dossier = agent.research("john@gmail.com", "gmail.com")
-    assert dossier.recommendation == "skip"
+    assert dossier.recommendation == "nurture"
     assert "free mail" in dossier.fit.lower()
     assert dossier.sources_checked == []
 
 
-def test_triage_generic_email_skips_all():
+def test_triage_generic_email_goes_to_generic_section():
     agent = _make_agent()
     dossier = agent.research("info@acme.com", "acme.com")
-    assert dossier.recommendation == "skip"
+    assert dossier.recommendation == "generic"
     assert "generic" in dossier.fit.lower()
     assert dossier.sources_checked == []
 

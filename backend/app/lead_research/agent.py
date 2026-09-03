@@ -73,15 +73,21 @@ class AILeadResearchAgent:
 
         # Stage 0: triage
         if _is_free_mail(domain):
-            dossier.fit = "Skipped — free mail domain"
-            dossier.recommendation = "skip"
-            logger.info("Triage: %s is free mail → skip", domain)
+            # Free-mail domains (gmail/yahoo/hotmail) are NOT deleted — they
+            # are kept at second priority (nurture) so a person can still be
+            # chased, but no company pipeline is run (no business domain).
+            dossier.fit = "Free mail domain — kept at second priority"
+            dossier.recommendation = "nurture"
+            logger.info("Triage: %s is free mail → nurture (2nd priority)", domain)
             return dossier
 
         if _is_generic_local_part(email):
-            dossier.fit = "Skipped — generic local part"
-            dossier.recommendation = "skip"
-            logger.info("Triage: %s has generic local part → skip", email)
+            # Generic emails (info@/admin@/contact@) are NOT deleted — they are
+            # filed into a separate "generic" section (no specific person, but
+            # the company may still be worth keeping for outreach).
+            dossier.fit = "Generic email — separate section (no specific person)"
+            dossier.recommendation = "generic"
+            logger.info("Triage: %s has generic local part → generic section", email)
             return dossier
 
         # Stage 1: company research

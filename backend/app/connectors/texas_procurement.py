@@ -189,6 +189,12 @@ class TexasProcurementConnector(BaseConnector):
         # the sandbox blocks seed-host DNS — the orchestrator simply
         # continues with the next source; it is never terminal.
         orchestrator.register(DirectoryCrawlSource())
+        # PlanHolderSource (priority 25) sits between the directory crawl and
+        # the search providers: it finds plan-holder-list PDFs live and feeds
+        # their rows (named contact + person-bound email) into discovery.
+        from app.discovery.sources.plan_holder_source import PlanHolderSource
+
+        orchestrator.register(PlanHolderSource())
         orchestrator.register(SearchProviderSource())
         orchestrator.register(FixtureSource())
         companies, orch_metadata = orchestrator.discover(
@@ -235,6 +241,18 @@ class TexasProcurementConnector(BaseConnector):
         ]
         matched: list[dict[str, Any]] = []
         for company in companies:
+            # Inc 3 carve-out: a plan-holder PDF record carries a named
+            # contact + person-bound email but NO state/city/industry signal
+            # (the list states only company name + person). The location and
+            # keyword filters below would drop it for that absence, killing
+            # the bridge before it can surface the pre-bound person. Its value
+            # is the person/email, not company-level location matching, so it
+            # is passed through the filter untouched and re-verified at the
+            # gate (Step 4) exactly like the fixture bridge — never a
+            # live-verified lead.
+            if company.get("_discovery_source") == "plan_holder":
+                matched.append(company)
+                continue
             if state and company.get("state", "").upper() != state.upper():
                 continue
             if city and company.get("city", "").lower() != city.lower():
@@ -276,7 +294,18 @@ class TexasProcurementConnector(BaseConnector):
                 and company.get("_discovery_source") == "fixture_bridge"
                 and not gate.hard_rejected
             )
-            if not gate.accepted and not bridge_fixture:
+            # Inc 3 carve-out: a plan-holder PDF record carries a named
+            # contact + person-bound email but NO verification evidence
+            # (derived website, empty industry/location), so the gate grades
+            # it confirmed==0 / accepted=False. Like the fixture carve-out it
+            # is passed through LABELED unverified — never as a verified lead
+            # — so the Inc 3 bridge can surface the pre-bound person/email in
+            # the pipeline. Hard rejections still drop it.
+            plan_holder_carveout = (
+                company.get("_discovery_source") == "plan_holder"
+                and not gate.hard_rejected
+            )
+            if not gate.accepted and not (bridge_fixture or plan_holder_carveout):
                 logger.debug(
                     "Gate did not accept %s: %s",
                     company.get("company_name", "?"),
@@ -743,6 +772,24 @@ class TexasProcurementConnector(BaseConnector):
         verified_url = _verify_and_clean_url(website)
         confidence = 0.85 if verified_url else 0.60
 
+        metadata: dict[str, Any] = {
+            "industry_focus": industry_focus,
+            "revenue_tier": company.get("revenue_tier", ""),
+            "trade_category": trade_cat,
+            "data_provenance": company.get("data_provenance", ""),
+            "verified_url": bool(verified_url),
+            "matched_keywords": self._find_matched_keywords(
+                company, expanded_keywords
+            ),
+            "discovery_reason": reason,
+        }
+        # Inc 3: the plan-holder pre-bound person/emails ride through on the
+        # result metadata so the LeadPipeline bridge can consume them without
+        # re-crawling the (unverified, often derived) website.
+        plan_holder = company.get("plan_holder")
+        if plan_holder:
+            metadata["plan_holder"] = plan_holder
+
         result = ConnectorResult(
             company_name=company.get("company_name", ""),
             website=verified_url or website,
@@ -754,17 +801,7 @@ class TexasProcurementConnector(BaseConnector):
             source=self.connector_name,
             source_url=company.get("source_url", website),
             confidence=confidence,
-            metadata={
-                "industry_focus": industry_focus,
-                "revenue_tier": company.get("revenue_tier", ""),
-                "trade_category": trade_cat,
-                "data_provenance": company.get("data_provenance", ""),
-                "verified_url": bool(verified_url),
-                "matched_keywords": self._find_matched_keywords(
-                    company, expanded_keywords
-                ),
-                "discovery_reason": reason,
-            },
+            metadata=metadata,
         )
         return result, reason
 

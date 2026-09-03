@@ -1,0 +1,266 @@
+# LeadHunter Pro - backend tool configuration (roadmap D13).
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# Until now the repo had no `pyproject.toml`, `setup.cfg` or `tox.ini` anywhere,
+# yet non-default ruff rules were firing (RUF100, G201, B009, I001, TRY401).
+# That means the lint configuration lived on ONE developer's machine, as
+# user-level config or as command-line flags. Two consequences, both of which
+# cost time later rather than now:
+#
+#   1. "ruff clean" was not reproducible. A second machine, a CI runner, or the
+#      same machine after a `ruff` upgrade could report a different result on
+#      identical code - a build that breaks with no code change.
+#   2. Nobody reading the repo could tell which rules were enforced, so every
+#      lint failure started with "which rules are even on?".
+#
+# Checking the configuration in makes the lint result a property of the REPO,
+# not of the machine. That is the whole point.
+#
+# THE 364-ERROR TRIAGE, DONE ONCE
+# -------------------------------
+# The first whole-tree run under this config reported 364 errors across 29 rule
+# codes. That number is not a regression: ruff had evidently only ever been run
+# against individual changed files, so the whole tree had never been clean.
+#
+# A gate that fails with 364 errors is not a gate - it gets ignored, and real
+# findings (see F821 below) stay buried in the noise forever. So every one of
+# those 29 codes is given an explicit decision below, in one of two buckets:
+#
+#   PERMANENT   style/taste/framework-idiom. Will never be "fixed". Ignored with
+#               the reason recorded, so nobody re-litigates it.
+#   BACKLOG     genuinely valuable, but the fix is code churn that must not ride
+#               along with an unrelated production commit. Ignored WITH ITS
+#               CURRENT COUNT, tracked as roadmap D29. Deleting an ignore line
+#               is how that rule gets turned back on.
+#
+# Recording the counts here is the point of the exercise: the next person does
+# not re-run a 364-item triage to find out what is deliberate and what is debt.
+#
+# THIS FILE IS COUPLED TO A RUFF VERSION
+# --------------------------------------
+# The counts above were measured with ruff 0.16.1, and the ignore list names
+# rules that only exist in recent ruff (RUF033, RUF036, RUF043, RUF059). Ruff
+# rejects a config containing rule codes it does not recognise, so this file
+# would not even LOAD under the old `ruff>=0.4.0` floor. `requirements.txt` now
+# pins `ruff==0.16.1` for exactly that reason. Bumping the pin is a deliberate
+# act, not a routine upgrade: ruff adds rules in every minor release, so re-run
+# `python scripts/verify_repo.py` and triage whatever the new release reports.
+#
+# WHAT THE GATE STILL PROTECTS
+# ----------------------------
+# Ignoring 29 codes out of the selected families leaves several hundred rules
+# actively enforced - every other flake8-bugbear check, the rest of pyflakes
+# (F632 `is` on literals, f-string mistakes, undefined names in new code), E9
+# syntax/IO errors, the rest of tryceratops and ruff's own set. New code is
+# gated from today; only the enumerated backlog is exempt.
+#
+# WHAT THIS FILE DELIBERATELY DOES NOT DO
+# ---------------------------------------
+# There is no `[project]` table. Adding one would declare `backend/` an
+# installable distribution, which changes how pip, build backends and some
+# editors treat the directory - a side effect nobody asked for. The Python floor
+# is therefore recorded in `target-version` below and in the requirements file,
+# not via `requires-python`.
+#
+# pytest configuration stays in `pytest.ini`. Splitting one tool's settings
+# across two files is how config drift starts; pytest already has a home.
+
+[tool.ruff]
+# The floor the code PROVABLY requires, not the installed interpreter: PEP 585
+# builtin generics (`dict[int, int]`, `frozenset[int]`) are used in evaluated
+# positions - module-level and dataclass annotations without
+# `from __future__ import annotations` - which is 3.9+, and the codebase uses
+# 3.10-era `X | None` unions freely.
+#
+# KEPT AT py310 ON PURPOSE, against two facts that argue for py312: the
+# environment is Python 3.12.11 (measured 2026-08-20), and
+# `docs/architecture/PROJECT_PRINCIPLES.md:223` states "Python 3.12+". The
+# reason py310 wins anyway is that NOTHING ENFORCES a minimum at install time -
+# there is no `[project]` table and therefore no `requires-python` (see the note
+# above), so this package can in fact be installed and run on 3.10. Declaring
+# py310 makes ruff flag syntax that would break such a run; declaring py312
+# would let 3.12-only syntax in and defer the failure to whoever has 3.11.
+# The stricter floor is the protective one. This is inert under the rule
+# selection below and only starts to matter if `UP` (pyupgrade) is ever enabled.
+target-version = "py310"
+
+# Matches ruff's own default and the existing wrapping in this codebase, so
+# declaring it changes nothing today and pins it against a future default change.
+line-length = 88
+
+[tool.ruff.lint]
+# Derived from EVIDENCE, not from taste: these are the families whose rules were
+# observed firing on this codebase before any config was checked in (RUF100,
+# G201, B009, I001, TRY401), plus ruff's own default selection.
+#
+# E4/E7/E9 is ruff's DEFAULT subset of pycodestyle, chosen here on purpose over
+# a blanket "E": the blanket form pulls in E501 (line-too-long) and the E1/E2/E3
+# whitespace family, for which there is no evidence they were ever enforced
+# here. Turning them on would manufacture a wall of violations in code that is
+# already passing - a self-inflicted "come back and fix the backend" task.
+# Widening this list is a deliberate future decision, not a default.
+select = [
+    "E4",   # pycodestyle - imports
+    "E7",   # pycodestyle - statement errors
+    "E9",   # pycodestyle - syntax/IO errors
+    "F",    # pyflakes - unused imports/names, undefined names
+    "I",    # isort - import ordering (I001 observed)
+    "B",    # flake8-bugbear - real bug shapes (B009 observed)
+    "G",    # flake8-logging-format - lazy % logging (G201 observed)
+    "TRY",  # tryceratops - exception handling (TRY401 observed)
+    "RUF",  # ruff-specific, incl. RUF100 unused-noqa (observed)
+]
+
+ignore = [
+    # ------------------------------------------------------------------
+    # PERMANENT - style, taste, or framework idiom. Not debt.
+    # ------------------------------------------------------------------
+
+    # TRY003 (50 sites) - "avoid long messages outside the exception class".
+    # Complying means defining a bespoke exception class for every distinct
+    # message. This codebase deliberately raises `ValueError("<explanation>")`
+    # with the explanation at the raise site, which is where a reader needs it.
+    # Near-universally disabled in real projects, for the same reason.
+    "TRY003",
+
+    # RUF001/RUF002/RUF003 (17 + 22 + 3 sites) - "ambiguous unicode character".
+    # These rules exist to catch HOMOGLYPH confusion (Cyrillic 'a' posing as
+    # ASCII 'a'), a security/typo concern. Every occurrence here is an
+    # intentional em dash in prose - the house style throughout the code
+    # comments, the noqa explanations and roadmap.md. Nothing is ambiguous to a
+    # reader; flagging deliberate typography is a false positive.
+    "RUF001",
+    "RUF002",
+    "RUF003",
+
+    # TRY300 (13 sites) - "move the return to an else block". A `return` as the
+    # last statement of a `try` reads fine and is common here. Pure preference,
+    # and the else-block form is arguably less readable for short bodies.
+    "TRY300",
+
+    # TRY301 (5 sites) - "abstract the raise into an inner function". Raising
+    # inside a `try` to be caught by that same try's handler is an intentional
+    # control-flow shape in the connector code, not an accident.
+    "TRY301",
+
+    # RUF059 (14 sites) - unused variable in a tuple unpack. Naming both halves
+    # of a documented `(value, reason)` return is self-documenting even when one
+    # half is unused at that call site; renaming to `_` loses that.
+    "RUF059",
+
+    # B008 (11 sites) - "do not call a function in an argument default". This is
+    # FastAPI's documented dependency-injection API (`= Depends(...)`), so every
+    # site is the framework working as designed, not a shared-mutable-default
+    # bug. The more surgical form is `flake8-bugbear.extend-immutable-calls`
+    # with the exact FastAPI helpers listed; that is left to D29 because an
+    # incomplete list would leave the gate red, and a red gate protects nothing.
+    "B008",
+
+    # E402 (16 sites) - "module import not at top of file". The root and
+    # scripts/ entrypoints must adjust `sys.path` before `import app` can
+    # resolve, because nothing installs this package (see the no-`[project]`
+    # note above). The import order is a consequence of that, deliberately.
+    "E402",
+
+    # E741 (8 sites) - single-character names `l` / `I` / `O`. Cosmetic; the
+    # sites are short comprehensions where the name's scope is one line.
+    "E741",
+
+    # ------------------------------------------------------------------
+    # BACKLOG - roadmap D29. Real value, deferred. Counts are as of the
+    # first whole-tree run (2026-08-19). Delete a line to re-enable that
+    # rule; the count tells you the size of the job before you start.
+    # ------------------------------------------------------------------
+
+    # RUF100 (47 sites) - "unused noqa". NOT dead suppression: these are
+    # `# noqa: BLE001` (44), `# noqa: PLC0415` (2) and `# noqa: ARG001/ARG002`
+    # (3), naming rules that the families selected above do not include. Two
+    # reasons this is ignored rather than autofixed:
+    #   1. RUF100's fix deletes the whole trailing comment, and these comments
+    #      carry the explanation, e.g. "# noqa: BLE001 - one plugin must not
+    #      stop the run". That prose is the most valuable part of the line.
+    #   2. The honest fix is to SELECT those rules, restoring the original
+    #      author's intent. Measured cost of doing so: `except Exception`
+    #      appears 73 times, 29 of them with no noqa, so selecting BLE001
+    #      trades 47 errors for 29 new ones plus 29 production-file edits.
+    #      That belongs in its own increment, not bundled into a pipeline fix.
+    "RUF100",
+
+    # F401 (51 sites) - unused import. The intentional re-exports in
+    # `__init__.py` are already covered by `__all__` (20 files) or an explicit
+    # `# noqa: F401`, so these 51 are genuinely dead. Mostly autofixable, but
+    # `--fix` deleting imports across ~30 files is a diff that needs the full
+    # suite as its proof, on its own.
+    "F401",
+
+    # I001 (49 sites) - unsorted imports. Autofixable and safe; deferred only
+    # because a 49-file whitespace-and-ordering diff would bury the reviewable
+    # content of the current commit.
+    "I001",
+
+    # TRY400 (11 sites) - `logger.error` inside an `except` where
+    # `logger.exception` is meant. This one matters more than its count
+    # suggests: it means STACK TRACES ARE BEING DISCARDED at 11 failure sites,
+    # which is precisely the "why did it fail?" blindness that D20 had to add
+    # instrumentation to work around. First slice of D29.
+    "TRY400",
+
+    # G201 (9 sites) - `logger.error(..., exc_info=True)`, the same defect in
+    # its other spelling. Same slice as TRY400.
+    "G201",
+
+    # G004 (2 sites) - f-string in a logging call. Loses lazy formatting and
+    # structured-logging fields.
+    "G004",
+
+    # RUF012 (9 sites) - mutable class attribute without `ClassVar`. A real bug
+    # shape: the default is shared across every instance, so one instance
+    # mutating it changes the others.
+    "RUF012",
+
+    # B904 (4 sites) - `raise X` inside `except` without `from`. Discards the
+    # original exception's chain, so the root cause vanishes from the traceback.
+    "B904",
+
+    # RUF043 (4 sites) - `pytest.raises(match=...)` given a pattern that is
+    # ambiguous as a regex, so the assertion may match more loosely than the
+    # author intended.
+    "RUF043",
+
+    # B017 (3 sites) - `pytest.raises(Exception)`. Passes on ANY exception
+    # including an unrelated TypeError from a typo, so such a test can pass
+    # while proving nothing. One site is already noqa'd with the specific
+    # exception named in the comment.
+    "B017",
+
+    # F841 (3 sites) - assigned-but-unused local. Often a forgotten assertion:
+    # the value was computed to be checked, and the check never got written.
+    "F841",
+
+    # F821 (2 sites) - UNDEFINED NAME. The highest-severity item in this whole
+    # list: a name is referenced that pyflakes cannot resolve, which is a
+    # NameError waiting for that line to execute. Must be read before anything
+    # else in D29; it is ignored here only so that the other 27 decisions can
+    # ship, not because it is acceptable.
+    "F821",
+
+    # Singletons, all autofixable, grouped to keep the list readable:
+    "RUF022",  # (5) `__all__` not sorted.
+    "B009",    # (1) `getattr(x, "const")` - write `x.const`.
+    "B011",    # (1) `assert False` - vanishes under `python -O`; use `raise`.
+    "F811",    # (1) redefinition of an unused name - the earlier definition is
+               #     silently shadowed, so if it is a test, it never runs.
+    "RUF033",  # (1) `__post_init__` argument with a default.
+    "RUF034",  # (1) useless if-else - both branches yield the same value.
+    "RUF036",  # (1) `None` not at the end of a `X | None` union.
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Diagnostic scripts in scripts/ intentionally reach into production internals
+# (`parser._detect_role`, `parser._site_name`) to report on the REAL code path
+# rather than reimplementing it - reimplementation would let the diagnostic and
+# production drift apart, which is exactly the failure mode these tools exist to
+# catch. SLF001 (private-member access) is therefore wrong here specifically.
+# Listed ahead of selecting SLF, so enabling that family later needs no edit.
+"scripts/*.py" = ["SLF001"]

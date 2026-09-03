@@ -16,7 +16,7 @@ The backend is a **Python FastAPI** service that follows Clean Architecture and 
 | ORM            | SQLAlchemy 2.x                    |
 | Validation     | Pydantic v2                       |
 | Database       | PostgreSQL                        |
-| AI Providers   | OpenAI, Anthropic, Gemini, Ollama (local) |
+| AI Transport   | One OpenAI-compatible provider; vendor chosen in `.env` |
 | Embeddings     | FAISS                             |
 | Formatting     | Black + Ruff                      |
 | Logging        | Python `logging` (structured)     |
@@ -73,8 +73,14 @@ api/v1  →  services  →  engines / repositories  →  database
 Uses Pydantic `BaseSettings` loaded from `.env`. Key settings:
 
 - `DATABASE_URL` — PostgreSQL connection string (required)
-- `AI_PROVIDER` — `"openai"`, `"anthropic"`, `"gemini"`, or `"local"` (defaults to local via Ollama)
-- `OPENAI_API_KEY`, `OLLAMA_URL` — provider credentials/endpoints
+- `AI_PROVIDER` — name of a registered AI provider; `"router"` is the generic
+  OpenAI-compatible one and is the default. An unregistered name raises at
+  startup rather than degrading into a stub.
+- `AI_BASE_URL`, `AI_MODEL`, `AI_API_KEY` — the AI transport. These three lines in
+  `backend/.env` are the **only** place an AI vendor is named: no module under
+  `app/` mentions one. Because NaraRouter, OpenAI, OmniRoute, OpenRouter, Groq
+  and Ollama all expose the OpenAI-compatible protocol, switching vendor is a
+  config edit and never a code change. `backend/.env` carries ready-made presets.
 - `LOG_LEVEL` — logging verbosity
 
 ### Database (`database/`)

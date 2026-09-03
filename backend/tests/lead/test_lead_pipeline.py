@@ -204,6 +204,220 @@ class TestDecisionMakerSelection:
         assert any("person_bound" in b for b in lead.qualification_gate().blocked_by)
 
 
+class TestPlanHolderBridge:
+    """Inc 3: the pre-bound plan-holder person/email is used WITHOUT a site crawl.
+
+    A plan-holder record carries ``metadata["plan_holder"]`` (Inc 2) — the
+    named contact + person-bound email from the public bid list. The pipeline
+    must bridge that into the Lead instead of re-crawling the record's
+    derived, unverified website. Role is never backfilled (hard rule #2).
+    """
+
+    def _plan_holder_company(self, *, accepted: bool = False) -> CompanyDiscoveryResult:
+        """A plan-holder company: unverified, with the Inc-2 detail block."""
+        return CompanyDiscoveryResult(
+            company_name="Pirc-Tobin",
+            website="https://pirctobin.com",  # derived from email domain, not verified
+            city="",
+            state="",
+            source="texas_procurement",
+            source_url="https://www.hrgreen.com/.../Plan-Holder-List_20250121.pdf",
+            metadata={
+                "gate_accepted": accepted,
+                "verification_status": "verified" if accepted else "unknown",
+                "plan_holder": {
+                    "person": {
+                        "name": "Charlie Arnold",
+                        "role": "",  # plan-holder list carries no title
+                        "role_relevance": False,  # never invented (hard rule #2)
+                        "tier": "unverified",
+                        "source_url": "https://www.hrgreen.com/.../Plan-Holder-List_20250121.pdf",
+                    },
+                    "emails": [
+                        {
+                            "email": "cjarnold@pirctobin.com",
+                            "tier": "person_bound",  # explicit row binding (hard rule #3)
+                            "source_url": "https://www.hrgreen.com/.../Plan-Holder-List_20250121.pdf",
+                        }
+                    ],
+                    "phones": [],
+                    "domain": "pirctobin.com",
+                    "free_mail_only": False,
+                },
+            },
+        )
+
+    def test_bridge_uses_prebound_person_without_crawl(self):
+        leadership = _FakeLeadership([])  # would return nobody
+        lead = _pipeline(leadership=leadership).qualify_company(
+            self._plan_holder_company()
+        )
+
+        # Inc 4: the website IS crawled for role enrichment, but the
+        # pre-bound person/email from the plan-holder block are used
+        # (not replaced by whatever the crawl returns).
+        assert leadership.called_with == "https://pirctobin.com"
+        assert lead.person is not None
+        assert lead.person.name == "Charlie Arnold"
+        assert lead.person.role == ""  # crawl returned nobody → role stays empty
+        assert lead.person.role_relevance is False
+        assert lead.has_person_bound_email
+        assert lead.emails[0].email == "cjarnold@pirctobin.com"
+        assert lead.emails[0].tier.value == "person_bound"
+
+    def test_bridge_person_bound_email_satisfies_email_rule(self):
+        """The person-bound email is real, so the email hard rule is met."""
+        lead = _pipeline().qualify_company(self._plan_holder_company())
+        assert lead.has_person_bound_email
+        assert not any(
+            "person_bound" in b for b in lead.qualification_gate().blocked_by
+        )
+
+    def test_bridge_does_not_fake_verification_or_role(self):
+        """The V1 gate still blocks on company-not-verified.
+
+        When the website crawl returns no relevant role, role_relevance
+        stays False and is also a blocker. When the crawl DOES find a
+        relevant role (Inc 4 enrichment), the role blocker is gone but
+        'company not verified' remains — the gate is never weakened.
+        """
+        leadership = _FakeLeadership([])  # empty → no role enrichment
+        lead = _pipeline(leadership=leadership).qualify_company(
+            self._plan_holder_company()
+        )
+        blockers = lead.qualification_gate().blocked_by
+        assert any("company not verified" in b for b in blockers)
+        assert any("role_relevance" in b for b in blockers)
+        assert lead.qualifies is False
+
+    def test_no_plan_holder_block_falls_through_to_leadership(self):
+        """A normal company (no plan_holder) still uses website leadership."""
+        records = [_person_with_email(_person(), "m.gomez@texasskylineco.com")]
+        leadership = _FakeLeadership(records)
+        lead = _pipeline(leadership=leadership).qualify_company(_company())
+        assert leadership.called_with == BASE
+        assert lead.person.name == "Maria Gomez"
+
+    def test_export_row_flags_unverified_plan_holder(self):
+        """The bridged unverified row is unmistakably NOT ready to contact.
+
+        decision_maker + person_bound_email are populated (the bridge), but
+        gate_accepted False + verification_status "unknown" must make it
+        visually/programmatically distinct from a fully-qualified lead.
+        """
+        lead = _pipeline().qualify_company(self._plan_holder_company())
+        row = lead_to_export_row(lead)
+
+        assert row["decision_maker"] == "Charlie Arnold"  # bridged person
+        assert row["person_bound_email"] == "cjarnold@pirctobin.com"  # bridged email
+        assert row["gate_accepted"] is False
+        assert row["verification_status"] == "unknown"  # NOT ready to contact
+        assert row["qualified"] is False
+        assert any("not verified" in b for b in row["blocked_by"])
+
+    # -- Inc 4: role enrichment via website crawl ---------------------------
+
+    def test_role_enrichment_updates_role_from_website(self):
+        """The derived website yields a relevant role → role + role_relevance update."""
+        enriched_records = [
+            _person_with_email(
+                _person(name="Charlie Arnold", role="Project Manager", relevant=True),
+                "cjarnold@pirctobin.com",
+            )
+        ]
+        leadership = _FakeLeadership(enriched_records)
+        lead = _pipeline(leadership=leadership).qualify_company(
+            self._plan_holder_company()
+        )
+        # Role enriched from website crawl
+        assert lead.person.role == "Project Manager"
+        assert lead.person.role_relevance is True
+        # Pre-bound name and email preserved
+        assert lead.person.name == "Charlie Arnold"
+        assert lead.emails[0].email == "cjarnold@pirctobin.com"
+
+    def test_role_enrichment_crawl_failure_leaves_person_unchanged(self):
+        """A failed website crawl leaves role="" and role_relevance=False."""
+        leadership = _FakeLeadership(error=RuntimeError("connection refused"))
+        lead = _pipeline(leadership=leadership).qualify_company(
+            self._plan_holder_company()
+        )
+        assert lead.person.name == "Charlie Arnold"
+        assert lead.person.role == ""
+        assert lead.person.role_relevance is False
+        assert lead.emails[0].email == "cjarnold@pirctobin.com"
+
+    def test_role_enrichment_empty_result_leaves_person_unchanged(self):
+        """An empty website crawl (no people found) leaves role unchanged."""
+        leadership = _FakeLeadership([])  # no records
+        lead = _pipeline(leadership=leadership).qualify_company(
+            self._plan_holder_company()
+        )
+        assert lead.person.role == ""
+        assert lead.person.role_relevance is False
+
+    def test_role_enrichment_irrelevant_role_not_applied(self):
+        """A role found on the website but not plausibly relevant is not applied."""
+        irrelevant_records = [
+            _person_with_email(
+                _person(name="Charlie Arnold", role="Marketing Coordinator", relevant=False),
+                "cjarnold@pirctobin.com",
+            )
+        ]
+        leadership = _FakeLeadership(irrelevant_records)
+        lead = _pipeline(leadership=leadership).qualify_company(
+            self._plan_holder_company()
+        )
+        # Irrelevant role NOT applied — stays as plan-holder default
+        assert lead.person.role == ""
+        assert lead.person.role_relevance is False
+
+    def test_role_enrichment_preserves_verification_status(self):
+        """Role enrichment never changes verification_status or gate_accepted."""
+        enriched_records = [
+            _person_with_email(
+                _person(name="Charlie Arnold", role="Owner", relevant=True),
+                "cjarnold@pirctobin.com",
+            )
+        ]
+        leadership = _FakeLeadership(enriched_records)
+        lead = _pipeline(leadership=leadership).qualify_company(
+            self._plan_holder_company()
+        )
+        # verification_status and gate unchanged despite role enrichment
+        assert lead.company.metadata.get("verification_status") == "unknown"
+        assert lead.company.metadata.get("gate_accepted") is False
+        assert lead.verified_context is False
+
+    def test_role_enrichment_preserves_person_bound_email(self):
+        """The pre-bound email is never replaced or regenerated."""
+        enriched_records = [
+            _person_with_email(
+                _person(name="Charlie Arnold", role="Estimator", relevant=True),
+                "different@email.com",  # different email from crawl
+            )
+        ]
+        leadership = _FakeLeadership(enriched_records)
+        lead = _pipeline(leadership=leadership).qualify_company(
+            self._plan_holder_company()
+        )
+        # Original person-bound email preserved, not replaced by crawl result
+        assert lead.emails[0].email == "cjarnold@pirctobin.com"
+
+    def test_role_enrichment_skips_already_relevant_role(self):
+        """If the plan-holder already has a relevant role, no crawl is done."""
+        company = self._plan_holder_company()
+        # Override plan_holder person to already have a relevant role
+        company.metadata["plan_holder"]["person"]["role"] = "Owner"
+        company.metadata["plan_holder"]["person"]["role_relevance"] = True
+        leadership = _FakeLeadership([])  # would return nobody
+        lead = _pipeline(leadership=leadership).qualify_company(company)
+        # No crawl needed — role already relevant
+        assert leadership.called_with is None
+        assert lead.person.role == "Owner"
+        assert lead.person.role_relevance is True
+
+
 class TestHonestBlockers:
 
     def test_unverified_company_blocked_despite_all_signals(self):
@@ -331,6 +545,7 @@ class TestBatchAndExport:
             "source",
             "source_url",
             "gate_accepted",
+            "verification_status",
             "decision_maker",
             "decision_maker_role",
             "person_bound_email",

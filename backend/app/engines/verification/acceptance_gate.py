@@ -17,7 +17,10 @@ Acceptance rules enforced here (accuracy-first):
 - ``verified`` requires ALL three dimensions confirmed from evidence
   (contractor industry + official site/identity + verified location);
   anything less is ``partially_verified`` or ``unknown`` — weak evidence is
-  never upgraded to verified.
+  never upgraded to verified. A fourth dimension, ``plan_holder_confirmed``
+  (documentary evidence from a public procurement PDF), contributes to the
+  confirmed count but does NOT upgrade to ``verified`` on its own — it is
+  documentary, not identity/industry/location evidence.
 - Tier 4 (fixture/demo/test) can NEVER be a live verified lead
   (``source_tiers.is_live_tier``); the status is capped to ``unknown``.
 - Location comes ONLY from ``LocationVerifier`` output — never from the
@@ -88,6 +91,12 @@ class AcceptanceResult:
     city: str | None
     state: str | None
     location_match: bool
+    #: Inc 5: documentary evidence from a public procurement PDF (plan-holder
+    #: list). True when the record carries a named person, person-bound email,
+    #: and a public bid-list source URL. This is procurement evidence, NOT
+    #: identity/industry/location verification — those dimensions remain
+    #: independent and unaffected.
+    plan_holder_confirmed: bool = False
 
     @property
     def hard_rejected(self) -> bool:
@@ -120,6 +129,7 @@ class AcceptanceResult:
             "identity": self.identity.to_dict(),
             "industry": self.industry.to_dict(),
             "location": self.location.to_dict(),
+            "plan_holder_confirmed": self.plan_holder_confirmed,
         }
 
 
@@ -177,6 +187,32 @@ def _is_verified_location(location: LocationVerificationResult) -> bool:
     if location.location_status != VerificationStatus.verified:
         return False
     return bool(location.city or location.state)
+
+
+def _is_plan_holder_confirmed(record: dict[str, Any]) -> bool:
+    """True when the record carries documentary bid-listing evidence.
+
+    A plan-holder record must carry ALL of:
+    - ``plan_holder`` metadata block (from pdf_plan_holder_parser)
+    - A named person (person.name is non-empty)
+    - A person-bound email (at least one email with tier='person_bound')
+    - A public procurement source URL (plan_holder.person.source_url is non-empty)
+
+    This is documentary evidence from a public procurement PDF — NOT identity,
+    industry, or location verification. Those dimensions remain independent.
+    """
+    block = record.get("plan_holder") or {}
+    if not block:
+        return False
+    person = block.get("person") or {}
+    if not person.get("name"):
+        return False
+    emails = block.get("emails") or []
+    has_person_bound = any(e.get("tier") == "person_bound" for e in emails)
+    if not has_person_bound:
+        return False
+    source_url = person.get("source_url") or ""
+    return bool(source_url.strip())
 
 
 # ---------------------------------------------------------------------------
@@ -271,8 +307,11 @@ class AcceptanceGate:
             )
         )
         location_confirmed = bool(location and _is_verified_location(location))
+        plan_holder_confirmed = (
+            _is_plan_holder_confirmed(record) if record else False
+        )
         confirmed = sum(
-            [industry_confirmed, identity_confirmed, location_confirmed]
+            [industry_confirmed, identity_confirmed, location_confirmed, plan_holder_confirmed]
         )
 
         # --- Tier 4 cap: fixtures are never live-verified leads ---
@@ -295,9 +334,10 @@ class AcceptanceGate:
                 city=verified_city,
                 state=verified_state,
                 location_match=location_match,
+                plan_holder_confirmed=False,
             )
 
-        if confirmed == 3:
+        if industry_confirmed and identity_confirmed and location_confirmed:
             status = VerificationStatus.verified
             accepted = True
             reasons = [
@@ -306,8 +346,12 @@ class AcceptanceGate:
         elif confirmed >= 1:
             status = VerificationStatus.partially_verified
             accepted = True
+            standard_confirmed = sum(
+                [industry_confirmed, identity_confirmed, location_confirmed]
+            )
             reasons = [
-                f"{confirmed} of 3 verification dimensions confirmed; "
+                f"{standard_confirmed} of 3 standard dimensions confirmed "
+                f"({confirmed} total including documentary); "
                 "remaining dimensions are evidence gaps, not rejections"
             ]
             if not industry_confirmed:
@@ -316,6 +360,10 @@ class AcceptanceGate:
                 reasons.append("official website not confirmed from evidence")
             if not location_confirmed:
                 reasons.append("location not verified from evidence")
+            if plan_holder_confirmed:
+                reasons.append(
+                    "public bid-listing evidence present (plan-holder PDF)"
+                )
         else:
             status = VerificationStatus.unknown
             accepted = False
@@ -348,6 +396,7 @@ class AcceptanceGate:
             city=verified_city,
             state=verified_state,
             location_match=location_match,
+            plan_holder_confirmed=plan_holder_confirmed,
         )
 
     @staticmethod

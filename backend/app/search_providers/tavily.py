@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from types import TracebackType
 from typing import Any
 
 from app.search_providers.base import BaseSearchProvider
@@ -90,10 +91,15 @@ class TavilySearchProvider(BaseSearchProvider):
             await self._session.close()
             self._session = None
 
-    async def __aenter__(self) -> TavilySearchProvider:
+    async def __aenter__(self):
         return self
 
-    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
         await self.close()
 
     async def search(self, query: SearchQuery) -> SearchResponse:
@@ -170,9 +176,9 @@ class TavilySearchProvider(BaseSearchProvider):
                 error=str(exc),
                 status="error",
             )
-        except Exception as exc:  # noqa: BLE001 — translated, never raised (§12)
+        except Exception as exc:  # translated, never raised (§12)
             elapsed = (time.monotonic() - start) * 1000
-            logger.exception("Tavily search failed: %s", exc)
+            logger.exception("Tavily search failed")
             return SearchResponse(
                 provider=self.provider_name,
                 query=query.keywords,

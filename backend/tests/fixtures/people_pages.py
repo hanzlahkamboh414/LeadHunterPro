@@ -131,3 +131,64 @@ TEAM_PAGE_WITH_DUPLICATE_HTML = """
 </body>
 </html>
 """
+
+# --- Inc11 Step B regression fixtures (from the live-run evidence) ---------
+#
+# These are the actual shapes the Inc11 Step A diagnostic caught on real
+# Texas roofing sites: marketing copy captured as decision-makers, and a
+# mailto link whose anchor text hides the address. Each must now produce the
+# RIGHT person (or none at all), never a fabricated one.
+
+MARKETING_PROSE_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Bert Roofing - About</title>
+</head>
+<body>
+  <main>
+    <div class="sales-blurb">
+      <h2>Schedule No Obligation Inspection</h2>
+      <p>Owned Dallas Since Honest 2004. You Back Same Day.</p>
+      <p>First Name Last Name President</p>
+    </div>
+  </main>
+</body>
+</html>
+"""
+
+SENTENCE_BOUNDARY_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Arrington Roofing - Leadership</title>
+</head>
+<body>
+  <main>
+    <div class="bio">
+      <p>Schedule No Obligation Inspection for homeowners in Dallas.</p>
+      <p>Arrington Roofing is led by Chris Arrington, President, who runs
+      all estimating and project bidding.</p>
+    </div>
+  </main>
+</body>
+</html>
+"""
+
+MAILTO_ANCHOR_TEXT_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Bert Roofing - About</title>
+</head>
+<body>
+  <main>
+    <div class="bio">
+      <h2>You Back Same Day Free Estimates</h2>
+      <p>John Smith, Owner and President</p>
+      <a href="mailto:john.smith@bertroofing.com">Email John</a>
+    </div>
+  </main>
+</body>
+</html>
+"""

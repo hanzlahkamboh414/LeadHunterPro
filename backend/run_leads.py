@@ -49,6 +49,7 @@ LEAD_EXPORT_FIELDS = (
     "source",
     "source_url",
     "gate_accepted",
+    "verification_status",
     "decision_maker",
     "decision_maker_role",
     "person_bound_email",
@@ -233,7 +234,14 @@ def run_leads(
 
     leads: list[Lead] = []
     for company in companies:
-        if not company.metadata.get("gate_accepted"):
+        # Inc 3: a plan-holder record is gate_accepted=False (derived
+        # website, unverified) but carries a pre-bound person + person-bound
+        # email on its metadata. It still goes through the pipeline so the
+        # bridge surfaces that decision-maker; the V1 gate continues to block
+        # it on 'company not verified' + role until Inc 4 / verification.
+        if not company.metadata.get("gate_accepted") and not company.metadata.get(
+            "plan_holder"
+        ):
             leads.append(Lead(company=company))
         else:
             leads.append(pipeline.qualify_company(company, query))

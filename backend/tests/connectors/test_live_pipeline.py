@@ -228,6 +228,74 @@ class TestCompanyExtractor:
             "texas roofing" in profile.name.lower() or "dallas" in profile.name.lower()
         )
 
+    # --- roadmap D19: structured name sources outrank marketing copy -------
+    #
+    # The 2026-08-19 live run named all five discovered companies with their SEO
+    # page headline, because og:title was consulted first and called "most
+    # reliable". These tests pin the corrected precedence, since a wrong name is
+    # the join key for enrichment and is what ships in the customer's export.
+
+    def test_schema_business_name_beats_og_title(self, extractor):
+        """schema.org business name wins over an SEO og:title headline."""
+        html = (
+            '<meta property="og:title" '
+            'content="Dallas Roofing Contractor Since 1983 | Arrington Roofing">'
+            '<script type="application/ld+json">'
+            '{"@context":"https://schema.org","@type":"RoofingContractor",'
+            '"name":"Arrington Roofing Company"}</script>'
+        )
+        profile = extractor.extract("https://arringtonroofing.com", html, title="")
+        assert profile.name == "Arrington Roofing Company"
+
+    def test_schema_name_matched_before_type(self, extractor):
+        """JSON-LD is matched whichever order "name" and "@type" appear in."""
+        html = (
+            '<script type="application/ld+json">'
+            '{"name": "Bert Roofing Inc", "@type": "LocalBusiness"}</script>'
+        )
+        profile = extractor.extract("https://bertroofing.com", html, title="")
+        assert profile.name == "Bert Roofing Inc"
+
+    def test_og_site_name_beats_og_title(self, extractor):
+        """og:site_name is the site's name; og:title is only the page headline."""
+        html = (
+            '<meta property="og:site_name" content="Firehouse Roofing">'
+            '<meta property="og:title" '
+            'content="Best Roofers in Dallas TX | Free Estimates">'
+        )
+        profile = extractor.extract("https://firehouseroofing.com", html, title="")
+        assert profile.name == "Firehouse Roofing"
+
+    def test_seo_title_reduced_to_brand_segment_by_domain(self, extractor):
+        """With no structured data, the segment matching the domain is chosen."""
+        html = (
+            '<meta property="og:title" '
+            'content="Dallas Roofing Contractor Since 1983 | Arrington Roofing">'
+        )
+        profile = extractor.extract("https://www.arringtonroofing.com/about", html)
+        assert profile.name == "Arrington Roofing"
+
+    def test_seo_title_segment_chosen_without_domain_help(self, extractor):
+        """When the domain settles nothing, the least promotional segment wins."""
+        title = "Top Rated Roofing Contractors Near Me | Legends Roofing"
+        html = f"<html><head><title>{title}</title></head></html>"
+        profile = extractor.extract(
+            "https://legends-roof-pros.com", html, title=title
+        )
+        assert profile.name == "Legends Roofing"
+
+    def test_hyphenated_name_is_not_split(self, extractor):
+        """A hyphen inside a name is not a segment separator."""
+        html = '<meta property="og:title" content="Tri-State Roofing">'
+        profile = extractor.extract("https://tristateroofing.com", html, title="")
+        assert profile.name == "Tri-State Roofing"
+
+    def test_meta_attribute_order_is_tolerated(self, extractor):
+        """content= before property= is still read (real pages emit both orders)."""
+        html = '<meta content="Bold Roofing" property="og:site_name">'
+        profile = extractor.extract("https://boldroofing.com", html, title="")
+        assert profile.name == "Bold Roofing"
+
     def test_extract_email_from_text(self, extractor):
         """Email extracted from page text."""
         html = "Contact us at info@texasroofing.com or call 555-123-4567"

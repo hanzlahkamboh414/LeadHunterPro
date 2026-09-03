@@ -19,6 +19,75 @@ from app.connectors.texas_procurement import (
 )
 
 
+class TestPlanHolderCarveout:
+    """Inc 3: the plan-holder person/email survives the connector projection.
+
+    ``_build_result`` must carry the Inc-2 ``plan_holder`` detail block onto
+    the ConnectorResult metadata so the LeadPipeline bridge can consume it
+    without re-crawling the derived, unverified website.
+    """
+
+    @pytest.fixture
+    def connector(self):
+        return TexasProcurementConnector()
+
+    def _plan_holder_record(self) -> dict:
+        return {
+            "company_name": "Pirc-Tobin",
+            "website": "https://pirctobin.com",
+            "city": "",
+            "state": "",
+            "country": "USA",
+            "trade_category": "",
+            "industry_focus": "",
+            "revenue_tier": "",
+            "source_url": "https://www.hrgreen.com/.../Plan-Holder-List_20250121.pdf",
+            "data_provenance": "plan_holder_pdf:hrgreen.com",
+            "_discovery_source": "plan_holder",
+            "plan_holder": {
+                "person": {
+                    "name": "Charlie Arnold",
+                    "role": "",
+                    "role_relevance": False,
+                    "tier": "unverified",
+                    "source_url": "https://www.hrgreen.com/.../Plan-Holder-List_20250121.pdf",
+                },
+                "emails": [
+                    {
+                        "email": "cjarnold@pirctobin.com",
+                        "tier": "person_bound",
+                        "source_url": "https://www.hrgreen.com/.../Plan-Holder-List_20250121.pdf",
+                    }
+                ],
+                "phones": [],
+                "domain": "pirctobin.com",
+                "free_mail_only": False,
+            },
+        }
+
+    def test_build_result_carries_plan_holder_metadata(self, connector):
+        result, reason = connector._build_result(  # noqa: SLF001 - unit under test
+            self._plan_holder_record(),
+            "Roofing",
+            {"roofing"},
+        )
+        assert isinstance(result, ConnectorResult)
+        assert result.company_name == "Pirc-Tobin"
+        holder = result.metadata.get("plan_holder")
+        assert holder is not None
+        assert holder["person"]["name"] == "Charlie Arnold"
+        assert holder["emails"][0]["tier"] == "person_bound"
+
+    def test_non_plan_holder_record_has_no_plan_holder_metadata(self, connector):
+        record = self._plan_holder_record()
+        record.pop("plan_holder")
+        record["_discovery_source"] = "directory_crawl"
+        result, _ = connector._build_result(  # noqa: SLF001 - unit under test
+            record, "Roofing", {"roofing"}
+        )
+        assert "plan_holder" not in result.metadata
+
+
 class TestTexasProcurementConnector:
     """Tests for TexasProcurementConnector."""
 

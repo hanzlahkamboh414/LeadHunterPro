@@ -19,20 +19,64 @@ email-validator>=2.0.0
 # HTTP client
 requests>=2.32.0
 httpx>=0.27.0
+aiohttp>=3.9.0
 
 # Web parsing
 beautifulsoup4>=4.12.0
+lxml>=5.0.0
+#
+# pdfplumber: the plan-holder / bid-holder / prequalified-contractor LISTS that
+# feed the sourcing pipeline are published as PDFs, and they are TABULAR
+# (Company | Contact | Email | Phone | ...). pdfplumber gives BOTH flat text
+# (`extract_text()`) AND cell-level tables (`extract_tables()`), so a column
+# layout survives extraction instead of being flattened into an unparseable
+# stream -- one dependency covering both, rather than pypdf (text only) plus a
+# later table library. It pulls pdfminer.six + Pillow, both pure-wheel on
+# Windows. Validated live 2026-08-21: `scripts/probe_search_dork.py` surfaced
+# 45 real plan-holder PDFs, incl. one titled "PLANHOLDER LIST Contractor
+# Email/Contact Phone/Fax". Search stays a swappable feeder (CLAUDE.md §3);
+# the value is in this extraction + the parser + LeadPipeline qualification.
+pdfplumber>=0.11.0
 
-# AI providers
+# AI transport
+# One SDK covers every vendor: RouterProvider speaks the OpenAI-compatible
+# protocol, which NaraRouter, OmniRoute, OpenRouter, Groq, DeepSeek, vLLM and
+# Ollama all expose. The vendor-specific anthropic and google-generativeai SDKs
+# were dropped with the vendor-specific providers they served.
 openai>=1.0.0
-anthropic>=0.25.0
-google-generativeai>=0.7.0
 
 # Formatting / linting
+#
+# black is DECLARED HERE BUT NOT INSTALLED in the environment the suite passes
+# on (`python -m black --version` -> "No module named black", 2026-08-20). So
+# the formatting gate has never actually run, and this line has been describing
+# an intention rather than a fact. Left in place rather than deleted, because
+# removing a declared dependency is a decision, not a cleanup: see roadmap D26.
+# The recommendation recorded there is that `ruff format` (shipped in the ruff
+# below, and black-compatible by design) supersedes black entirely, which is one
+# tool instead of two for the same job.
 black>=24.0.0
-ruff>=0.4.0
+#
+# ruff is PINNED EXACTLY, and this is the one pin that is not optional.
+# `backend/pyproject.toml` names rules that only exist in recent ruff -- RUF033,
+# RUF036, RUF043 and RUF059 among them -- and ruff rejects a config containing
+# rule codes it does not know. The previous floor, `>=0.4.0`, therefore allowed
+# an install on which the checked-in lint config would not even LOAD. Beyond
+# that: ruff adds rules in every minor release, so an unpinned linter can turn a
+# green repo red with no code change on our side, which is the exact recurring
+# cost D13 and D26 exist to remove. 0.16.1 is the version the 364-error triage
+# in roadmap D29 was performed against, so every count recorded there is only
+# meaningful while this pin holds. Bumping it is a deliberate act: re-run
+# `python scripts/verify_repo.py` and re-triage whatever the new release adds.
+ruff==0.16.1
 
 # Testing
+#
+# pytest: DECLARED FLOOR AND REALITY DISAGREE BY A MAJOR VERSION -- the suite
+# passes on pytest 9.1.1, while this line still permits 8.x, which is a
+# different tool with different collection and fixture behaviour. Not changed
+# here because raising a floor can break `pip install` on a working machine, and
+# that call belongs to the founder (roadmap D26).
 pytest>=8.0.0
 pytest-asyncio>=0.23.0
 pytest-cov>=5.0.0

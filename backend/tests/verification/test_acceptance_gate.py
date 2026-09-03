@@ -591,3 +591,267 @@ class TestConnectorIntegration:
         # Phase 2 Step 4: location comes ONLY from verified evidence.
         assert result.city == "Austin"
         assert result.state == "TX"
+
+
+# ---------------------------------------------------------------------------
+# Inc 5 — Plan-holder verification dimension (Option E)
+# ---------------------------------------------------------------------------
+
+
+class TestPlanHolderVerification:
+    """Option E: a fourth verification dimension for documentary bid-listing
+    evidence from public procurement PDFs (plan-holder lists).
+
+    ``plan_holder_confirmed`` is True when the record carries a complete
+    plan_holder block with named person + person-bound email + source URL,
+    and the record is NOT hard-rejected.  It contributes to the confirmed
+    count but does NOT upgrade to ``verified`` on its own — it is
+    documentary evidence, not identity/industry/location verification.
+    """
+
+    def _plan_holder_record(self, **overrides):
+        """A valid plan-holder record dict (connector schema)."""
+        rec = {
+            "company_name": "Pirc-Tobin",
+            "website": "https://pirctobin.com",
+            "city": "",
+            "state": "",
+            "country": "USA",
+            "trade_category": "",
+            "industry_focus": "",
+            "source_url": "https://www.hrgreen.com/.../Plan-Holder-List_20250121.pdf",
+            "_discovery_source": "plan_holder",
+            "plan_holder": {
+                "person": {
+                    "name": "Charlie Arnold",
+                    "role": "",
+                    "role_relevance": False,
+                    "tier": "unverified",
+                    "source_url": "https://www.hrgreen.com/.../Plan-Holder-List_20250121.pdf",
+                },
+                "emails": [
+                    {
+                        "email": "cjarnold@pirctobin.com",
+                        "tier": "person_bound",
+                        "source_url": "https://www.hrgreen.com/.../Plan-Holder-List_20250121.pdf",
+                    }
+                ],
+                "phones": [],
+                "domain": "pirctobin.com",
+                "free_mail_only": False,
+            },
+        }
+        rec.update(overrides)
+        return rec
+
+    def _all_unknown(self):
+        """All three standard verification dimensions unknown (no evidence)."""
+        return _identity(), _industry(status="unknown", industry_match=False), _location()
+
+    # --- positive tests ---
+
+    def test_plan_holder_all_requirements_met(self):
+        """Complete plan_holder evidence → plan_holder_confirmed=True,
+        accepted=True, partially_verified, confirmed=1."""
+        record = self._plan_holder_record()
+        gate = AcceptanceGate().evaluate(
+            record=record,
+            identity=_identity(),
+            industry=_industry(status="unknown", industry_match=False),
+            location=_location(),
+        )
+        assert gate.plan_holder_confirmed is True
+        assert gate.accepted is True
+        assert gate.verification_status == VerificationStatus.partially_verified
+        # Confidence is 0.0 because _confidence() uses only the 3 standard
+        # dimensions — plan_holder is documentary, not scored.
+        assert gate.verification_confidence == 0.0
+
+    def test_plan_holder_does_not_set_identity_industry_location(self):
+        """plan_holder_confirmed is independent — it does NOT set any of the
+        three standard verification dimensions to True."""
+        record = self._plan_holder_record()
+        gate = AcceptanceGate().evaluate(
+            record=record,
+            identity=_identity(),
+            industry=_industry(status="unknown", industry_match=False),
+            location=_location(),
+        )
+        # None of the three standard dimensions should be confirmed
+        assert gate.identity.official_site_confirmed is False
+        assert gate.industry.verification_status != VerificationStatus.verified
+        assert gate.location.location_status != VerificationStatus.verified
+
+    def test_plan_holder_alone_cannot_reach_verified(self):
+        """plan_holder alone gives confirmed=1, never confirmed=3 →
+        status is partially_verified, NOT verified."""
+        record = self._plan_holder_record()
+        gate = AcceptanceGate().evaluate(
+            record=record,
+            identity=_identity(),
+            industry=_industry(status="unknown", industry_match=False),
+            location=_location(),
+        )
+        assert gate.verification_status == VerificationStatus.partially_verified
+        assert gate.verification_status != VerificationStatus.verified
+
+    def test_plan_holder_with_other_dimensions_reaches_verified(self):
+        """When all 3 standard dimensions + plan_holder are confirmed,
+        confirmed=3 → verified (plan_holder is the 4th, doesn't block)."""
+        record = self._plan_holder_record()
+        gate = _verified_record(record)
+        assert gate.plan_holder_confirmed is True
+        assert gate.verification_status == VerificationStatus.verified
+        assert gate.accepted is True
+
+    # --- negative tests (missing requirements) ---
+
+    def test_no_plan_holder_block(self):
+        """No plan_holder key on record → plan_holder_confirmed=False."""
+        record = {
+            "company_name": "Acme Roofing LLC",
+            "website": "https://acme.example",
+            "_discovery_source": "directory_crawl",
+        }
+        gate = AcceptanceGate().evaluate(
+            record=record,
+            identity=_identity(),
+            industry=_industry(),
+            location=_location(city="Dallas", state="TX", status="verified", match=True),
+        )
+        assert gate.plan_holder_confirmed is False
+
+    def test_plan_holder_missing_person_name(self):
+        """Empty person.name → plan_holder_confirmed=False."""
+        record = self._plan_holder_record()
+        record["plan_holder"]["person"]["name"] = ""
+        gate = AcceptanceGate().evaluate(
+            record=record,
+            identity=_identity(),
+            industry=_industry(status="unknown", industry_match=False),
+            location=_location(),
+        )
+        assert gate.plan_holder_confirmed is False
+        assert gate.accepted is False  # confirmed=0
+
+    def test_plan_holder_missing_person_bound_email(self):
+        """No person_bound email (only format tier) → plan_holder_confirmed=False."""
+        record = self._plan_holder_record()
+        record["plan_holder"]["emails"] = [
+            {"email": "info@pirctobin.com", "tier": "format", "source_url": "..."}
+        ]
+        gate = AcceptanceGate().evaluate(
+            record=record,
+            identity=_identity(),
+            industry=_industry(status="unknown", industry_match=False),
+            location=_location(),
+        )
+        assert gate.plan_holder_confirmed is False
+        assert gate.accepted is False  # confirmed=0
+
+    def test_plan_holder_empty_emails_list(self):
+        """Empty emails list → plan_holder_confirmed=False."""
+        record = self._plan_holder_record()
+        record["plan_holder"]["emails"] = []
+        gate = AcceptanceGate().evaluate(
+            record=record,
+            identity=_identity(),
+            industry=_industry(status="unknown", industry_match=False),
+            location=_location(),
+        )
+        assert gate.plan_holder_confirmed is False
+
+    def test_plan_holder_empty_source_url(self):
+        """Empty source_url on person → plan_holder_confirmed=False."""
+        record = self._plan_holder_record()
+        record["plan_holder"]["person"]["source_url"] = ""
+        gate = AcceptanceGate().evaluate(
+            record=record,
+            identity=_identity(),
+            industry=_industry(status="unknown", industry_match=False),
+            location=_location(),
+        )
+        assert gate.plan_holder_confirmed is False
+        assert gate.accepted is False  # confirmed=0
+
+    def test_plan_holder_whitespace_source_url(self):
+        """Whitespace-only source_url → plan_holder_confirmed=False."""
+        record = self._plan_holder_record()
+        record["plan_holder"]["person"]["source_url"] = "   "
+        gate = AcceptanceGate().evaluate(
+            record=record,
+            identity=_identity(),
+            industry=_industry(status="unknown", industry_match=False),
+            location=_location(),
+        )
+        assert gate.plan_holder_confirmed is False
+
+    # --- hard rejection overrides plan_holder ---
+
+    def test_hard_rejected_plan_holder_stays_rejected(self):
+        """A manufacturer with plan_holder evidence → still hard-rejected."""
+        record = self._plan_holder_record(
+            company_name="Acme Mfg Inc",
+            _discovery_source="directory_crawl",
+        )
+        gate = AcceptanceGate().evaluate(
+            record=record,
+            identity=_identity(),
+            industry=_industry(business_type="manufacturer", status="rejected", industry_match=False),
+            location=_location(),
+        )
+        assert gate.hard_rejected is True
+        assert gate.accepted is False
+        assert gate.verification_status == VerificationStatus.rejected
+
+    # --- tier cap still applies ---
+
+    def test_plan_holder_tier4_capped(self):
+        """Plan-holder at Tier-4 (fixture) → capped to unknown, not live."""
+        record = self._plan_holder_record(source_tier=4)
+        gate = AcceptanceGate().evaluate(
+            record=record,
+            identity=_identity(),
+            industry=_industry(status="unknown", industry_match=False),
+            location=_location(),
+        )
+        assert gate.accepted is False
+        assert gate.verification_status == VerificationStatus.unknown
+        assert any("not a live tier" in r for r in gate.reasons)
+
+    # --- reasons and serialisation ---
+
+    def test_reasons_mention_plan_holder_evidence(self):
+        """Reasons include plan-holder evidence when confirmed."""
+        record = self._plan_holder_record()
+        gate = AcceptanceGate().evaluate(
+            record=record,
+            identity=_identity(),
+            industry=_industry(status="unknown", industry_match=False),
+            location=_location(),
+        )
+        assert any("plan-holder" in r.lower() or "bid-listing" in r.lower() for r in gate.reasons)
+
+    def test_to_dict_includes_plan_holder_confirmed(self):
+        """to_dict() serialises plan_holder_confirmed."""
+        record = self._plan_holder_record()
+        gate = AcceptanceGate().evaluate(
+            record=record,
+            identity=_identity(),
+            industry=_industry(status="unknown", industry_match=False),
+            location=_location(),
+        )
+        data = gate.to_dict()
+        assert "plan_holder_confirmed" in data
+        assert data["plan_holder_confirmed"] is True
+        json.dumps(data)  # must serialise without error
+
+    def test_non_plan_holder_record_has_plan_holder_confirmed_false(self):
+        """A normal (non-plan-holder) record → plan_holder_confirmed=False
+        in to_dict."""
+        gate = _verified_record(
+            {"company_name": "Acme Roofing LLC", "_discovery_source": "official_website"}
+        )
+        assert gate.plan_holder_confirmed is False
+        data = gate.to_dict()
+        assert data["plan_holder_confirmed"] is False

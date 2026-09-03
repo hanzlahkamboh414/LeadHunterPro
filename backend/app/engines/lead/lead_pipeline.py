@@ -39,6 +39,7 @@ from app.engines.lead.lead_models import (
     LeadEmail,
     LeadPerson,
     PersonVerificationTier,
+    role_is_plausibly_relevant,
 )
 
 logger = logging.getLogger(__name__)
@@ -103,7 +104,7 @@ class LeadPipeline:
         query: dict[str, Any] | None = None,
     ) -> Lead:
         """Assemble and return the Lead; the deterministic gate is the verdict."""
-        person, emails = self._discover_person(company.website)
+        person, emails = self._discover_person(company)
         evidence = self._collect_intent(company, query)
         ai = self._score(company, evidence, emails, query)
         return Lead(
@@ -125,14 +126,122 @@ class LeadPipeline:
     # -- stages ----------------------------------------------------------
 
     def _discover_person(
-        self, website: str
+        self, company: CompanyDiscoveryResult
     ) -> tuple[LeadPerson | None, list[LeadEmail]]:
+        """Best decision-maker: plan-holder pre-bound person/email when present,
+        else leadership discovery from the website.
+
+        Inc 3 bridge: a plan-holder record carries its named contact and
+        person-bound email on ``metadata["plan_holder"]`` (Inc 2), so that
+        pre-bound person is used WITHOUT re-crawling the site — the record's
+        website is derived from an email domain, not verified, so a crawl
+        would be wasted (and its person is the authoritative one from the
+        public bid list). No role is invented here (hard rule #2): the bridge
+        person keeps whatever role the list carried (``""``) and
+        ``role_relevance`` False, so the V1 gate still reports the role rule.
+
+        Inc 4 enrichment: after bridging the pre-bound person, the derived
+        website is crawled for role discovery only. If the website yields a
+        plausibly relevant role (``role_is_plausibly_relevant``), the person's
+        ``role`` and ``role_relevance`` are updated. A failed/empty crawl or
+        an irrelevant role leaves ``role=""`` and ``role_relevance=False`` —
+        never invented. The pre-bound name, email, and verification status
+        are never changed.
+        """
+        bridged = self._bridged_plan_holder(company)
+        if bridged is not None:
+            person, emails = bridged
+            if person is not None and not person.role_relevance:
+                person = self._enrich_plan_holder_role(company, person)
+            return person, emails
+        website = company.website
         try:
             records = self._leadership.discover(website)
         except Exception as exc:  # noqa: BLE001 — a failed discovery never kills the run
             logger.warning("leadership discovery failed for %s: %s", website, exc)
             return None, []
         return self._select_decision_maker(records)
+
+    @staticmethod
+    def _bridged_plan_holder(
+        company: CompanyDiscoveryResult,
+    ) -> tuple[LeadPerson | None, list[LeadEmail]] | None:
+        """The pre-bound plan-holder person + emails, or ``None`` when absent.
+
+        Reads ``metadata["plan_holder"]`` (the Inc-2 detail block) and maps it
+        onto :class:`LeadPerson` / :class:`LeadEmail`. Returns ``None`` when
+        there is no plan-holder block so a normal company falls through to
+        website leadership discovery. The person's role stays as carried
+        (``""``) — never backfilled — and ``role_relevance`` stays False.
+        """
+        block = (company.metadata or {}).get("plan_holder")
+        if not block:
+            return None
+        person_dict = block.get("person") or {}
+        person = None
+        if person_dict.get("name"):
+            person = LeadPerson(
+                name=str(person_dict.get("name") or ""),
+                role=str(person_dict.get("role") or ""),
+                role_relevance=bool(person_dict.get("role_relevance")),
+                tier=PersonVerificationTier(
+                    person_dict.get("tier") or "unverified"
+                ),
+                source_url=str(person_dict.get("source_url") or ""),
+            )
+        emails = [
+            LeadEmail(
+                email=str(e.get("email") or ""),
+                tier=EmailVerificationTier(e.get("tier") or "format"),
+                source_url=str(e.get("source_url") or ""),
+            )
+            for e in block.get("emails") or []
+            if e.get("email")
+        ]
+        return person, emails
+
+    def _enrich_plan_holder_role(
+        self,
+        company: CompanyDiscoveryResult,
+        person: LeadPerson,
+    ) -> LeadPerson:
+        """Crawl the derived website for role enrichment of a plan-holder person.
+
+        Inc 4: the plan-holder list carries no job title (``role=""``), so the
+        V1 gate blocks on ``role_relevance``. This method crawls the derived
+        website (from the email domain) using the existing
+        ``LeadershipDiscovery`` path and reuses ``PeopleParser._detect_role()``
+        (via the discovered person records) plus ``role_is_plausibly_relevant``
+        to check whether the website yields a relevant role.
+
+        Only ``role`` and ``role_relevance`` are updated — the pre-bound name,
+        email, tier, and source_url are never changed. A failed crawl, empty
+        result, or irrelevant role leaves the person unchanged (honest fail).
+        The company's ``verification_status`` and ``gate_accepted`` are never
+        modified by this method.
+        """
+        website = company.website
+        if not website:
+            return person
+        try:
+            records = self._leadership.discover(website)
+        except Exception as exc:  # noqa: BLE001 — failed crawl is honest, never fatal
+            logger.info(
+                "role enrichment crawl failed for %s: %s", website, exc
+            )
+            return person
+        for record in records:
+            rec_person = record.get("person") or {}
+            role = str(rec_person.get("role") or "")
+            if role and role_is_plausibly_relevant(role):
+                return LeadPerson(
+                    name=person.name,
+                    role=role,
+                    role_relevance=True,
+                    tier=person.tier,
+                    source_url=person.source_url,
+                )
+        return person
 
     def _collect_intent(
         self, company: CompanyDiscoveryResult, query: dict[str, Any] | None
@@ -280,7 +389,15 @@ def lead_to_export_row(lead: Lead) -> dict[str, Any]:
         ),
         "source": lead.company.source,
         "source_url": lead.company.source_url,
+        # The deterministic AcceptanceGate verdict, surfaced explicitly so a
+        # consumer can never mistake a bridged/unverified record for a
+        # verified one: gate_accepted False + verification_status
+        # "unknown"/"rejected" means NOT ready to contact, whatever the
+        # decision_maker / person_bound_email columns show (Inc 3 bridge data).
         "gate_accepted": lead.verified_context,
+        "verification_status": str(
+            meta.get("verification_status") or "unknown"
+        ),
         "decision_maker": (lead.person.name if lead.person else ""),
         "decision_maker_role": (lead.person.role if lead.person else ""),
         "person_bound_email": (

@@ -31,8 +31,11 @@ from app.engines.lead.lead_models import (
 )
 from tests.fixtures.people_pages import (
     COMPANY_BEFORE_ROLE_HTML,
+    MAILTO_ANCHOR_TEXT_HTML,
+    MARKETING_PROSE_HTML,
     NO_PEOPLE_PAGE_HTML,
     PROSE_TEAM_PAGE_HTML,
+    SENTENCE_BOUNDARY_HTML,
     TEAM_GRID_HTML,
     TEAM_PAGE_WITH_DUPLICATE_HTML,
 )
@@ -189,3 +192,69 @@ class TestPersonRecordSerialization:
         assert payload["person"]["tier"] == "unverified"
         assert payload["person"]["role_relevance"] is True
         assert payload["emails"][0]["tier"] == "person_bound"
+
+
+class TestLiveSiteEvidenceGarbage:
+    """Inc11 Step B — the Inc11 Step A live evidence, locked in regression.
+
+    Real Texas roofing sites put marketing copy ("Schedule No Obligation
+    Inspection", "Owned Dallas Since Honest", "You Back Same Day", the
+    "First Name Last Name" placeholder) right next to an actual person. The
+    old parser turned that copy into fake decision-makers. Now: prose never
+    becomes a name, the sentence/product boundary can't leak into the name,
+    and a mailto link whose anchor text hides the address still binds.
+    """
+
+    def test_marketing_prose_produces_no_fake_people(self):
+        assert PeopleParser().extract_candidates(_soup(MARKETING_PROSE_HTML)) == []
+
+    def test_real_president_survives_adjacent_prose(self):
+        records = PeopleParser().extract_candidates(_soup(SENTENCE_BOUNDARY_HTML))
+        assert [r.person.name for r in records] == ["Chris Arrington"]
+        assert records[0].person.role == "President"
+        assert records[0].person.role_relevance is True
+        assert records[0].person.tier is PersonVerificationTier.unverified
+
+    def test_mailto_anchor_text_still_binds_the_email(self):
+        records = PeopleParser().extract_candidates(_soup(MAILTO_ANCHOR_TEXT_HTML))
+        assert [r.person.name for r in records] == ["John Smith"]
+        assert [e.email for e in records[0].emails] == ["john.smith@bertroofing.com"]
+        assert records[0].emails[0].tier is EmailVerificationTier.person_bound
+
+    def test_plausible_name_rejects_the_evidence_phrases(self):
+        parser = PeopleParser()
+        for phrase in (
+            "Owned Dallas Since Honest",
+            "Schedule No Obligation Inspection",
+            "You Back Same Day",
+            "First Name Last Name",
+        ):
+            assert parser._is_plausible_name(phrase, "") is False
+        assert parser._is_plausible_name("Maria Gomez", "") is True
+
+    def test_name_likeness_rejects_step_b3_prose(self):
+        """Inc11 Step B-2a: positive given-name test ends the blacklist
+        whack-a-mole — the NEW prose phrases from the Step B-3 live run."""
+        parser = PeopleParser()
+        for phrase in (
+            "Roofer Whether",
+            "Bathroom Remodel Cost",
+            "Calculator Bathroom Remodel Cost",
+        ):
+            assert parser._is_plausible_name(phrase, "") is False
+
+    def test_name_likeness_keeps_the_real_people_found(self):
+        """Every real decision-maker the B-3 live run found still passes."""
+        parser = PeopleParser()
+        for real in (
+            "Brandon Barnett",
+            "Daniel Guzman",
+            "Leslie Folsom",
+            "Chris Arrington",
+            "Randy Eubank",
+        ):
+            assert parser._is_plausible_name(real, "") is True
+
+    def test_hyphenated_given_name_counts(self):
+        """Juan-Carlos is a person even though no single token is in the set."""
+        assert PeopleParser()._is_plausible_name("Juan-Carlos Cruz", "") is True

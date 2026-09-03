@@ -112,6 +112,143 @@ NAME_STOPWORDS = frozenset(
     }
 )
 
+#: Marketing/heading/industry words a real person's name never contains.
+#: These are the live-site (Inc11 Step A) phrases that were captured as
+#: decision-makers — "Owned Dallas Since Honest", "Schedule No Obligation
+#: Inspection", "You Back Same Day", "First Name Last Name" — plus the
+#: headings they come from. A name walk STOPS at one (so a real name sitting
+#: behind it — "...Inspection John Smith President" — is rescued instead of
+#: swallowed), and :meth:`_is_plausible_name` rejects any phrase containing
+#: one. Deliberately conservative: for Texas contractors, fabricating a fake
+#: decision-maker is worse than occasionally missing a real "Austin Smith".
+NAME_PROSE_WORDS = frozenset(
+    {
+        # Inc11 Step A evidence — captured verbatim as fake "people"
+        "schedule", "obligation", "inspection", "honest", "since",
+        "first", "last", "name", "you", "back", "same", "day",
+        "request", "free", "tell", "start", "finish",
+        # Number words never appear in a personal name
+        "one", "two", "three", "four", "five",
+        "six", "seven", "eight", "nine", "ten",
+        # Marketing/heading vocabulary
+        "call", "today", "learn", "more", "view", "read", "join",
+        "become", "contact", "reach", "visit", "meet", "check", "see",
+        "get", "book", "click", "talk", "speak", "save", "money",
+        "fast", "quick", "trust", "guarantee", "guaranteed", "warranty",
+        "proudly", "owned", "serve", "serving", "service", "services",
+        "quality", "professional", "affordable", "reliable", "expert",
+        "experience", "estimate", "estimates", "best", "top", "full",
+        "new", "old", "your", "their", "no", "local", "family",
+        "sons", "associates", "group",
+        # Industry/company context — never part of a person's name
+        "roofing", "construction", "company", "contractor", "contractors",
+        "builder", "builders",
+        # Texas geography — a heading ("Best Roofing In Dallas Texas") is
+        # location prose, not a name (see the conservative note above)
+        "texas", "dallas", "houston", "austin", "fort", "worth",
+    }
+)
+
+#: Common given names, used as a POSITIVE name-likeness test: a decision-maker
+#: must contain at least one of these. This ends the blacklist whack-a-mole —
+#: "Roofer Whether", "Bathroom Remodel Cost" (Inc11 Step B-3 live evidence)
+#: were prose that no word-list could fully predict. Requiring a known given
+#: name rejects ALL such phrases at once while keeping every real person found
+#: ("Brandon Barnett", "Chris Arrington", ...). Deliberate trade: a rare given
+#: name may be missed — never fabricating a decision-maker wins over that.
+COMMON_GIVEN_NAMES = frozenset(
+    {
+        "abigail", "abraham", "adam", "adrian", "adriana", "agnes", "aisha",
+        "alan", "albert", "alejandro", "alex", "alexander", "alexandra",
+        "alexis", "alfred", "alfredo", "alice", "alicia", "allan", "allen",
+        "amanda", "amber", "amelia", "amy", "ana", "andrea", "andrew", "andy",
+        "angela", "angelo", "anita", "ann", "anna", "annette", "anthony",
+        "antonio", "april", "arlene", "arthur", "ashley", "audrey", "barbara",
+        "barry", "beatrice", "becky", "belinda", "ben", "benjamin", "bernard",
+        "bernice", "bert", "beth", "betty", "bill", "billy", "blake", "bob",
+        "bobby", "brad", "bradley", "brandon", "brenda", "brent", "brett",
+        "brian", "bridget", "brittany", "bruce", "bryan", "caitlin", "caleb",
+        "calvin", "cameron", "candace", "carl", "carla", "carlos", "carol",
+        "caroline", "carrie", "casey", "catherine", "cathy", "cedric", "cesar",
+        "charles", "charlie", "cheryl", "chris", "christina", "christopher",
+        "chuck", "cindy", "claire", "clara", "clarence", "clark", "claudia",
+        "clayton", "clifford", "clint", "clinton", "cody", "colin", "collin",
+        "colton", "connie", "conor", "corey", "corinne", "craig", "cristina",
+        "crystal", "curtis", "cynthia", "dale", "damon", "dan", "dana",
+        "daniel", "danielle", "danny", "darlene", "darrell", "darren",
+        "daryl", "dave", "david", "dawn", "dean", "deborah", "debra",
+        "delia", "denise", "dennis", "derek", "derrick", "devin", "diana",
+        "diane", "dominick", "dominic", "don", "donald", "donna", "dora",
+        "doreen", "doris", "dorothy", "doug", "douglas", "dulce", "dylan",
+        "earl", "eddie", "edgar", "edith", "eduardo", "edward", "edwin",
+        "eileen", "elaine", "elena", "elias", "elijah", "elizabeth", "ella",
+        "ellen", "elmer", "elsa", "emily", "emma", "enrique", "eric", "erica",
+        "erik", "erin", "ernest", "esteban", "esther", "ethan", "eugene",
+        "eva", "evan", "evelyn", "faith", "felicia", "felipe", "felix",
+        "fernando", "floyd", "frances", "francesco", "francis", "francisco",
+        "frank", "franklin", "fred", "frederick", "gabriel", "gary", "gene",
+        "george", "georgia", "gerald", "gerardo", "gina", "gilbert",
+        "gilberto", "glenn", "gloria", "gordon", "grace", "grant", "greg",
+        "gregory", "guadalupe", "gustavo", "guy", "gwen", "hannah", "harold",
+        "harriet", "harry", "heather", "hector", "heidi", "helen", "henry",
+        "herbert", "herman", "holly", "homer", "howard", "hugh", "hugo",
+        "ian", "ingrid", "irene", "irma", "irving", "isabel", "isaac",
+        "jack", "jackie", "jacob", "jacqueline", "jake", "james", "jamie",
+        "jan", "jane", "janet", "janice", "jared", "jasmine", "jason",
+        "javier", "jay", "jean", "jeff", "jeffrey", "jenna", "jennifer",
+        "jeremy", "jermaine", "jerome", "jerry", "jess", "jesse", "jessica",
+        "jesus", "jill", "jim", "jimmy", "joan", "joann", "joanna",
+        "joanne", "joe", "joel", "joey", "john", "johnny", "jon",
+        "jonathan", "jordan", "jorge", "jose", "joseph", "josh", "joshua",
+        "josie", "juan", "judith", "judy", "julia", "julian", "julie",
+        "julio", "justin", "karen", "karl", "kate", "katherine", "kathleen",
+        "kathryn", "kathy", "katie", "kay", "keith", "kelly", "kelsey",
+        "kendra", "kenneth", "kent", "kevin", "kim", "kimberly", "kirsten",
+        "krista", "kristen", "kristin", "kristina", "kurt", "kyle", "lamar",
+        "lance", "larry", "laura", "lauren", "lawrence", "leah", "lee",
+        "leland", "leo", "leon", "leonard", "leslie", "lester", "lewis",
+        "linda", "lindsay", "lionel", "lisa", "lloyd", "logan", "loren",
+        "lorenzo", "lori", "lou", "louis", "louise", "lucas", "lucy",
+        "luis", "luke", "lydia", "lyle", "lynn", "madison", "manuel",
+        "marc", "marcus", "margaret", "maria", "marian", "marie", "marilyn",
+        "marion", "mark", "marlene", "marlon", "martha", "martin", "marty",
+        "marvin", "mary", "mason", "matthew", "maurice", "mauricio", "max",
+        "megan", "melanie", "melinda", "melissa", "melvin", "meredith",
+        "mia", "micah", "michael", "michele", "michelle", "miguel", "mike",
+        "mildred", "miles", "miranda", "miriam", "mitchell", "molly",
+        "monica", "morgan", "mya", "nadine", "nancy", "naomi", "nathan",
+        "nathaniel", "neal", "nell", "neil", "nelly", "nelson", "nicholas",
+        "nick", "nicole", "nina", "noah", "nolan", "norma", "norman",
+        "omar", "orlando", "oscar", "owen", "pablo", "pamela", "patrick",
+        "patricia", "patsy", "paul", "paula", "pedro", "peggy", "penny",
+        "perry", "pete", "peter", "philip", "phillip", "phyllis", "pierre",
+        "pilar", "quentin", "quinn", "rachel", "rafael", "ramon", "randall",
+        "randolph", "randy", "raul", "raymond", "rebecca", "regina", "rene",
+        "renata", "renee", "ricardo", "rich", "richard", "rick", "ricky",
+        "rita", "rob", "robbie", "robert", "roberto", "robin", "rocco",
+        "rodney", "roger", "roland", "roman", "ronald", "ronnie", "rosa",
+        "rosemary", "ross", "roy", "ruben", "ruby", "russell", "ruth",
+        "ryan", "sabrina", "sadie", "sally", "sam", "samantha", "samuel",
+        "sandra", "sara", "sarah", "scott", "sean", "selena", "sergio",
+        "seth", "shane", "shannon", "sharon", "shaun", "shawn", "sheila",
+        "shelly", "sherri", "sherry", "shirley", "sidney", "silvia", "simon",
+        "skylar", "sofia", "sonia", "sonya", "sophia", "spencer", "stacy",
+        "stan", "stacey", "stanley", "stella", "stephanie", "stephen",
+        "steve", "steven", "stewart", "stuart", "sue", "susan", "suzanne",
+        "sydney", "sylvia", "tabitha", "tamara", "tammy", "tara", "taylor",
+        "ted", "terence", "teresa", "terri", "terry", "theodore", "thomas",
+        "tiara", "tim", "timothy", "tina", "tito", "tobias", "todd", "tom",
+        "tomas", "tommy", "tony", "tonya", "tracey", "tracy", "travis",
+        "trent", "trevor", "tricia", "trina", "trisha", "troy", "trudy",
+        "tyler", "ulysses", "ursula", "valerie", "vanessa", "vaughn", "verna",
+        "veronica", "victor", "victoria", "vincent", "virgil", "virginia",
+        "vivian", "wade", "waldo", "wallace", "walter", "wanda", "warren",
+        "wayne", "wendy", "wesley", "wilbert", "wilbur", "will", "william",
+        "willie", "wilma", "wilson", "winifred", "wyatt", "yvonne", "zach",
+        "zachary", "zoe",
+    }
+)
+
 #: A person name: 2-4 capitalized words (e.g. "Maria Gomez").
 NAME_PATTERN = re.compile(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\b")
 
@@ -121,6 +258,23 @@ NAME_TOKEN_RE = re.compile(r"[A-Z][a-z]+")
 #: An all-caps acronym/suffix (LLC, INC, TX) — a hard name boundary, since a
 #: person's name never contains one mid-phrase.
 ALL_CAPS_RE = re.compile(r"[A-Z]{2,}")
+
+#: Hard sentence boundaries. A name walk STOPS at any of these, so prose in a
+#: different sentence than the role can never leak into the name — the live-site
+#: bug where "Owned Dallas Since Honest" and "Schedule No Obligation Inspection"
+#: became decision-makers (the period was dropped and the tokens ran together).
+#: Commas/colons/parens stay invisible so "John Smith, President" and
+#: "Owner: John Smith" keep working.
+_NAME_BOUNDARY_CHARS = ".!?|—–"
+
+#: Tokenizer for a name walk: hyphenated/apostrophe words OR one hard boundary
+#: char. Anything else (commas, colons, spaces) is dropped exactly as the old
+#: ``re.findall(r"[A-Za-z]+", ...)`` dropped it — a name never ends mid-word.
+_NAME_WALK_TOKEN = re.compile(
+    r"[A-Za-z]+(?:['-][A-Za-z]+)*|["
+    + "".join(re.escape(c) for c in _NAME_BOUNDARY_CHARS)
+    + r"]"
+)
 
 #: Capitalized words that lead into a sentence and are never part of a name
 #: ("Contact Maria Gomez", "Reach Maria at ...").
@@ -187,6 +341,7 @@ class PeopleParser:
         (name, role) pair is emitted only once.
         """
         company = (company_name or "").strip() or self._site_name(soup)
+        mailto_by_region = self._collect_mailto_by_region(soup)
 
         regions: list[str] = []
         for tag in soup.find_all(REGION_TAGS):
@@ -203,7 +358,9 @@ class PeopleParser:
         records: list[PersonRecord] = []
         seen: set[tuple[str, str]] = set()
         for text in regions:
-            record = self._extract_from_text(text, page_url, company)
+            record = self._extract_from_text(
+                text, page_url, company, mailto_by_region.get(text, ())
+            )
             if record is None:
                 continue
             key = (record.person.name.lower(), record.person.role.lower())
@@ -213,6 +370,27 @@ class PeopleParser:
             records.append(record)
         return records
 
+    def _collect_mailto_by_region(self, soup: BeautifulSoup) -> dict[str, list[str]]:
+        """Map region text -> the ``mailto:`` emails inside it.
+
+        Region-bound, so a mailbox in a NO-person region (a footer ``office@``)
+        stays unbound — the existing contract. The anchor's TEXT may not contain
+        the address ("Email Chris"), so the ``href`` itself is scanned: a mailto
+        link is otherwise invisible to the parser and no email is ever extracted.
+        """
+        by_region: dict[str, list[str]] = {}
+        for anchor in soup.find_all("a", href=True):
+            href = anchor.get("href", "").strip()
+            if not href.lower().startswith("mailto:"):
+                continue
+            emails = clean_emails(EMAIL_CLEAN_PATTERN.findall(href))
+            if not emails:
+                continue
+            parent = anchor.find_parent(REGION_TAGS)
+            region_text = parent.get_text(" ", strip=True) if parent is not None else ""
+            by_region.setdefault(region_text, []).extend(emails)
+        return by_region
+
     # -- region parsing ---------------------------------------------------
 
     def _extract_from_text(
@@ -220,6 +398,7 @@ class PeopleParser:
         text: str,
         page_url: str,
         company_name: str,
+        region_mailto: tuple[str, ...] = (),
     ) -> PersonRecord | None:
         role = self._detect_role(text)
         if not role:
@@ -236,7 +415,7 @@ class PeopleParser:
         )
         return PersonRecord(
             person=person,
-            emails=self._bind_emails(text, page_url),
+            emails=self._bind_emails(text, page_url, region_mailto),
             region_text=text,
         )
 
@@ -266,15 +445,17 @@ class PeopleParser:
 
     def _find_name_before(self, text: str, end: int, company_name: str) -> str:
         """The capitalized words immediately before the role — skipping role
-        words, lead-ins, and connectors; stopping at a stopword or acronym
-        boundary. A greedy regex would swallow the role word ("Maria Gomez
-        Owner"), so the name is assembled token-by-token instead."""
-        words = re.findall(r"[A-Za-z]+", text[:end])
+        words, lead-ins, and connectors; stopping at a stopword, prose word,
+        sentence boundary, or acronym. A greedy regex would swallow the role
+        word ("Maria Gomez Owner"), so the name is assembled token-by-token."""
+        words = _NAME_WALK_TOKEN.findall(text[:end])
         collected: list[str] = []
         for tok in reversed(words):
+            if tok in _NAME_BOUNDARY_CHARS:
+                break  # a different sentence/heading — not this person
             if NAME_TOKEN_RE.fullmatch(tok):
                 low = tok.lower()
-                if low in NAME_STOPWORDS:
+                if low in NAME_STOPWORDS or low in NAME_PROSE_WORDS:
                     break
                 if low in NAME_LEADINS or low in _ROLE_TOKEN_LOWER:
                     continue
@@ -290,14 +471,16 @@ class PeopleParser:
 
     def _find_name_after(self, text: str, start: int, company_name: str) -> str:
         """The first capitalized words after the role — the name phrase ends
-        at the first connector (lowercase word or acronym) once a name is
+        at a sentence boundary, connector, or prose word once a name is
         underway."""
-        words = re.findall(r"[A-Za-z]+", text[start:])
+        words = _NAME_WALK_TOKEN.findall(text[start:])
         collected: list[str] = []
         for tok in words:
+            if tok in _NAME_BOUNDARY_CHARS:
+                break  # a different sentence/heading — not this person
             if NAME_TOKEN_RE.fullmatch(tok):
                 low = tok.lower()
-                if low in NAME_STOPWORDS:
+                if low in NAME_STOPWORDS or low in NAME_PROSE_WORDS:
                     break
                 if low in NAME_LEADINS or low in _ROLE_TOKEN_LOWER:
                     continue
@@ -320,9 +503,16 @@ class PeopleParser:
         lower = name.strip().lower()
         if lower in NAME_NOISE:
             return False
-        if set(lower.split()) & NAME_STOPWORDS:
+        if set(lower.split()) & (NAME_STOPWORDS | NAME_PROSE_WORDS):
             return False
         if set(lower.split()) & _ROLE_TOKEN_LOWER:
+            return False
+        # Inc11 Step B-2a — the name must actually LOOK like a person: at
+        # least one token must be a known given name. Shape + blacklist alone
+        # let "Roofer Whether" and "Bathroom Remodel Cost" through (live-run
+        # evidence); a positive test rejects every prose variant at once.
+        # Hyphenated names ("Juan-Carlos") are handled token-by-token.
+        if not (set(re.findall(r"[a-z]+", lower)) & COMMON_GIVEN_NAMES):
             return False
         if company_name:
             company_lower = company_name.strip().lower()
@@ -332,15 +522,23 @@ class PeopleParser:
 
     # -- email binding ----------------------------------------------------
 
-    def _bind_emails(self, text: str, page_url: str) -> list[LeadEmail]:
-        """All emails in the region, tiered honestly by local-part.
+    def _bind_emails(
+        self,
+        text: str,
+        page_url: str,
+        extra_emails: tuple[str, ...] = (),
+    ) -> list[LeadEmail]:
+        """All emails in the region (plus its page-local ``mailto:`` hrefs,
+        deduplicated), tiered honestly by local-part.
 
         A personal-looking local-part (``m.gomez``) bound by region proximity
         is ``person_bound``; a generic mailbox (``info``/``contact``) is
         ``format`` and can never qualify on its own (V1 hard rule #3).
         """
         bound: list[LeadEmail] = []
-        for email in clean_emails(EMAIL_CLEAN_PATTERN.findall(text)):
+        for email in clean_emails(
+            EMAIL_CLEAN_PATTERN.findall(text) + list(extra_emails)
+        ):
             local = email.split("@", 1)[0]
             tier = EmailVerificationTier.person_bound
             if is_generic_email_local_part(local):

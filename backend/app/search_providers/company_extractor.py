@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,218 @@ _ADDRESS_PATTERN = re.compile(
 _CTY_STATE_PATTERN = re.compile(
     r"(?<![A-Za-z])([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s*,\s*([A-Z]{2})(?![A-Za-z])"
 )
+
+# --- Company-name sources (roadmap D19) --------------------------------------
+#
+# Name sources are consulted STRUCTURED-FIRST. The previous order tried
+# ``og:title`` first and called it "most reliable"; the 2026-08-19 live run
+# disproved that — every discovered company came back named with its SEO page
+# headline ("Dallas Roofing Contractor Since 1983 | Arrington Roofing").
+# ``og:title`` is copy written for search engines; schema.org and ``og:site_name``
+# are the only fields that carry a *business* name by definition, so they now win
+# whenever a site publishes them. A wrong name is not cosmetic: it is the join key
+# for downstream enrichment and it is what the customer receives in the export.
+
+# Business schema types small contractors actually publish. Matching only
+# "Organization" was a real gap — trade sites overwhelmingly emit LocalBusiness or
+# one of its subtypes (RoofingContractor, HVACBusiness, Plumber,
+# GeneralContractor, HomeAndConstructionBusiness).
+_SCHEMA_BUSINESS_TYPE = (
+    r"(?:Organization|Corporation|LocalBusiness"
+    r"|[A-Za-z]*(?:Business|Contractor|Plumber|Electrician|Roofing))"
+)
+
+# "name" may appear before or after "@type" inside the same JSON-LD object, so
+# both orders are tried. Excluding braces keeps each match inside one object,
+# preventing a name from being harvested out of a *neighbouring* node.
+_SCHEMA_NAME_PATTERNS: tuple[re.Pattern, ...] = (
+    re.compile(
+        r'"@type"\s*:\s*"' + _SCHEMA_BUSINESS_TYPE + r'"[^{}]*?"name"\s*:\s*"([^"]+)"',
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r'"name"\s*:\s*"([^"]+)"[^{}]*?"@type"\s*:\s*"' + _SCHEMA_BUSINESS_TYPE + r'"',
+        re.IGNORECASE,
+    ),
+)
+
+# Separators used to break an SEO title into segments. A bare "-" only counts
+# when surrounded by whitespace, so hyphenated names ("Tri-State Roofing") are
+# never split in half.
+_TITLE_SPLIT_PATTERN = re.compile(r"\s*[|–—·»]\s*|\s+-\s+")
+
+# Unambiguously promotional vocabulary. Used ONLY to rank one title segment
+# against another when the domain cannot settle it — never to reject a name,
+# because a real company may legitimately be "Premier Roofing" or "Quality Roof
+# Co", and rejecting those would trade one wrong-name bug for another.
+_PROMO_TOKENS: frozenset[str] = frozenset(
+    {
+        "affordable",
+        "award",
+        "awards",
+        "best",
+        "bonded",
+        "cheap",
+        "certified",
+        "companies",
+        "contractors",
+        "estimate",
+        "estimates",
+        "expert",
+        "experts",
+        "free",
+        "guaranteed",
+        "insured",
+        "leading",
+        "licensed",
+        "me",
+        "near",
+        "no",
+        "number",
+        "official",
+        "operated",
+        "owned",
+        "premier",
+        "professional",
+        "quote",
+        "quotes",
+        "rated",
+        "reliable",
+        "review",
+        "reviews",
+        "since",
+        "top",
+        "trusted",
+        "vetted",
+        "voted",
+        "welcome",
+        "winning",
+    }
+)
+
+
+def _norm_alnum(text: str) -> str:
+    """Reduce text to lowercase alphanumerics so it can be compared to a domain.
+
+    Args:
+        text: Any string.
+
+    Returns:
+        The input lowercased with every non-alphanumeric character removed
+        ("Arrington Roofing, Inc." -> "arringtonroofinginc").
+    """
+    return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
+def _meta_content(html: str, key: str) -> str:
+    """Read a ``<meta>`` tag's content by its ``property`` or ``name`` key.
+
+    Both attribute orders are handled, because real pages emit
+    ``property=... content=...`` and ``content=... property=...`` alike, and a
+    pattern that assumes one order silently loses the tag on half the web. The
+    quote character is captured and back-referenced rather than matched as a
+    class, so an apostrophe inside a double-quoted value does not truncate it
+    ("Joe's Roofing Co" must not become "Joe"). The ``[^>]*?`` between the two
+    attributes keeps each match inside a single tag.
+
+    Args:
+        html: Raw HTML content.
+        key: The meta key to look up, e.g. ``"og:site_name"``.
+
+    Returns:
+        The tag's content value, or an empty string when the tag is absent.
+    """
+    escaped = re.escape(key)
+    key_attr = rf'(?:property|name)\s*=\s*(?P<kq>["\']){escaped}(?P=kq)'
+    value_attr = r'content\s*=\s*(?P<vq>["\'])(?P<value>.*?)(?P=vq)'
+    patterns = (
+        rf"<meta[^>]+?{key_attr}[^>]*?{value_attr}",
+        rf"<meta[^>]+?{value_attr}[^>]*?{key_attr}",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, html, re.IGNORECASE)
+        if match:
+            return match.group("value").strip()
+    return ""
+
+
+def _domain_label(url: str) -> str:
+    """Reduce a URL to the comparable label of its host.
+
+    Args:
+        url: Absolute page URL. May be empty.
+
+    Returns:
+        The lowercased alphanumeric first label ("arringtonroofing" for
+        ``https://www.arringtonroofing.com/about``), or an empty string when the
+        URL is missing or has no host.
+    """
+    if not url:
+        return ""
+    host = (urlparse(url).hostname or "").lower()
+    if not host:
+        return ""
+    host = host.removeprefix("www.")
+    return _norm_alnum(host.split(".")[0])
+
+
+def _promo_score(segment: str) -> int:
+    """Count advertising signals in one title segment; lower is more name-like.
+
+    Args:
+        segment: A single title segment.
+
+    Returns:
+        A non-negative score. Only used for ranking segments against each other.
+    """
+    words = re.findall(r"[a-z0-9]+", segment.lower())
+    score = sum(1 for word in words if word in _PROMO_TOKENS)
+    # "#1 Roofer in Dallas" and a bare year are pure marketing, and neither is
+    # caught by the token list.
+    if segment.lstrip().startswith("#"):
+        score += 2
+    score += sum(1 for word in words if re.fullmatch(r"(?:19|20)\d{2}", word))
+    return score
+
+
+def _best_name_segment(text: str, domain: str) -> str:
+    """Pick the segment of a title most likely to be the business name.
+
+    Args:
+        text: A title-like string, possibly "Tagline | Brand | City".
+        domain: Normalized domain label from :func:`_domain_label`. May be empty.
+
+    Returns:
+        The chosen segment, or ``text`` stripped when it has no separators.
+    """
+    segments = [s.strip() for s in _TITLE_SPLIT_PATTERN.split(text) if s.strip()]
+    if len(segments) < 2:
+        return text.strip()
+
+    # A segment echoing the domain is decisive: small businesses register their
+    # own name (Arrington Roofing -> arringtonroofing.com), so this is corroboration
+    # from a second independent source rather than a guess about which words look
+    # promotional. The length floor keeps a stray "TX" from matching by accident.
+    if domain:
+        for segment in segments:
+            norm = _norm_alnum(segment)
+            if len(norm) < 4:
+                continue
+            if norm == domain:
+                return segment
+            overlap = norm in domain or domain in norm
+            if overlap and min(len(norm), len(domain)) >= 0.6 * max(
+                len(norm), len(domain)
+            ):
+                return segment
+
+    # No domain corroboration: prefer the segment that reads least like an
+    # advertisement, breaking ties on brevity, since brands are short and
+    # taglines are long.
+    return min(
+        segments, key=lambda s: (_promo_score(s), len(s.split()), len(s), s.lower())
+    )
+
 
 # Keywords that indicate non-contractor businesses (to reject)
 _REJECT_KEYWORDS: frozenset[str] = frozenset(
@@ -295,7 +508,7 @@ class CompanyExtractor:
         profile = CompanyProfile(
             website=url,
             source_url=url,
-            name=self._extract_name(html, title),
+            name=self._extract_name(html, title, url=url),
             industry_focus=self._extract_industry_focus(html, description),
         )
 
@@ -330,45 +543,59 @@ class CompanyExtractor:
         )
         return profile
 
-    def _extract_name(self, html: str, title: str) -> str:
-        """Extract company name from HTML/title.
+    def _extract_name(self, html: str, title: str, url: str = "") -> str:
+        """Extract the company's business name from a page.
+
+        Sources are consulted structured-first — schema.org, then ``og:site_name``,
+        and only then the marketing titles — because only the first two carry a
+        business name by definition. See roadmap D19 for the live evidence that
+        the previous ``og:title``-first order returned SEO headlines instead of
+        company names.
 
         Args:
             html: Raw HTML content.
-            title: Page title.
+            title: Page title (pre-extracted).
+            url: Page URL. Optional; used only to recognise which segment of a
+                multi-part title matches the site's own domain. Extraction still
+                works without it, which is why direct callers may omit it.
 
         Returns:
-            Extracted company name.
+            Extracted company name, or an empty string when the page carries
+            nothing usable.
         """
-        # Try OG:title first (most reliable)
-        og_match = re.search(
-            r'<meta\s+property="og:title"\s+content="([^"]+)"', html, re.IGNORECASE
-        )
-        if og_match:
-            return og_match.group(1).strip()
+        # 1. schema.org — a machine-readable business name, published by the site
+        #    owner for exactly this purpose.
+        for pattern in _SCHEMA_NAME_PATTERNS:
+            match = pattern.search(html)
+            if match and match.group(1).strip():
+                return match.group(1).strip()
 
-        # Try schema.org Organization
-        org_match = re.search(
-            r'"@type"\s*:\s*"Organization"[^}]*"name"\s*:\s*"([^"]+)"',
-            html,
-            re.IGNORECASE,
-        )
-        if org_match:
-            return org_match.group(1).strip()
+        # 2. og:site_name — the OpenGraph field meaning "the name of this site",
+        #    as opposed to og:title which means "the headline of this page". It
+        #    was previously not consulted at all.
+        site_name = _meta_content(html, "og:site_name")
+        if site_name:
+            return site_name
 
-        # Fall back to <title> tag
-        if title:
-            # Remove common suffixes
+        # 3./4. og:title, then <title>. Both are marketing strings, so they are
+        #    accepted only after being reduced to their most name-like segment.
+        domain = _domain_label(url)
+        for candidate in (_meta_content(html, "og:title"), title):
+            if not candidate:
+                continue
+            name = _best_name_segment(candidate, domain)
+            # Strip the search-engine and page-role suffixes the previous
+            # implementation removed, so this path never regresses on pages
+            # where it already produced a usable name.
             name = re.sub(
                 r"\s*[-|—]\s*(Google|Bing|Yahoo|Facebook)",
                 "",
-                title,
+                name,
                 flags=re.IGNORECASE,
             )
             name = re.sub(
                 r"\s*[-|—]\s*(Contact|About|Home)", "", name, flags=re.IGNORECASE
-            )
-            name = name.strip()
+            ).strip()
             if len(name) > 2:
                 return name
 

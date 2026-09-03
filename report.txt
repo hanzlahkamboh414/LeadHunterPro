@@ -1,221 +1,664 @@
 ================================================================================
-                    LEADHUNTER PRO — PROJECT PROGRESS REPORT
+             LEADHUNTER PRO — FULL PROJECT REVIEW & SUGGESTIONS
 ================================================================================
-Report date      : 2026-08-09
-Repository       : c:\Users\SHAKIR\Desktop\LeadHunterPro
-Branch           : master @ 63fa994 (Sprint2.4)
-Prepared from    : verified test evidence, source code, and project docs
-Status summary   : Phase 3 (AI Intelligence) through Step 4 VERIFIED — 37 focused
-                   tests green. Phase 2 (Verification) complete. Live (API-free)
-                   discovery proven in Sprint 2.4. Full regression run surfaced 4
-                   environment-only failures (network-gated) — no production
-                   regression.
-
---------------------------------------------------------------------------------
-1. WHAT WE WANT TO MAKE  (Vision & Permanent Goal)
---------------------------------------------------------------------------------
-LeadHunter Pro is a REAL, production-grade company-discovery platform, not a
-search-API client. Target domain: construction/contractor leads, Texas-first.
-
-Tagline goal (CLAUDE.md rule #10 — the "Execute" button must eventually perform
-real discovery):
-
-    Search Internet
-        ↓  Find Companies
-        ↓  Visit Websites
-        ↓  Extract Company Information
-        ↓  Extract Decision Makers
-        ↓  Validate
-        ↓  Rank
-        ↓  Return Results
-
-It must NEVER become:
-
-    Read Fixture JSON  →  Return Cached Companies
-
-Fixtures exist ONLY as an emergency bridge (ADR-002). They are temporary bridge
-data, surfaced honestly as `data_source="fixture"`, `bridge_mode=true`, with a
-`fallback_reason` — never disguised as live leads.
-
-Planned stack: Python 3.12 + FastAPI backend, PostgreSQL (lazy SQLAlchemy),
-React/Electron client, Ollama (local LLM), FAISS (vector/semantic discovery).
-Search APIs (Brave, SearXNG, Google CSE, Bing) are OPTIONAL, replaceable
-sources — never the core architecture.
-
---------------------------------------------------------------------------------
-2. ARCHITECTURE  (How it is built)
---------------------------------------------------------------------------------
-Correct flow (rule #4 — every source replaceable):
-
-    Discovery Engine
-        ↓
-    Source Orchestrator          (SourceOrchestrator)
-        ↓
-    Multiple Sources            (DirectoryCrawlSource · SearchProviderSource · FixtureSource)
-        ↓
-    Crawler / Extractor         (HttpCrawler, session manager)
-        ↓
-    Validation + Ranking        (Phase 2 pipeline)
-        ↓
-    Results
-
-Incorrect pattern (forbidden):  Connector → Brave API → Results.
-
-Layer direction (PROJECT_PRINCIPLES): api → services → engines → connectors →
-crawlers → utilities. Dependencies flow down only; every connector and every AI
-provider is replaceable behind a stable interface.
-
-Public surfaces:
-  - GET /api/v1/connectors/texas-procurement   (connector surface)
-  - GET /api/v1/discovery/companies            (discovery surface)
-
---------------------------------------------------------------------------------
-3. WHAT WE HAVE ACHIEVED  (Sprint & Phase Evidence)
---------------------------------------------------------------------------------
-SPRINTS COMPLETED
-  • Sprint 2.1 — Company Discovery Engine: Connector SDK, ConnectorManager
-    (dedup + rank), engine pipeline (discover → clean → validate → metrics).
-  • Sprint 2.3 — Real Discovery stack: HttpCrawler, session manager,
-    DirectoryCrawlSource, SearchProviderSource, SourceOrchestrator,
-    multi-source registration; search providers decoupled into one replaceable
-    source. Legacy crawler/research stack removed (Blueprint Phase 5).
-  • Sprint 2.4 — API-free LIVE CRAWL discovery proof: no search keys required;
-    live crawl against public directories/websites returns real results when
-    the host is reachable. FixtureSource remains the last-resort bridge.
-
-PHASE 2 — VERIFICATION PIPELINE (COMPLETE)
-  Deterministic, gate-based acceptance (no AI involved):
-  • IdentityVerifier / IndustryVerifier / LocationVerifier
-  • AcceptanceGate.evaluate() — deterministic; hard-rejects manufacturer/
-    supplier/association, invalid/placeholder/aggregator domains; Tier-4
-    results capped to `unknown`; city/state sourced from LocationVerifier
-    evidence only, never from the query.
-  • VerificationStatus (verified / partially_verified / rejected / unknown)
-  • FieldEvidence; SourceTier (OFFICIAL=1 … FIXTURE=4, with is_live_tier)
-  • merge_company_records — evidence-union + location-conflict preservation.
-  Outcome: deterministic quality gate in front of every lead.
-
-PHASE 3 — AI INTELLIGENCE (IN PROGRESS) — additive, downstream, fallback-safe
-  Design: AI is strictly downstream of the deterministic AcceptanceGate. Only
-  gate-accepted records receive `ai` + `qualification` additive namespaces;
-  `verification` remains the single deterministic authority. AI failure
-  degrades to deterministic-only (never blocks or invents leads).
-
-  Verified test evidence                       PASS  Status
-  ─────────────────────────────────────────    ────  ──────
-  Phase-2 verification suite                    -    COMPLETE
-  Phase 3 Step 1 — AI boundary/contract         7    VERIFIED
-  Phase 3 Step 2 — integration + attachment     7    VERIFIED
-  Phase 3 Step 3 — surface (connector API)     12    VERIFIED
-  Phase 3 Step 4 — discovery surface           11    VERIFIED
-  Phase 3 focused total                        37    ALL GREEN
-
-  Phase 3 Step 3 (12 tests) — proved `ai` / `qualification` additive metadata
-  survives the Texas connector surface (`_company_payload`), survives
-  merge_company_records additively (hostile AI keys can never overwrite
-  verification), and fixtures can never acquire AI.
-
-  Phase 3 Step 4 (11 tests) — closed the last gap: `ConnectorResult.metadata`
-  now flows verbatim through CompanyDiscoveryEngine → cleaner dedup → validator
-  → CompanyDiscoveryResult → /api/v1/discovery, surfaced by a curated
-  serializer that keeps internal provenance keys (data_provenance /
-  _discovery_source) off the wire. Verification authority confirmed.
-
-  Phase 3 Step 5 — NOT started (awaiting approval, per phase-gate rule).
-
---------------------------------------------------------------------------------
-4. CURRENT SITUATION  (Where we are right now)
---------------------------------------------------------------------------------
-In-flight / uncommitted working tree on master @ 63fa994:
-  Modified : CLAUDE.md, backend connectors/crawlers/discovery/engines/ai
-             (Texas connector, SourceOrchestrator, AIEngine, scorer,
-             lead_score prompts, source planner/models, http crawler,
-             session manager, fixtures source, search provider source),
-             tests for crawlers/discovery.
-  Deleted :  prompt.md (legacy)
-  New     : backend/app/engines/verification/ (Phase 2), backend/tests/ai/
-            (Steps 1–4), backend/tests/verification/, backend/tests/discovery/
-            test_source_planner_urls.py, demo/diagnose/prove scripts, backend/output/.
-
-  No code is committed since Sprint 2.4; per Git Safety Rule nothing is
-  committed or force-pushed by Claude.
-
-TEST STATE (most recent FULL regression run — 2026-08-09)
-  Result      : 4 FAILURES + 1 interrupted (KeyboardInterrupt) test;
-                509 passed, 3 warnings in 1382.68s before the interrupt.
-  Failing     : test_endpoint_returns_companies, test_search_prefers_live_
-                over_fixture, test_search_falls_back_to_fixture_when_live_fails,
-                test_search_returns_results (all returned len 0 or wrong data
-                source); plus a hang during a live crawl of tdlr.texas.gov.
-  Root cause  : DirectoryCrawlSource returned SUCCESS-with-zero because the
-                robots.txt fetch from www.tdlr.texas.gov failed in the run
-                environment → orchestrator marked `data_source="live"` →
-                fixture-bridge carve-out disabled and location-less mock
-                results got filtered → 0 accepted.
-  Classification: ENVIRONMENT / NETWORK issue, NOT a production regression.
-                Phase 2-4 and verification logic verified unchanged by code
-                reading. The 509-passed tally is not authoritative because the
-                run was interrupted with live-network tests outstanding.
-  Implication : The 4 network-gated tests are environment-dependent (they do a
-                real crawl); they should be re-run offline/mocked or treated as
-                network-gated before being counted as green.
-
-PRIMARY SURFACE STATUS
-  /api/v1/discovery/companies is now the complete Phase-2+3 output path:
-  deterministic verification + additive AI + qualification, with
-  `verification` as the single authority. gap closed.
-
---------------------------------------------------------------------------------
-5. ROADMAP  (What comes next)
---------------------------------------------------------------------------------
-Phase 1 — Foundations ............ COMPLETE
-Phase 2 — Verification pipeline .. COMPLETE
-Phase 3 — AI Intelligence ......... IN PROGRESS  (Steps 1–4 done, Step 5 pending)
-     Step 5+ : remaining AI intelligence surface work (per blueprint),
-               strict phase-gated — never start automatically.
-Phase 4+  — Continue toward the permanent "Execute → REAL discovery" goal:
-     • Decision-maker extraction from visited websites
-     • Ranking → scoring pipeline (no second AI/scoring system; extend the single one)
-     • Persist leads (PostgreSQL repository layer)
-     • Client (React/Electron) consuming the discovery API
-     • Scale-out: more live sources, priority/timeout isolation, dedup keys,
-       validation caching (see PROJECT_PRINCIPLES 2.7)
-
-STANDING GATES BEFORE ANY NEXT PHASE
-  1. Root-cause-first engineering (never fix symptoms)
-  2. Sequential manual verification — ONE command at a time, wait for pasted
-     result, only then proceed (Permanent Rule)
-  3. Phase completion → STOP → report files + changes + test status → WAIT
-     for explicit approval (never more than one phase at a time)
-  4. No hidden fallback to fixtures; fixtures always labeled, bridge-only
-  5. No new module without first searching for an existing implementation
-     (Production Code Rule #14)
-  6. No second AI system
-  7. Never commit unless asked; destructive git is prohibited without approval
-
---------------------------------------------------------------------------------
-6. DOCUMENTATION STATE
---------------------------------------------------------------------------------
-  docs/architecture/   — architecture.md, PROJECT_PRINCIPLES.md,
-                         discovery_architecture.md, crawler_architecture.md,
-                         connector_sdk.md, coding_rules.md, testing.md
-  docs/decisions/      — ADR-001 Connector Architecture, ADR-002 No-Prod-Fixtures
-  docs/sprints/        — Sprint 01.1/01.2, 02.1, 2.3_real_discovery, …
-  backend/             — architecture_report.md, SPRINT_2.1_REPORT.md,
-                         TEST_REPORT_2.1.md, API_AUDIT_REPORT.md
-  README.md            — STALE (still v0.1.0-alpha / "Sprint 0")  → update
-  CHANGELOG.md         — EMPTY  → fill at next sanctioned commit/phase close
-
---------------------------------------------------------------------------------
-7. NEVER-AGAIN (Error registry — must never recur)
---------------------------------------------------------------------------------
-Wrong module imports · hidden fallback to fixtures · fake/placeholder
-(.example.com) domains in production · empty provider registry without
-diagnostics · silent fallback to cached data · JSON corruption in production
-fixtures · hardcoded connector dependencies · provider-centric architecture ·
-fake "live" mode · returning synthetic companies as production results.
-(CLAUDE.md rule #12 — prevent by design, not by ceremony.)
-
+Report date      : 2026-08-12
+Repository       : C:\Users\SHAKIR\Desktop\LeadHunterPro  (branch: master)
+Prepared from    : source code (back-end), tests, and project docs
+Scope            : ANALYSIS ONLY — no code was modified or implemented.
+Methodology      : Read specification/docs (CLAUDE.md, PROJECT_DEVELOPMENT_RULES.md,
+                   roadmap.md, PROJECT_ANALYSIS_REPORT.md, docs/architecture/*),
+                   read & grep the full back-end source, executed the offline test
+                   suite (`python -m pytest -m "not network"` from backend/).
+Evidence (tests) : 1659 passed, 5 failed, 28 deselected (network), 1 collection
+                   error — see §7.
+Evidence (git)   : `git ls-files` / `git grep` confirm no secrets are committed;
+                   .env is gitignored and untracked.
+Evidence (venv)  : .venv-2 had the test deps installed and was used for the run.
 ================================================================================
-END OF REPORT — next action gated on user approval for Phase 3 Step 5.
-================================================================================
+
+NOTE ON STALE DOCS: several project-level reports (PROJECT_ANALYSIS_REPORT.md,
+the root report.txt) were written during an earlier "analysis phase" and are now
+OUT OF DATE in places (e.g. they claim a robots.py async bug and "no concrete
+plugins implemented"; both are no longer true). This report is based on the
+CURRENT source tree and is internally consistent. Where a doc and the code
+disagree, the code (and the git history) is treated as authoritative.
+
+--------------------------------------------------------------------------------
+1. ONE-LINE STATUS
+--------------------------------------------------------------------------------
+The back-end is a mature, well-architected, almost-fully-offline FastAPI package
+(Sprint 2.x) with a real, honest, API-free live-discovery pipeline
+(Planner -> DirectoryCrawlSource -> HTTPCrawler -> extractors -> gate -> rank ->
+Lead qualification gate). The V1 "qualified lead" gate (lead_models.py) is
+deterministic and correctly implemented. The critical gaps are:
+environment/dependency gaps (aiohttp missing -> 5 test failures), a live-API key
+imported at module import in a root `test_*.py` that breaks test collection,
+duplicated/deprecated connector code (two parallel connector stacks), a layering
+inversion (connector -> engine), missing project/tooling config
+(no pyproject.toml/ruff.toml), and an undocumented/aspirational front-end that
+does not exist. The front-end/desktop/docker/tools/assets/scripts top-level
+directories are EMPTY.
+
+--------------------------------------------------------------------------------
+2. WHAT IS BUILT — LAYER BY LAYER (facts)
+--------------------------------------------------------------------------------
+backend/app/
+  core/              settings (Pydantic Settings), constants, exceptions, logging
+  database/          SQLAlchemy base + session (sqlite default; postgres via env)
+  models/            Company/Contact/Research/Task/Campaign ORM models
+  schemas/           Pydantic request/response schemas
+  repositories/      company/contact/research repositories (SQLAlchemy)
+  services/          company/contact/email/leadership/research services
+  api/v1/            10 routers aggregated by router.py (health, database,
+                     company, contact, research, leadership, email, discovery,
+                     source_intelligence, connectors)
+  engines/
+    discovery/company/   CompanyDiscoveryEngine + cleaner + validator + models (PROD)
+    verification/        AcceptanceGate + identity/industry/location verifiers (PROD)
+    source_intelligence/ SourcePlanner + source_models (real seed URLs — see §6)
+    lead/                Lead schema + deterministic qualification_gate (PROD, Inc0-7)
+    ai_engine.py          wraps CompanyScorer/CompanySummarizer (Phase3)
+    website_engine.py    sync requests+bautifulsoup website fetch/parse (demo --enrich)
+    phone_engine.py, social_engine.py  (engines)
+    source_connectors/   DEPRECATED parallel connector stack (see §5.4)
+  connectors/            CURRENT connector stack: BaseConnector, ConnectorManager,
+                         ConnectorRegistry, ConnectorResult, adapters (DEAD),
+                         industry_expansion, company_normalizer, texas_procurement
+  engines/source_connectors/   (LEGACY stack, still referenced by tests + dead adapters)
+  crawlers/            HTTPCrawler, SessionManager (aiohttp), RateLimiter, RetryEngine,
+                       RobotsManager, HTMLParser, ResponseCache, config, response,
+                       exceptions
+  discovery/
+    source_orchestrator.py  multi-source orchestration w/ honest data_source label
+    sources/  base_source, status, directory_crawl_source, search_provider_source,
+              plugin_source, fixture_source, _http.py (DEAD — not imported anywhere)
+    plugins/   BaseDiscoveryPlugin, PluginCapability, PluginManager/Registry,
+               config, health, metrics, plugin_source, attach_plugin_source
+    website/   PageFetcher (sync asyncio.run bridge), HTMLParser wrapper,
+               URLNormalizer, URLFilter, Confidence, Evidence, Candidates,
+               ExtractorManager, extractors (interfaces) + 7 extractors_impl,
+               generators (brave/searx/fixture), enricher, registration, plugin,
+               plugin_config_view
+    intent/    CompanySiteIntentPlugin, GoogleNewsPlugin, USAspendingPlugin, base
+  search_providers/   Brave, SearXNG, Tavily, manager, registry, models,
+                      CompanyExtractor, ContractorClassifier
+  ai/                AIGateway -> AIManager -> providers (local/openai/gemini/
+                      anthropic); scorer (CompanyScorer), summarizer, prompts
+  email/             email_discovery, email_validator, email_cleaner,
+                      domain_verifier (DNS-over-HTTPS MX check)
+  scoring/           company_score.CompanyScorer (heuristic scorer)
+  reports/           builder
+
+backend/ (root-level, NOT under app/)
+  demo.py            thin V1 runner over existing pipeline (plan -> discover ->
+                     enrich --enrich -> score -> export json/xlsx). Honest bridge
+                     reporting. Uses QUALIFIED_THRESHOLD=30 (NOT the 90 from the
+                      lead gate — see §8 Risks).
+  3 scratch scripts named test_*.py: test_ai.py (live Anthropic call AT IMPORT),
+     test_score.py (live heuristic script), test_summary.py (1 @pytest.mark.network
+     test + guarded). These are collected by pytest and break offline runs.
+  pytest.ini         only registers the `network` marker; NO addopts, so network
+                      tests are NOT auto-deselected and tests/ai root files run live.
+  requirements/requirements.txt   (see §9 deps)
+  migrations/        alembic (companies/contacts/research/tasks tables)
+  output/            generated companies.json/xlsx + leads/  (gitignored via *.json?
+                      no — output/ is NOT gitignored; it is untracked and should be)
+  leadhunter.db       sqlite DB (gitignored via *.db)
+
+backend/tests/  88 test files; backend/ also has 3 root test_*.py scratch scripts.
+backend/.env      local config (gitignored, untracked — see §10).
+
+--------------------------------------------------------------------------------
+3. EXECUTION FLOW
+--------------------------------------------------------------------------------
+User query:  GET /api/v1/discovery/companies?industry=Roofing&location=Dallas Texas
+  -> discovery.py:discover_companies()  [sync def, module-level `engine =
+     CompanyDiscoveryEngine()`]
+  -> CompanyDiscoveryEngine.discover()
+       step1 ConnectorManager.discover() -> list[ConnectorResult]
+       step2 clean_companies()  (deduplicate by domain+name, fuzzy)
+       step3 validate_companies()  (name validity + live HTTP HEAD)
+  -> ConnectorManager.discover()
+       -> ConnectorRegistry.get_enabled() -> [TexasProcurementConnector]
+       -> TexasProcurementConnector.search()
+            -> register_website_discovery()  (config-gated; no-op w/o BRAVE/SEARXNG)
+            -> SourceOrchestrator.discover()
+                 1) DirectoryCrawlSource   (priority 20)  REAL live crawl path
+                 2) SearchProviderSource   (priority 50) empty here (no keys)
+                 3) FixtureSource          (priority 999) emergency bridge
+            -> WebsiteEnricher.enrich(...)  (fills city/state from company sites)
+            -> Step-3 filter (state/city/keyword)
+            -> AcceptanceGate (deterministic verification stack)
+            -> _build_result + _attach_ai_intelligence (additive, gate-accepted only)
+  -> validate_companies() runs a blocking requests.head() per result (see §8).
+
+The "Execute" button (demo.py / the discovery API) therefore runs the REAL
+pipeline: it always tries the API-free DirectoryCrawlSource first; only when
+every live source is UNAVAILABLE/EMPTY does the FixtureSource bridge activate,
+and the response is honestly tagged data_source="fixture", bridge_mode=true with a
+fallback_reason. This matches CLAUDE.md §1/§5/§10.
+
+--------------------------------------------------------------------------------
+4. ARCHITECTURE ASSESSMENT
+--------------------------------------------------------------------------------
+4.1 Stated rule (CLAUDE.md §4): api -> services -> engines -> connectors ->
+     crawlers; dependencies flow DOWN only; AI is a leaf.
+4.2 Reality / violations:
+     - AI leaf-node rule: HONOURED at the package level. grep of app/ai/ shows it
+       imports only app.ai.* and app.core.config (+ provider SDKs). It never
+       imports engines/connectors/crawlers/services. Good. (engines/ai_engine.py
+       imports app.ai.scorer/summarizer — correct direction: engines -> ai.)
+     - Connector -> Engine inversion (MEDIUM/RISK): texas_procurement.py
+       (backend/app/connectors/texas_procurement.py:583-647) imports INSIDE methods:
+         from app.engines.verification.acceptance_gate import AcceptanceGate
+         from app.engines.verification.identity_verifier import ...
+         from app.engines.verification.industry_verifier import IndustryVerifier
+         from app.engines.verification.location_verifier import LocationVerifier
+         from app.engines.ai_engine import AIEngine            (line 647)
+       A connector (lower layer) depends on engines/verification (higher layer),
+       violating the "dependencies flow down only" rule. It is function-local and
+       wrapped in try/except (so it doesn't crash discovery), but it IS a real
+       architectural inversion and a circular-import risk that the function-local
+       import masks. Flag for founder decision (§12).
+     - Discovery package coupling: app/discovery/ imports engines, connectors
+       (texas_procurement._parse_location), crawlers, search_providers — i.e. the
+       "discovery" layer straddles multiple layers. Acceptable in practice (it is
+       the composition/orchestration layer), but it is not a clean single layer.
+     - No circular imports observed at import time in the offline test run.
+4.3 Frozen units / public API: the project keeps completed units stable and uses
+     dataclass `replace` to extend immutable ConnectorResult/CompanyDiscoveryResult
+     (additive metadata) rather than mutating — e.g. texas_procurement.py:299
+     `dataclasses.replace(result, metadata={...})`. Good discipline.
+4.4 DI/seams: LeadPipeline (lead_pipeline.py:82-98) injects leadership,
+     intent_plugins, scorer via Protocols — excellent for offline testing. The
+     connector also accepts an injectable ai_engine for tests. Good.
+
+--------------------------------------------------------------------------------
+5. CODE-QUALITY ASSESSMENT BY PACKAGE (strengths / issues)
+--------------------------------------------------------------------------------
+5.1 core/config.py  (backend/app/core/config.py)
+     + Typed settings, env_file pointed at repo-root .env, accuracy-first
+       LEADHUNTER_ENV literal (live/demo/test).
+     - OPENAI_MODEL default "gpt-5.5" is NOT a real OpenAI model (OpenAI has no
+       gpt-5.5). Misleading default. (config.py:44)
+     - ANTHROPIC_API_KEY default "" while .env sets ANTHROPIC_AUTH_TOKEN; two
+       different auth keys for one provider = confusing config surface.
+     - Database URI: README says PostgreSQL but .env uses sqlite:///./leadhunter.db.
+       Not a bug (env-overridable), but a README/expectation mismatch.
+
+5.2 api/v1/
+     + Router aggregates 10 sub-routers; discovery.py returns honest
+       verification_status/gate_accepted/ai/qualification namespaces from
+       result.metadata (never invented).
+     - `engine = CompanyDiscoveryEngine()` is a MODULE-LEVEL singleton (discovery.py:17).
+       FastAPI concurrency: a sync def route so it won't hit a loop today, but a
+       shared mutable ConnectorManager + module singleton is a concurrency smell
+       if the engine ever becomes stateful or async. Document thread-safety stance.
+     - No authentication/authorization anywhere (health/company/contact/etc are
+       all open). For an "AI sales-lead" tool that contacts decision makers this is
+       a SECURITY GAP if exposed. Acceptable only on localhost. Flag in §8/§10.
+
+5.3 engines/discovery/company/  (company_discovery_engine.py, cleaner, validator)
+     + Clean 3-step pipeline (discover -> clean -> validate); metadata flows
+       through verbatim; empty short-circuits are explicit. Good.
+
+5.4 engines/verification/  (acceptance_gate.py, identity/industry/location_verifiers)
+     + STRONG design: deterministic, pure, never AI; hard rejections
+       (manufacturer/supplier/association, invalid/placeholder/aggregator site)
+       cannot be overridden; tier-4 fixtures capped to unknown; location comes
+       ONLY from LocationVerifier evidence, never the query (§2 Step 3/4).
+     + merge_company_records (acceptance_gate.py:398) folds duplicates without
+       losing evidence; conflicting locations are kept as evidence and capped to
+       unknown rather than first-wins. Excellent accuracy-first behaviour.
+     - IdentityVerifier uses an offline no-op fetcher at discovery time
+       (texas_procurement.py:601-603) "by design" — official-site confirmation
+       deferred to deployment. Honest, but means identity is currently unverified
+       by design; callers must know verification_status is not a live proof yet.
+
+5.5 engines/lead/  (lead_models.py, lead_pipeline.py, lead_samples.py)
+     + The V1 qualified-lead gate is the project's best artefact: a
+       deterministic, derived `qualifies` property (`@property` calls
+       qualification_gate() every time so it cannot drift) encoding all 6 founder
+       hard rules, reporting every missing requirement in `blocked_by`. Email tiers
+       (format/domain/person_bound), generic-local-part set, role-relevance with
+       whole-token acronym matching (CEO/CFO/COO/VP/PM/OPS only as whole words).
+       This is textbook "accuracy-first" and is covered by lead/test_lead_models.py.
+     + LeadPipeline (lead_pipeline.py) is implemented (roadmap says "pending" but
+       the code exists and is well-architected with Protocol seams). It reuses the
+       intent plugins + CompanyScorer.qualify + deterministic gate — no second AI
+       system. Good.
+
+5.6 engines/source_connectors/  (DEPRECATED stack)
+     - A FULLY DUPLICATED connector stack lives here (sdk.py, base.py,
+       connector_manager.py, deduplicator.py, normalizer.py, evidence.py,
+       error_handler.py, http_client.py, retry_manager.py, rate_limiter.py,
+       connector_logger.py, mock_connector.py, example_connector.py,
+       texas_procurement.py, agc_texas/*). It is still imported by:
+         * backend/tests/discovery/ (test_connector_manager, test_deduplicator,
+           test_normalizer, test_http_client, test_mock_connector,
+           test_error_handler, test_evidence, test_retry_manager,
+           test_sdk_base, test_source_connectors, test_connector_logger)
+         * string references in discovery/website docstring cross-refs.
+         * app/connectors/adapters.py (which ITSELF is dead — see 5.9).
+       The CURRENT production path is app/connectors/ (texas_procurement.search
+       uses app.connectors.connector_manager + app.connectors.base_connector).
+       So engines/source_connectors/ is a SECOND, partially-dead, duplicated
+       implementation kept alive only by tests. (PROJECT_ANALYSIS_REPORT §6.3
+       flags this as "deprecated".) Strong cleanup candidate (§12).
+
+5.7 connectors/  (current stack)
+     - texas_procurement.py is 996 lines — a God-file mixing: fixture loader,
+       orchestration wiring, URL helpers, location parsing (_parse_location
+       DUPLICATED from connector_manager.py and _http.py), normalization, the
+       AcceptanceGate call site, AI attachment, ranking. It violates PROJECT
+       SRP (Project Rule #2) and the 500 LOC File-Size Guideline (§3.13).
+       Should be split into: fixture_loader, url_utils, location_utils,
+       normalization, verification_stage, ai_stage, connector_core.
+     - _fetch_live() (texas_procurement.py:378) is DEFINED and UNIT-TESTED
+       (tests/connectors/test_live_pipeline.py calls it) but NEVER called by
+       search() — the production path now goes through SearchProviderSource
+       inside the orchestrator. So _fetch_live is effectively dead production
+       code kept alive only by tests that test it directly. Misleading: the
+       docstring still says "1. Attempt live fetch via _fetch_live()". Either
+       wire it in or remove it.
+     - ConnectorResult is a frozen dataclass; the connector extends it with
+       `dataclasses.replace(..., metadata={...})` — additive, good (§4.3).
+     - _parse_location DUPLICATED: connector_manager.py:426,
+       texas_procurement.py:913, and (legacy) _http.py. Same 50-state map copy-
+       pasted. (PROJECT_ANALYSIS_REPORT §4.4.)
+
+5.8 crawlers/
+     + Well-structured: HTTPCrawler, SessionManager, RateLimiter, RetryEngine,
+       RobotsManager, HTMLParser, ResponseCache — all present and individually
+       unit-tested (tests/crawlers/). robots.py already uses `await _check()` —
+       the run_until_complete bug flagged in PROJECT_ANALYSIS_REPORT IS FIXED
+       (grep for run_until_complete/asyncio.run in crawlers/ -> 0 matches).
+     - RobotsManager hardcodes HTTPS for robots.txt (`f"https://{host}/robots.txt"`,
+       robots.py:101-103) and ignores the URL's real scheme; the www branch is
+       a no-op duplicate. Minor correctness issue for http-only hosts.
+     - 2 of the 5 offline test failures here are because aiohttp is not installed
+       in .venv-2 (§9) — ENVIRONMENT, not code.
+
+5.9 discovery/
+     + SourceOrchestrator (source_orchestrator.py) is excellent: honest
+       data_source labeling ("live" vs "fixture" vs "empty"), per-source stats
+       with SUCCESS/EMPTY/UNAVAILABLE/ERROR distinction, non-terminal failures,
+       dedup-with-evidence-merge via AcceptanceGate.merge_company_records.
+       Honors CLAUDE.md §1/§5/§12 (EMPTY != UNAVAILABLE, never silent fixture).
+     + Intent plugins (company_site/google_news/usaspending) are CONCRETE and
+       capability-isolated; USAspending uses the keyless public API, GoogleNews
+       uses RSS, CompanySite crawls the company's own site. Each pins honest
+       EMPTY/UNAVAILABLE. Good evidence-citations (source_url required).
+     + Website extraction framework: Confidence value object, EvidenceSet,
+       FieldEvidence, URLNormalizer/URLFilter (dedup key vs fetchable URL split),
+       7 concrete extractors_impl, generators (brave/searx/fixture). Strong,
+       auditable extraction model.
+     - PageFetcher (page_fetcher.py:125) and several generators use
+       `asyncio.run(self._fetch(...))` to bridge sync->async. This WORKS only
+       because today's call sites are synchronous. If any caller is ever inside
+       a running event loop (e.g. an `async def` FastAPI route, or calling
+       PageFetcher from within an aiohttp session), it raises
+       `RuntimeError: asyncio.run() cannot be called from a running event loop`.
+       7 call sites: page_fetcher.py:125, generators/brave.py:72,
+       generators/searx.py:87, enricher.py:217, connectors/texas_procurement.py:439
+       (_fetch_live, dead — see 5.7), sources/search_provider_source.py:94,
+       sources/directory_crawl_source.py:235. This is the SAME hazard class as
+       the (now-fixed) robots.py bug. Architectural risk; see §8.
+     - discovery/sources/_http.py is DEAD CODE (no module imports it).
+     - discovery/leadership_discovery.py + people_parser.py + result_cleaner.py
+       are legacy files the PROJECT_ANALYSIS_REPORT said should be "migrated/
+       removed"; they appear still used by engines/lead via LeadershipDiscovery.
+       Not clearly dead, but overlap with the new website extractors is unclear.
+
+5.10 search_providers/
+     + Brave/SearXNG/Tavily providers + ContractorClassifier; registry auto-
+       registers only when env keys present (registration.py-style gate in
+       app/search_providers/__init__.py). Good — no key required to run.
+     - Tavily provider reuses the literal request-body shape from its docstring
+       (tavily.py:14) and sends `api_key` in the body to a dev endpoint; fine for
+       dev, but treat as dev-only.
+
+5.11 ai/  (gateway/manager/providers/scorer/summarizer/prompts)
+     + Leaf-node compliance verified (§4.2). AIManager factory by settings.AI_PROVIDER
+       with LocalProvider fallback. scorer._parse_ai_response robustly parses JSON
+       with code-fence + balanced-brace fallback. prompts/lead_score.py enforces
+       "NEVER invent ... facts; confidence must reflect ONLY supplied evidence;
+       with NO traceable buying-intent evidence, confidence stays LOW (<90)". This
+       is a strong anti-hallucination design that directly supports the V1 gate.
+     - LocalProvider exists but Ollama is NOT in requirements.txt despite README.
+       config.py hardcodes OLLAMA_URL but no ollama dep. Minor inconsistency.
+
+5.12 email/
+     + domain_verifier.py uses DNS-over-HTTPS (dns.google/resolve) MX check —
+       zero-key, returns False on any error (honest "unknown"). is_generic_email_local_part
+       + EmailVerificationTier enforce the person_bound hard rule. Good.
+
+5.13 scoring/  (company_score.py)
+     + Heuristic scorer (title/description/linkedin/emails/phones/contact/about).
+       Used by AIEngine.score_company and demo.py.
+     - NOTE: demo.py's QUALIFIED_THRESHOLD=30 vs lead_models.QUALIFIED_THRESHOLD=90.
+       Two different "qualified" definitions (§8). demo.py scores via
+       CompanyScorer.qualify (score 0-100) and compares to 30; the Lead gate uses
+       ai_confidence>=90. These are different stages (demo = company scoring; lead
+       pipeline = lead qualification) but the shared vocabulary ("qualified") with
+       different thresholds is a confusion risk. Document clearly.
+
+5.14 services/  (company/contact/email/leadership/research_service)
+     - Not invoked by the discovery API path (discovery.py calls the engine
+       directly, bypassing services). services/ exists but the hot path does not
+       use it. Either wire it in or it is dead weight for the discovery flow.
+       (PROJECT_ANALYSIS_REPORT §7 lists services as "Production", but the API
+       layer doesn't go through them.)
+
+--------------------------------------------------------------------------------
+6. DOES "REAL DISCOVERY" WORK?  (the core question)
+--------------------------------------------------------------------------------
+VERDICT: YES — the architecture and production code perform REAL, API-free
+discovery; whether live data is returned at a given runtime depends on network
+access to the seed hosts, NOT on the code.
+
+Evidence:
+- backend/app/engines/source_intelligence/source_models.py contains REAL public
+  source URLs (not placeholders): agctexas.org, abctexas.org, thbaonline.com,
+  enr.com/topspecialtycontractors, constructionconnect.com, thomasregister.com,
+  osha.gov/data, sam.gov, cbiadia.org, etc. (Only the chamber entry deliberately
+  has no URL — `texas_procurement._build_chamber_sources` refuses to fabricate
+  one, per CLAUDE.md §12.)
+- The live path is genuinely API-free (Blueprint §6 Phase 3):
+  SourcePlanner -> DirectoryCrawlSource -> HTTPCrawler (robots/rate-limit/retry/
+  cache) -> CompanyExtractor + ContractorClassifier -> SourceOrchestrator ->
+  connector Step-3 filter -> AcceptanceGate -> rank. No Brave/Brave key needed.
+- tests/discovery/test_no_keys_live_crawl.py PROVES the pipeline runs end-to-end
+  with stubbed network and reports `data_source == "live"` (not fixture) and
+  `directory_crawl: SUCCESS`, with the website-discovery plugin NOT registered
+  (no live origin) and FixtureSource disabled in live mode.
+- Honest source semantics: UNAVAILABLE (could not reach) != EMPTY (looked, found
+  none) != SUCCESS. Fixtures only activate as the LAST source (priority 999) and
+  are tagged data_source="fixture", bridge_mode=true, fallback_reason="..."
+  (source_orchestrator.py:181-198; texas_procurement.search re-labels to
+  "fixture" if live survivors drop out at the Step-3 filter — texas_procurement.py:333-350).
+
+Runtime caveat: in THIS sandbox, directory_crawl will likely return UNAVAILABLE
+(DNS to seed hosts blocked) and the run falls back to the fixture bridge — which
+is EXACTLY the honest behaviour the project was redesigned to avoid hiding
+(CLAUDE.md §1/§5). The `data_source`/`bridge_mode`/`fallback_reason` metadata
+tells the operator precisely what happened.
+
+--------------------------------------------------------------------------------
+7. TEST SUITE ASSESSMENT
+--------------------------------------------------------------------------------
+Counts (run: `python -m pytest -m "not network" --ignore=test_ai.py
+--ignore=test_score.py --ignore=test_summary.py -q` from backend/, .venv-2):
+   1659 passed, 5 failed, 28 deselected (network), 1 collection error.
+Full collection (no ignores): 1693 collected, 1 error (test_ai.py live call).
+pytest cache nodeids: 1788. 88 test files under tests/ + 3 root scratch files.
+
+7.1 Strengths
+     - Strong offline-first posture: every real test is hermetic. Network tests
+       are explicitly marked @pytest.mark.network (test_texas_procurement.py,
+       test_live_pipeline.py, test_comparison.py, test_source_connectors.py).
+     - Tests pin BEHAVIOUR, not implementation (e.g. test_lead_models pins the 6
+       hard rules; test_acceptance_gate pins rejection/upgrade rules;
+       test_source_orchestrator pins EMPTY/UNAVAILABLE/SUCCESS semantics).
+     - Rich real-HTML fixtures (tests/fixtures/people_pages.py, intent_pages.py,
+       crawler_samples.py) — no fabricated data.
+     - Excellent seam design: LeadPipeline injects leadership/intent/scorer via
+       Protocols; crawlers/tests stub the network at the HTTPCrawler origin.
+     - lead/test_lead_models.py has 402 lines pinning the V1 gate — the project's
+       best specification-anchored test.
+
+7.2 Problems
+     - ROOT-LEVEL test_*.py files are SCRATCH SCRIPTS, not tests, but pytest
+       collects them:
+         * backend/test_ai.py (9 lines) calls AIGateway().ask("Summarize
+           Microsoft") at MODULE IMPORT -> hits the live Anthropic/OmniRoute
+           endpoint -> 429 RateLimitError -> collection ABORTS the whole run
+           ("Interrupted: 1 error during collection"). This is why a plain
+           `python -m pytest` from backend/ cannot complete offline.
+         * backend/test_score.py (17 lines) is a script printing a score.
+         * backend/test_summary.py is a guarded network smoke test + script.
+       FIX: rename them out of test_*.py (e.g. smoke_*.py / scripts/) or move to
+       a scripts/ dir, and add `addopts = --ignore=...` / `-m "not network"` to
+       pytest.ini so the default `pytest` invocation is offline-safe.
+     - The @pytest.mark.network marker is registered but pytest.ini has NO
+       addopts to deselect it — `pytest` runs live tests by default and hits
+       rate limits / hangs in CI or sandboxed shells (CLAUDE.md §7 rule 3 says
+       run `python -m pytest` from backend/, which currently fails collection).
+     - 5 REAL failures, all ENVIRONMENT (not code): ModuleNotFoundError: No
+       module named 'aiohttp' in tests/crawlers/test_html_parser.py
+       (lxml engine path) and 4x in tests/crawlers/test_session_manager.py.
+       aiohttp is used everywhere in crawlers/ but is NOT in requirements.txt
+       (§9). Install aiohttp (and lxml) to turn 5 -> 0.
+     - Test discovery is 68s+ for collection alone (1693 items) — slow start
+       because importing modules triggers provider/config wiring. Acceptable
+       but worth noting for CI.
+
+--------------------------------------------------------------------------------
+8. RISKS (PRIORITIZED)
+--------------------------------------------------------------------------------
+R1 (BLOCKER-test)  backend/test_ai.py makes a live API call at import time and
+                  ABORTS `python -m pytest` collection (429). Must be moved/
+                  guarded before any automated regression can run offline.
+R2 (ENVIRONMENT)   aiohttp (and the lxml engine) not installed + not in
+                  requirements.txt -> 5 crawler tests fail and the real
+                  DirectoryCrawlSource live crawl path cannot run without it.
+R3 (ARCHITECTURE)  Sync->async bridging via asyncio.run() in 7 call sites
+                  (page_fetcher.py:125, directory_crawl_source.py:235,
+                  search_provider_source.py:94, enricher.py:217,
+                  generators/brave.py:72, generators/searx.py:87, and dead
+                  _fetch_live in texas_procurement.py:439). Works TODAY only
+                  because discovery.py is a sync route. If the API is ever made
+                  `async def`, EVERY one of these raises
+                  "asyncio.run() cannot be called from a running event loop".
+                  This is the latent form of the original robots.py blocker.
+R4 (ARCHITECTURE)  Connector -> Engine layering inversion: texas_procurement.py
+                  imports app.engines.verification.* and app.engines.ai_engine
+                  from inside the connector, violating the
+                  api->services->engines->connectors->crawlers rule. Function-
+                  local imports mask a circular-import hazard and a real
+                  dependency-direction violation.
+R5 (DUPLICATION)   Two parallel connector stacks: app/connectors/ (current) and
+                  app/engines/source_connectors/ (legacy, kept alive only by
+                  tests). Triple dedup (_deduplicate in ConnectorManager,
+                  SourceOrchestrator, and clean_companies) and triple
+                  _parse_location (connector_manager.py:426,
+                  texas_procurement.py:913, legacy _http.py) with copied 50-
+                  state maps. High regression/maintenance surface.
+R6 (SECURITY)    No authentication/authorization on ANY api/v1 route. The
+                  /discovery, /company, /contact, /leadership, /email, /research
+                  endpoints are all open. Fine on localhost; dangerous if the
+                  service is network-bound. Decision-makers' sites would be
+                  crawled/extracted on demand by any caller.
+R7 (HONESTY)     demo.py uses QUALIFIED_THRESHOLD=30 while the V1 lead gate uses
+                  90. The CLI "qualified" verdict therefore disagrees with the
+                  programmatic Lead.qualifies verdict — operator confusion.
+R8 (CONFIG)      No pyproject.toml / ruff.toml / setup.py / tox.ini. Ruff runs on
+                  defaults (the README/project rules reference a ruff gate but
+                  no config is checked in). No pinned dependency versions;
+                  requirements.txt has no aiohttp/lxml/openpyxl/faiss.
+R9 (ENV/KEYS)    .env holds live credential-looking values (ANTHROPIC_AUTH_TOKEN
+                  = sk-c5667af9..., TAVILY_SEARCH_API_KEY = tvly-dev-...), and
+                  points ANTHROPIC_BASE_URL at http://localhost:20128 (an
+                  OmniRoute local proxy). These are gitignored (good) but the
+                  repo ships NO .env.example, so a new checkout cannot run
+                  configured. Also config.py hardcodes OPENAI_MODEL="gpt-5.5"
+                  (not a real model).
+R10 (DOCS/REALITY) README lists React/Electron/PostgreSQL/Ollama/FAISS stack and
+                  "Sprint 0 – Project Initialization" / "Development Started", but
+                  frontend/, desktop/, docker/, tools/, assets/, exports/,
+                  storage/ are ALL EMPTY directories and only the Python backend
+                  exists; default DB is SQLite, not PostgreSQL; FAISS is not a
+                  dependency. README is aspirational, not reflective of the tree.
+
+--------------------------------------------------------------------------------
+9. DEPENDENCIES, ENVIRONMENT & TOOLING
+--------------------------------------------------------------------------------
+- requirements.txt (backend/requirements/requirements.txt) declares:
+  fastapi, uvicorn[standard], python-multipart, sqlalchemy, alembic,
+  psycopg2-binary, pydantic, pydantic-settings, email-validator, requests, httpx,
+  beautifulsoup4, openai, anthropic, google-generativeai, black, ruff, pytest,
+  pytest-asyncio, pytest-cov.
+- MISSING vs usage: `aiohttp` (crawlers/session_manager/http paths use it
+  heavily; causes the 5 failures), `lxml` (html parser "lxml engine" tested),
+  `openpyxl` (demo exports via stdlib zip fallback when absent — OK),
+  `faiss-cpu` (README mentions FAISS but it is not a dependency and not imported
+  anywhere in app/), `ollama` (config has OLLAMA_URL but no client dep).
+- `requests` is used for live HTTP in WebsiteEngine, AGC legacy connector, and
+  validate_companies (HEAD) — all blocking; the crawler layer itself uses
+  aiohttp async. Two HTTP stacks in one repo.
+- THREE virtualenvs exist (.venv, .venv-1, .venv-2) and ALL are gitignored.
+  .venv-2 was the one with deps. Having 3 is confusing; pick one (e.g. .venv)
+  and document the bootstrap (`python -m venv .venv && pip install -r
+  backend/requirements/requirements.txt`).
+- No pyproject.toml -> no [tool.pytest], no [tool.ruff], no [project]. ruff/pytest
+  rely on pytest.ini (which only registers the network marker) and ruff defaults.
+
+--------------------------------------------------------------------------------
+10. SECURITY REVIEW
+--------------------------------------------------------------------------------
+- Secrets: NONE committed to git (`git grep` for sk-/tvly-/ANTHROPIC_TOKEN found
+  nothing; backend/.env and backend/leadhunter.db are gitignored and untracked).
+- Local .env holds real-looking credentials (ANTHROPIC_AUTH_TOKEN, TAVILY key).
+  Treat the repo root and backend/ as a secret boundary; do NOT share .env.
+- API keys are read from settings (app.core.config) and passed into providers —
+  never logged verbatim (scanners log provider names / counts only). Good.
+- No authn/authz on API (§8 R6). No CORS config (main.py creates FastAPI() with
+  no middleware). If exposed, open.
+- validate_companies uses requests.head without a per-request timeout on the
+  ConnectorResult path? (texas_procurement builds results but the actual HEAD
+  check lives in engines/discovery/company/company_validator.py — not read
+  directly; verify it has timeouts.) Crawl uses aiohttp ClientTimeout.
+- robots.py allows by default when aiohttp is missing / robots.txt unreachable —
+  lenient, acceptable for a crawler but should be explicit in prod.
+- No input-validation beyond FastAPI Query min/max length (industry/location).
+  No SSRF protection on the enrichment crawl (website_engine fetches any URL a
+  connector returns; DirectoryCrawlSource crawls planned public URLs — these are
+  curated, but a malicious company record could push internal URLs). Consider an
+  allowlist / private-IP block in the crawler for prod.
+
+--------------------------------------------------------------------------------
+11. DUPLICATED LOGIC & DEAD CODE INVENTORY
+--------------------------------------------------------------------------------
+Duplicates:
+  D1 _parse_location: connector_manager.py:426, texas_procurement.py:913,
+      (legacy) discovery/sources/_http.py — copied 50-state map each.
+  D2 _extract_domain: connector_manager._extract_domain + clean_companies domain
+      extraction + SourceOrchestrator._deduplicate URL parse.
+  D3 dedup: ConnectorManager._deduplicate (domain+name+fuzzy), SourceOrchestrator._deduplicate
+      (domain+name, merge), clean_companies (domain+name).
+  D4 industry keyword extraction: ConnectorManager._extract_industry_keywords vs
+      company_cleaner vs expand_industry vs _matches_industry.
+Dead code (no importer):
+  X1 app/connectors/adapters.py — imports the LEGACY stack; imported by nobody.
+  X2 app/discovery/sources/_http.py — imported by nobody.
+  X3 TexasProcurementConnector._fetch_live (texas_procurement.py:378) — defined
+      + unit-tested directly but never called by search() (live path is now
+      SearchProviderSource in the orchestrator).
+  X4 app/integrations/ (6 empty dirs) + frontend,/desktop,/docker,/tools,
+      /assets,/exports,/storage (empty).
+  X5 backend/output/ is produced artifacts but not in .gitignore (it IS untracked
+      because *.json isn't ignored — actually output/*.json would be tracked;
+      verify). leadhunter.db already ignored via *.db.
+Stale/legacy modules still referenced only by tests:
+  X6 engines/source_connectors/ (full duplicate stack) — keep or delete.
+
+--------------------------------------------------------------------------------
+12. CONCRETE SUGGESTIONS (NO IMPLEMENTATION)
+--------------------------------------------------------------------------------
+Priority 1 (fix the test gate — required to run CI):
+  S1.1 Move/rename backend/test_ai.py, test_score.py, test_summary.py out of the
+       test_*.py namespace (e.g. backend/scripts/smoke_test_ai.py) OR, if they
+       must stay, put the live call inside a @pytest.mark.network function and do
+       NOT call AIGateway() at import. This single change unblocks
+       `python -m pytest`.
+  S1.2 Make pytest.ini offline-safe by default:
+       addopts = -m "not network"
+       Consider also `--ignore=backend/test_ai.py` etc. until S1.1 is done.
+
+Priority 2 (fix the environment):
+  S2.1 Add aiohttp (and optionally lxml) to requirements.txt; reinstall. Removes
+       the 5 failures and lets DirectoryCrawlSource actually run live.
+  S2.2 Add a backend/.env.example (no secrets, documented keys) so a fresh
+       checkout can be configured. Note OmniRoute/local-proxy setup.
+  S2.3 Pick ONE virtualenv name (.venv), delete .venv-1/.venv-2 (or document
+       which is canonical), and add bootstrap instructions.
+
+Priority 3 (architecture preservation — needs founder approval per CLAUDE §11):
+  S3.1 Decide on the sync->async bridge (R3): either (a) make
+       discovery.py + the whole connector/source path `async def` and replace
+       asyncio.run() with native awaits, or (b) keep it sync but add an
+       assertion/test that no caller invokes these from a running loop.
+       Recommended: (a) migrate the hot path to async; the crawler already is.
+  S3.2 Resolve the connector->engine inversion (R4): move the deterministic
+       AcceptanceGate + verification into a stage the ENGINE calls on
+       ConnectorResult, OR extract a `verification` leaf package that connectors
+       may depend on (engines/verification should be a leaf below connectors, not
+       above). Requires restructuring the layer graph.
+  S3.3 Consolidate the THREE deduplication implementations and the THREE
+       _parse_location copies into single shared utilities.
+  S3.4 Split texas_procurement.py (996 LOC) into SRP modules
+       (fixture_loader / url_utils / location_utils / verification_stage /
+       ai_stage / connector_core).
+  S3.5 Decide the fate of engines/source_connectors/ (legacy duplicate) and
+       app/connectors/adapters.py (dead). Recommend deleting adapters.py and
+       deprecating the legacy stack once its tests migrate to app/connectors/.
+
+Priority 4 (hardening/honesty):
+  S4.1 Align "qualified" semantics: document that demo.py's score>=30 is the
+       CompanyScorer information-richness threshold while Lead.qualifies
+       (ai_confidence>=90) is the V1 sales-ready gate; rename one label to
+       avoid operator confusion (e.g. demo "lead_score>=30" vs "qualified_lead").
+  S4.2 Add SSRF/private-IP guarding to the crawler for production.
+  S4.3 Add authn/authz (at minimum, loopback-only binding) if the service is
+       ever network-exposed.
+  S4.4 Give config.py a correct OPENAI_MODEL default (e.g. gpt-4o), and unify
+       the anthropic key field (API_KEY vs AUTH_TOKEN).
+  S4.5 Add timeouts to any blocking requests.head in company_validator.py.
+
+Priority 5 (housekeeping):
+  S5.1 Remove the 8 empty top-level dirs that README/docs reference as if real
+       (frontend, desktop, docker, tools, assets, exports, storage) OR implement
+       them; they currently mislead contributors.
+  S5.2 Update README/roadmap to reflect reality (Python/FastAPI backend only;
+       SQLite default; no React/Electron). Keep the aspirational stack in a
+       "Future" section, clearly marked.
+  S5.3 Add pyproject.toml with [tool.ruff] and [tool.pytest.ini_options] so lint
+       and test config is versioned (not just pytest.ini / ruff defaults).
+  S5.4 Add the stray root __pycache__/nulcpython-312.pyc to the review (artifact
+       of a bad `python nul` invocation) and ensure __pycache__ is gitignored
+       (it is).
+
+--------------------------------------------------------------------------------
+13. ACCEPTANCE / VERIFICATION SNAPSHOT
+--------------------------------------------------------------------------------
+- Offline tests: 1659 passed. (Re-run after S2.1 to confirm 1664.)
+- Test gate: `cd backend && python -m pytest -m "not network"
+  --ignore=test_ai.py --ignore=test_score.py --ignore=test_summary.py -q`
+  -> 1659 passed, 5 failed (aiohttp), 28 deselected.
+- After S1.1/S1.2: `cd backend && python -m pytest -q` should collect 1692 items
+  and run the non-network subset green (modulo the aiohttp env fix).
+- Lint: no ruff config checked in; run `.venv-2\Scripts\ruff check backend/app
+  backend/tests` from repo root and compare to "0 new on authored files".
+- Live discovery smoke (manual, needs network): `cd backend && python demo.py
+  "Roofing" "Dallas Texas" 20` — confirm Data Source is reported honestly
+  (live vs fixture/bridge_mode) with a non-empty fallback_reason when offline.
+
+--------------------------------------------------------------------------------
+14. FILES OF NOTE (quick refs for the reviewer)
+--------------------------------------------------------------------------------
+Core gate (V1 qualified lead) : backend/app/engines/lead/lead_models.py (qualifies @ 455-461)
+AcceptanceGate (deterministic): backend/app/engines/verification/acceptance_gate.py
+Discovery orchestration        : backend/app/connectors/texas_procurement.py (search, 130-376)
+Source orchestration           : backend/app/discovery/source_orchestrator.py
+API-free live crawl source     : backend/app/discovery/sources/directory_crawl_source.py
+Source seed list (real URLs)   : backend/app/engines/source_intelligence/source_models.py
+AI leaf package                : backend/app/ai/  (gateway/manager/providers/scorer/summarizer)
+AI prompt (anti-hallucination) : backend/app/ai/prompts/lead_score.py
+Email domain/MX verification   : backend/app/email/domain_verifier.py
+Demo runner (Execute)          : backend/demo.py
+Intent plugins (concrete)      : backend/app/discovery/intent/{company_site,google_news,usaspending}.py
+Config / secrets               : backend/app/core/config.py ; backend/.env (gitignored)
+Test suite                     : backend/tests/  (88 files) + 3 scratch scripts in backend/
+Test config                    : backend/pytest.ini  (registers `network` marker)
+
+--- END OF REPORT ---

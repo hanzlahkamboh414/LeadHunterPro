@@ -125,6 +125,50 @@ class TestRun:
             "company not verified"
         )
 
+    def test_unverified_plan_holder_flows_through_pipeline(self, tmp_path):
+        """Inc 3: an unverified plan-holder record still reaches the pipeline
+        so its pre-bound person/email bridge is populated on the Lead."""
+        plan_holder = _connector_result(
+            name="Pirc-Tobin", website="https://pirctobin.com", gate_accepted=False
+        )
+        plan_holder = ConnectorResult(
+            company_name=plan_holder.company_name,
+            website=plan_holder.website,
+            city=plan_holder.city,
+            state=plan_holder.state,
+            source=plan_holder.source,
+            source_url=plan_holder.source_url,
+            confidence=plan_holder.confidence,
+            metadata={
+                **plan_holder.metadata,
+                "plan_holder": {
+                    "person": {"name": "Charlie Arnold", "role": "", "role_relevance": False},
+                    "emails": [
+                        {"email": "cjarnold@pirctobin.com", "tier": "person_bound"}
+                    ],
+                },
+            },
+        )
+        discover_fn = _discover(
+            [
+                _connector_result(
+                    name="Plain Unverified", website="https://u.example", gate_accepted=False
+                ),
+                plan_holder,
+            ]
+        )
+        pipeline = _StubPipeline(lambda company: sample_qualified_lead())
+
+        coverage = _run(discover_fn, pipeline, tmp_path)
+
+        # The plan-holder record is scored through the pipeline; the plain
+        # unverified one is not (no pre-bound person to bridge). Coverage math
+        # reads the returned Lead's gate verdict (the stub qualifies), so the
+        # routing proof is `pipeline.called`, not the unverified count.
+        assert len(pipeline.called) == 1
+        called_company = pipeline.called[0][0]
+        assert called_company.company_name == "Pirc-Tobin"
+
     def test_fixture_bridge_reported_honestly(self, tmp_path):
         discover_fn = _discover([], data_source="fixture")
         pipeline = _StubPipeline(lambda company: sample_qualified_lead())

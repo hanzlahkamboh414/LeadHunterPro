@@ -143,6 +143,38 @@ def test_deterministic_exception_falls_back_to_ai():
     assert result.name == "Jane Doe"
 
 
+def test_company_facts_passed_into_prompt():
+    """Verified Stage 1 company facts are fed to the AI prompt for binding."""
+    from app.lead_research.models import AIEvidence
+
+    captured = {}
+
+    def capturing_ai(prompt: str) -> str:
+        captured["prompt"] = prompt
+        return '{"person_name": "Mike Dretzka", "person_role": "Vice President", "role_relevance": true, "bound": true, "evidence": [{"claim": "Mike Dretzka is VP (verified fact)", "source_url": "https://upiunderground.com", "source_type": "website", "confidence": "verified"}]}'
+
+    researcher = PersonResearcherAI(
+        deterministic=lambda e, d, **kw: _make_det_result(AttributionVerdict.unattributed),
+        ai_ask=capturing_ai,
+        search=make_fake_search(),
+        fetch_page=make_fake_fetch(),
+    )
+    facts = [
+        AIEvidence(claim="Mike Dretzka is the Vice President", source_url="https://upiunderground.com", source_type="website", confidence="verified"),
+        AIEvidence(claim="Unverified guess", source_url="", source_type="inferred", confidence="unverified"),
+    ]
+    result = researcher.research(
+        "jdretzka@upi.com", "upi.com", company_name="UPI", company_facts=facts,
+    )
+    # Verified fact with source_url is surfaced in the prompt
+    assert "Mike Dretzka is the Vice President" in captured["prompt"]
+    assert "https://upiunderground.com" in captured["prompt"]
+    # Unverified fact with no source_url is NOT fed to the AI
+    assert "Unverified guess" not in captured["prompt"]
+    assert result.name == "Mike Dretzka"
+    assert result.bound is True
+
+
 # ---------------------------------------------------------------------------
 # AI safety rules
 # ---------------------------------------------------------------------------

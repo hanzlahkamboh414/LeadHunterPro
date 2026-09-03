@@ -85,6 +85,28 @@ def _format_search_results(results: list[dict[str, str]], max_results: int = 8) 
     return "\n".join(lines)
 
 
+def _format_company_facts(facts: list[Any], max_facts: int = 15) -> str:
+    """Format verified company facts for prompt injection.
+
+    Only facts that carry a source_url are included, so the AI can cite them
+    when binding a person (never hand it unverified claims to bind against).
+    """
+    lines = []
+    for f in facts:
+        if isinstance(f, dict):
+            claim, url = f.get("claim", ""), f.get("source_url", "")
+        else:
+            claim, url = getattr(f, "claim", ""), getattr(f, "source_url", "")
+        if not claim or not url:
+            continue
+        lines.append(f"- {claim} (source: {url})")
+        if len(lines) >= max_facts:
+            break
+    if not lines:
+        return "(none provided)"
+    return "\n".join(lines)
+
+
 def _truncate_html(html: str, max_chars: int = 8000) -> str:
     """Rough truncation of HTML content — strip tags for prompt."""
     import re
@@ -165,10 +187,13 @@ class PersonResearcherAI:
         refined_domain: str,
         company_name: str = "",
         company_industry: str = "",
+        company_facts: list[Any] | None = None,
     ) -> PersonFindings:
         """Research person attribution for this email.
 
         Tries deterministic first; falls back to AI if not attributed.
+        ``company_facts`` are the verified Stage 1 facts, passed to the AI so it
+        can bind an email to a person named in those facts.
         """
         # Step 1: try deterministic
         det_fn = self._get_deterministic()
@@ -207,7 +232,10 @@ class PersonResearcherAI:
                 logger.warning("Deterministic research failed for %s: %s", email, exc)
 
         # Step 2: AI augmentation
-        return self._ai_research(email, refined_domain, company_name, company_industry)
+        return self._ai_research(
+            email, refined_domain, company_name, company_industry,
+            company_facts=company_facts,
+        )
 
     def _ai_research(
         self,
@@ -215,6 +243,7 @@ class PersonResearcherAI:
         refined_domain: str,
         company_name: str,
         company_industry: str,
+        company_facts: list[Any] | None = None,
     ) -> PersonFindings:
         """AI-based person attribution when deterministic fails."""
         search_fn = self._get_search()
@@ -229,6 +258,7 @@ class PersonResearcherAI:
             company_name=company_name,
             search_results=_format_search_results(search_results),
             site_content=site_content,
+            company_facts=_format_company_facts(company_facts or []),
         )
 
         ai_fn = self._get_ai_ask()

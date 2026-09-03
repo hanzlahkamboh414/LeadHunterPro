@@ -109,8 +109,16 @@ def person_research_prompt(
     company_name: str,
     search_results: str,
     site_content: str,
+    company_facts: str = "",
 ) -> str:
-    """Stage 2 — person attribution via AI. Every binding MUST cite source_url."""
+    """Stage 2 — person attribution via AI. Every binding MUST cite source_url.
+
+    ``company_facts`` is a pre-formatted list of already-verified company facts
+    (from Stage 1), e.g. "Mike Dretzka is the Vice President (source: ...)".
+    Giving these to the person researcher lets it bind an email to a person who
+    appears in verified company facts, instead of rediscovering the team page.
+    """
+    facts_block = company_facts if company_facts else "(none provided)"
     return f"""\
 You are a person-attribution researcher for a construction industry company.
 
@@ -124,12 +132,19 @@ INPUT:
 {search_results}
 - Website content (truncated):
 {site_content}
+- ALREADY-VERIFIED COMPANY FACTS (from company research):
+{facts_block}
 
 RULES:
 1. Every person name you state MUST have a source_url proving the association.
-2. Do NOT derive names from email local-parts (e.g. "jsmith@acme.com" does NOT prove "John Smith").
-3. Do NOT invent or guess names. If you cannot verify, say so.
-4. Return ONLY valid JSON matching this exact schema — no markdown, no commentary:
+2. Use the ALREADY-VERIFIED COMPANY FACTS: if a fact names a person + role at this
+   company (with its source_url), you may bind to that person when the email
+   plausibly belongs to them AND the facts support it. Cite the fact's source_url.
+3. Do NOT derive names from email local-parts alone (e.g. "jsmith@acme.com" does
+   NOT prove "John Smith"). But a verified company fact naming that family/person
+   MAY combine with a matching local-part as supporting evidence.
+4. Do NOT invent or guess names. If you cannot verify, say so.
+5. Return ONLY valid JSON matching this exact schema — no markdown, no commentary:
 
 {{
   "person_name": "string — full name if verified, else empty",

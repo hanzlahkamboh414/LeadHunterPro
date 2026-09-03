@@ -133,6 +133,7 @@ class AILeadResearchAgent:
                 refined_domain=dossier.refined_domain or domain,
                 company_name=dossier.company.name,
                 company_industry=dossier.company.industry,
+                company_facts=dossier.company.facts,
             )
             dossier.person = person_result
             sources_checked.append("person_research")

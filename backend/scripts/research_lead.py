@@ -30,11 +30,11 @@ def cmd_research(args: argparse.Namespace) -> int:
     # Summary
     print("\n--- Summary ---")
     print(f"Email:        {dossier.email}")
-    print(f"Domain:       {dossier.domain} → {dossier.refined_domain}")
+    print(f"Domain:       {dossier.domain} -> {dossier.refined_domain}")
     print(f"Company:      {dossier.company.name or '(unknown)'}")
     print(f"Person:       {dossier.person.name or '(unknown)'} (bound={dossier.person.bound})")
-    print(f"Intent:       {dossier.intent.needs_estimation} — {dossier.intent.signal}")
-    print(f"Timing:       {dossier.timing.window} — {dossier.timing.reason}")
+    print(f"Intent:       {dossier.intent.needs_estimation} -- {dossier.intent.signal}")
+    print(f"Timing:       {dossier.timing.window} -- {dossier.timing.reason}")
     print(f"Score:        {dossier.potential_score}")
     print(f"Recommendation: {dossier.recommendation}")
     print(f"Sources:      {', '.join(dossier.sources_checked)}")
@@ -67,15 +67,15 @@ def cmd_batch(args: argparse.Namespace) -> int:
 
     print(f"\nContact Now: {len(contact_now)}")
     for r in contact_now:
-        print(f"  ✓ {r.email} — {r.company.name} — {r.person.name} — score={r.potential_score}")
+        print(f"  [+] {r.email} -- {r.company.name} -- {r.person.name} -- score={r.potential_score}")
 
     print(f"\nNurture: {len(nurture)}")
     for r in nurture:
-        print(f"  ~ {r.email} — {r.company.name} — score={r.potential_score}")
+        print(f"  [~] {r.email} -- {r.company.name} -- score={r.potential_score}")
 
     print(f"\nSkip: {len(skip)}")
     for r in skip:
-        print(f"  ✗ {r.email} — {r.fit}")
+        print(f"  [-] {r.email} -- {r.fit}")
 
     # Save full results
     output_path = args.file.rsplit(".", 1)[0] + "_results.json"
@@ -99,8 +99,8 @@ def cmd_list(args: argparse.Namespace) -> int:
 
     print(f"\n--- Stored Leads ({len(leads)}) ---")
     for lead in leads:
-        rec_icon = {"contact_now": "✓", "nurture": "~", "skip": "✗"}.get(lead.recommendation, "?")
-        print(f"  {rec_icon} {lead.email} — {lead.company.name or '(unknown)'} — score={lead.potential_score} — {lead.recommendation}")
+        rec_icon = {"contact_now": "[+]", "nurture": "[~]", "skip": "[-]"}.get(lead.recommendation, "?")
+        print(f"  {rec_icon} {lead.email} -- {lead.company.name or '(unknown)'} -- score={lead.potential_score} -- {lead.recommendation}")
 
     return 0
 

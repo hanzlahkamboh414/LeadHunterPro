@@ -315,7 +315,7 @@ class CompanyResearcher:
     def _gather_search(self, search_fn: SearchFn, email: str, domain: str) -> list[dict[str, str]]:
         """Run multiple search queries and merge unique results.
 
-        Search breadth (Medium scope):
+        Search breadth (Medium+ scope):
         1. Email lookup
         2. Domain/company homepage
         3. LinkedIn company profile
@@ -323,6 +323,9 @@ class CompanyResearcher:
         5. BBB (Better Business Bureau)
         6. Texas contractor license
         7. News / recent activity
+        8. Hiring signals (growth -> estimation load)
+        9. New office / expansion
+        10. Recent bid win (authentication + timing)
         """
         queries = [
             f'"{email}"',
@@ -333,6 +336,9 @@ class CompanyResearcher:
             f'"{domain}" site:bbb.org',
             f'"{domain}" Texas contractor license',
             f'"{domain}" news construction',
+            f'"{domain}" hiring estimator OR "cost estimator" OR "project manager"',
+            f'"{domain}" "new office" OR expansion OR "opening location"',
+            f'"{domain}" "awarded" OR "low bidder" OR "bid award" OR "contract award"',
         ]
         seen_urls: set[str] = set()
         results: list[dict[str, str]] = []

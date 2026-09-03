@@ -126,7 +126,14 @@ CONTEXT about The Best Estimator LLC:
 RULES:
 1. Reasoning must be based on the facts provided — do not assume facts not in evidence.
 2. If information is insufficient, say "unknown" rather than guessing.
-3. Return ONLY valid JSON matching this exact schema — no markdown, no commentary:
+3. LOOK SPECIFICALLY for these growth / need signals and weigh them in your assessment:
+   - Hiring posts: is the company hiring estimators, project managers, or construction staff? (indicates growth -> estimation load)
+   - New office / expansion: any mention of new locations, larger facilities, or expansion? (more workload -> more bids)
+   - Recent bid wins: any evidence of a contract award or low-bidder win, and if so how recent (days vs months)? (recency raises urgency -> "now" or "soon")
+   - Active bidding: plan-deposit lists, open RFPs, bid announcements.
+   - Staffing gaps: any signal the company lacks in-house estimation capacity.
+   A "yes" on needs_estimation is much stronger when a growth/hiring or bid-win signal is present.
+4. Return ONLY valid JSON matching this exact schema — no markdown, no commentary:
 
 {{
   "needs_estimation": "yes | no | unknown",

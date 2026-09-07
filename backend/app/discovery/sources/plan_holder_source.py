@@ -54,6 +54,7 @@ import logging
 import pathlib
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 from urllib.parse import urlparse
 
@@ -68,22 +69,35 @@ from app.email.email_cleaner import is_free_mail_domain
 logger = logging.getLogger(__name__)
 
 #: Validated plan-holder dork templates. ``{industry}`` / ``{location}`` are
-#: injected from the query. One pattern is enough to ship (Inc 2 scope); a
-#: wider vocabulary ("Bidders List", "Plan Room", "Prospective Bidders") is a
-#: logged backlog item, not this increment.
+#: injected from the query. Every template names a public document that lists
+#: CONTRACTORS with contacts (plan-holder / bidder rosters) — never notices or
+#: results pages, which list the AGENCY's contact and would pollute leads.
+#: The vocabulary is deliberately wider than the original single pattern so a
+#: pass can advance through LATER templates once earlier dorks surface nothing
+#: new (each engine phrasing yields a different document set).
 _DORK_TEMPLATES = (
     '"Plan Holder List" filetype:pdf {industry} {location}',
     '"Plan Holders List" filetype:pdf {industry} {location}',
     '"Bid Holders List" filetype:pdf {industry} {location}',
     '"List of Plan Holders" filetype:pdf {industry} {location}',
+    '"Prospective Bidders" filetype:pdf {industry} {location}',
+    '"Bidders List" filetype:pdf {industry} {location}',
+    '"Plan Room" filetype:pdf {industry} {location}',
+    '"Plan Holder Report" filetype:pdf {industry} {location}',
 )
 
 #: Bounded fan-out: at most this many PDFs are fetched per discover() call so
 #: a search that surfaces a pile of PDFs cannot explode the run (Blueprint §4
-#: bounded-crawl discipline, same guardrail as DirectoryCrawlSource).
-MAX_PDFS = 5
+#: bounded-crawl discipline, same guardrail as DirectoryCrawlSource). 10 (was
+#: 5) is the per-pass working set: discovery ADVANCES pass to pass by skipping
+#: already-parsed PDFs (``skip_pdfs``), so a bigger batch per pass means more
+#: distinct documents get examined before the source honestly reports exhaust.
+MAX_PDFS = 10
 
-#: Default results asked of each provider per dork.
+#: Default results asked of each provider per dork. Was 5, raised to 10 with
+#: MAX_PDFS: the lazy loop only ever surfaces unseen PDFs, so a richer result
+#: set lets a single dork feed several passes instead of re-spending credits
+#: on repeated queries.
 RESULTS_PER_DORK = 10
 
 _HEADERS = {
@@ -164,14 +178,26 @@ class PlanHolderSource(BaseSource):
         industry: str,
         location: str,
         limit: int,
+        skip_pdfs: set[str] | None = None,
     ) -> tuple[SourceStatus, list[dict[str, Any]], dict[str, Any]]:
         """Discover companies from live plan-holder PDFs.
+
+        ``skip_pdfs``: source_urls already parsed in this run (or earlier in
+        this multi-pass loop). Passed into the search so a pass ADVANCES to
+        unseen documents instead of re-pulling the same PDFs — the difference
+        between a pass that finds new leads and one that tautologically returns
+        the rows it already produced. An exhausted pass (nothing unseen left to
+        offer) reports EMPTY with ``reason="no_unseen_pdfs"`` so the caller can
+        stop honestly instead of burning credits on repeats.
 
         Never raises: an unexpected error is returned as ``ERROR`` so the
         orchestrator can continue with the next source (orchestrator contract).
         """
         try:
-            return self._discover(industry=industry, location=location, limit=limit)
+            return self._discover(
+                industry=industry, location=location, limit=limit,
+                skip_pdfs=skip_pdfs,
+            )
         except Exception as exc:  # noqa: BLE001 — never propagate to orchestrator
             logger.exception("PlanHolderSource: unexpected error")
             return SourceStatus.ERROR, [], {
@@ -185,6 +211,7 @@ class PlanHolderSource(BaseSource):
         industry: str,
         location: str,
         limit: int,
+        skip_pdfs: set[str] | None = None,
     ) -> tuple[SourceStatus, list[dict[str, Any]], dict[str, Any]]:
         if limit <= 0:
             return SourceStatus.EMPTY, [], {
@@ -192,13 +219,17 @@ class PlanHolderSource(BaseSource):
                 "reason": "limit_zero",
             }
 
+        skip = set(skip_pdfs or ())
         dorks = self._build_dorks(industry, location)
-        pdf_urls = self._search_pdfs(dorks)
+        pdf_urls = self._search_pdfs(dorks, skip=skip)
         if not pdf_urls:
             # CLAUDE.md §5: never go silent about WHY live discovery failed.
+            # ``no_unseen_pdfs`` distinguishes real exhaustion (every surfaced
+            # PDF already parsed) from an empty first search.
             return SourceStatus.EMPTY, [], {
                 "source": self.source_name,
-                "reason": "no_pdf_results",
+                "reason": "no_unseen_pdfs" if skip else "no_pdf_results",
+                "pdfs_already_parsed": len(skip),
                 "dorks": dorks,
                 "industry": industry,
                 "location": location,
@@ -209,8 +240,13 @@ class PlanHolderSource(BaseSource):
         fetch_failures = 0
         fetched = 0
         parse_unreadable = 0
-        for url in targeted:
-            data = self._fetch_bytes(url)
+
+        # Fetch the working set concurrently (bounded workers) so a pass costs
+        # ~one slow-PDF latency instead of the sum of every PDF's timeout.
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            fetched_data = list(pool.map(self._fetch_bytes, targeted))
+
+        for url, data in zip(targeted, fetched_data):
             if data is None:
                 fetch_failures += 1
                 continue
@@ -251,7 +287,9 @@ class PlanHolderSource(BaseSource):
             "data_source": "live",
             "status": SourceStatus.SUCCESS,
             "dorks": dorks,
+            "pdf_urls": pdf_urls,
             "pdfs_found": len(pdf_urls),
+            "pdfs_skipped": len(skip),
             "pdfs_fetched": fetched,
             "pdfs_failed": fetch_failures,
             "pdfs_unreadable": parse_unreadable,
@@ -308,15 +346,30 @@ class PlanHolderSource(BaseSource):
                 dorks.append(text)
         return dorks
 
-    def _search_pdfs(self, dorks: list[str]) -> list[str]:
+    def _search_pdfs(self, dorks: list[str], *, skip: set[str] | None = None) -> list[str]:
         """Run the dorks and post-filter to .pdf URLs, preserving order.
 
         A semantic engine (Tavily) ignores ``filetype:pdf``, so the filter is
         applied to the returned URLs here — the validated lesson of the dork
         probe (pdf_ratio tells the engine apart, it is not a result filter).
+        ``skip`` (source_urls already parsed in this run) is honoured so a pass
+        only collects documents that can actually ADVANCE discovery.
+
+        The injected ``_search`` seam keeps its all-dorks-at-once contract.
+        The default live path is lazy: dorks run one at a time and stop as soon
+        as MAX_PDFS unseen PDF URLs are collected, so a dork that already
+        surfaces enough PDFs does not spend extra search credits on the
+        remaining dorks.
         """
-        results = self._search(dorks) if self._search else self._default_search(dorks)
-        seen: set[str] = set()
+        if self._search:
+            results = self._search(dorks)
+            return self._filter_pdfs(results, skip=skip)
+        return self._default_search_pdfs(dorks, skip=skip)
+
+    @staticmethod
+    def _filter_pdfs(results: list[Any], *, skip: set[str] | None = None) -> list[str]:
+        """Post-filter search results to deduplicated, unseen .pdf URLs, in order."""
+        seen: set[str] = set(skip or ())
         urls: list[str] = []
         for result in results:
             url = getattr(result, "url", None) or ""
@@ -328,8 +381,10 @@ class PlanHolderSource(BaseSource):
             urls.append(url)
         return urls
 
-    def _default_search(self, dorks: list[str]) -> list[Any]:
-        """Run ALL dorks through the search manager in ONE event loop.
+    def _default_search_pdfs(
+        self, dorks: list[str], *, skip: set[str] | None = None
+    ) -> list[str]:
+        """Run the dorks lazily through the search manager in ONE event loop.
 
         Imported here, not at module scope, to avoid an import cycle with the
         provider registry auto-registration.
@@ -340,21 +395,38 @@ class PlanHolderSource(BaseSource):
         when the next ``asyncio.run`` spins up a fresh loop. Provider sessions
         are closed inside the same loop so nothing leaks a closed-loop
         connector (re-opening is lazy and safe).
+
+        Lazy credit control: dorks run one at a time and the loop breaks as
+        soon as MAX_PDFS *unseen* PDF URLs are collected — a pass stops
+        spending search credits once it has enough PDFs to fetch (CLAUDE.md §4:
+        discovery must not burn a provider budget it does not need).
         """
         from app.search_providers.manager import SearchProviderManager
         from app.search_providers.models import SearchQuery
         from app.search_providers.registry import get_registry
 
         manager = SearchProviderManager()
+        seen: set[str] = set(skip or ())
+        urls: list[str] = []
 
-        async def _run_all() -> list[Any]:
-            collected: list[Any] = []
+        async def _run_all() -> None:
             try:
                 for dork in dorks:
+                    if len(urls) >= MAX_PDFS:
+                        break
                     response = await manager.search(
                         SearchQuery(keywords=dork, num_results=RESULTS_PER_DORK)
                     )
-                    collected.extend(response.results)
+                    for result in response.results:
+                        url = getattr(result, "url", None) or ""
+                        if not url or not _is_pdf(url):
+                            continue
+                        if url in seen:
+                            continue
+                        seen.add(url)
+                        urls.append(url)
+                        if len(urls) >= MAX_PDFS:
+                            break
             finally:
                 for provider in get_registry().get_enabled():
                     close = getattr(provider, "close", None)
@@ -363,9 +435,9 @@ class PlanHolderSource(BaseSource):
                             await close()
                         except Exception:  # noqa: BLE001 - closing is best-effort
                             pass
-            return collected
 
-        return asyncio.run(_run_all())
+        asyncio.run(_run_all())
+        return urls
 
     # -- fetch + parse ----------------------------------------------------
 

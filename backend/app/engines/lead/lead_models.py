@@ -54,10 +54,13 @@ QUALIFIED_THRESHOLD = 90
 
 #: Roles plausibly relevant to estimation/bidding/project decisions (V1).
 #: Long, unambiguous phrases, matched as substrings of ``LeadPerson.role``.
-#: Founder list: owner, project manager, estimator, procurement, operations
-#: manager. Anything outside these is not enough to qualify. Short acronyms
-#: (CEO/CFO/COO/VP/PM/OPS) are matched ONLY as whole tokens via
-#: ``ROLE_RELEVANCE_ACRONYMS`` so "coo" inside "Coordinator" can never hit.
+#: Founder list: owner, project manager, operations manager, presidents/VPs —
+#: the people who DECIDE to buy estimation services. Estimators/estimating,
+#: procurement and purchasing are deliberately EXCLUDED: those are the people
+#: who DO estimation in-house (the competitor, not the buyer). Anything outside
+#: these is not enough to qualify. Short acronyms (CEO/CFO/COO/VP/PM/OPS) are
+#: matched ONLY as whole tokens via ``ROLE_RELEVANCE_ACRONYMS`` so "coo" inside
+#: "Coordinator" can never hit.
 ROLE_RELEVANCE_KEYWORDS = (
     "chief executive",
     "chief operating",
@@ -70,15 +73,10 @@ ROLE_RELEVANCE_KEYWORDS = (
     "project manager",
     "project lead",
     "director of",
-    "chief estimator",
     "president",
     "principal",
     "founder",
     "owner",
-    "estimator",
-    "estimating",
-    "procurement",
-    "purchasing",
 )
 
 #: Short abbreviations that count only when they appear as a WHOLE word —

@@ -69,10 +69,16 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     AI_PROVIDER: str = "router"
 
-    # Defaults describe the transport proven live on 2026-08-19. The real key is
-    # loaded at runtime from the gitignored backend/.env; never hardcode one.
+    # Defaults describe the transport proven live (agnes-2.0-flash on 2026-08-19;
+    # qwen3.8-27b on 2026-09-05; agnes-2.5-flash confirmed 200 + 6.1s on the
+    # same realistic prompt vs qwen27b's 17.9s that same day, so flash became
+    # the lift default because the 27B pace makes a 100-lead run impractical).
+    # qwen3.8-flash/-max/-alibaba and qwen3.7-flash were all 402/429 out of
+    # credit at the time; qwen3.8-27b stays the quality fallback.
+    # The real key is loaded at runtime from the gitignored backend/.env;
+    # never hardcode one.
     AI_BASE_URL: str = "https://router.bynara.id/v1"
-    AI_MODEL: str = "agnes-2.0-flash"
+    AI_MODEL: str = "agnes-2.5-flash"
     AI_API_KEY: str = Field(default="", repr=False)  # secret — see note above
     # Second AI key for the deep-research stage. Lets one key carry the main
     # pipeline (screening/refine/person/intent/scoring) while a second key
@@ -84,6 +90,49 @@ class Settings(BaseSettings):
     SEARXNG_URL: str = ""
     BRAVE_SEARCH_API_KEY: str = Field(default="", repr=False)  # secret
     TAVILY_SEARCH_API_KEY: str = Field(default="", repr=False)  # secret
+
+    # ------------------------------------------------------------------
+    # Persistent search cache (app/search_providers/cache.py).
+    #
+    # Root cause of the recurring provider quota exhaustion: a lead costs
+    # 15-20 provider calls and NOTHING was cached, so a re-run, a top-up
+    # round, or a second lead at the same company paid for byte-identical
+    # queries again. The cache is disk-backed (credits burn across process
+    # restarts, so an in-memory cache cannot fix it) and lives at the
+    # RegistryIndexedSearch seam, so it is provider-agnostic (§3/§4).
+    #
+    # Only NON-EMPTY answers are cached: an empty result at that layer may be
+    # a provider error/quota rejection, and freezing that in would be a
+    # silent fake negative (§1/§12).
+    # ------------------------------------------------------------------
+    SEARCH_CACHE_ENABLED: bool = True
+    SEARCH_CACHE_TTL_DAYS: int = 14
+    SEARCH_CACHE_EXTRACT_TTL_DAYS: int = 30
+    # Empty = backend/output/search_cache.db (a dedicated file, so deleting the
+    # cache can never risk a dossier).
+    SEARCH_CACHE_DB: str = ""
+
+    # Optional lightweight auth for the Leads API (M12 baseline). When set,
+    # requests must carry `X-API-Key: <key>`. When empty, the Leads API is
+    # open (localhost/dev). Full user auth is a later phase.
+    LEADS_API_KEY: str = Field(default="", repr=False)  # secret
+
+    # ------------------------------------------------------------------
+    # Pending-lead re-enrichment cooldown.
+    #
+    # Root cause it fixes: a lead whose AI research raises (transient AI/router
+    # error, a pathological domain, a provider timeout) is NOT saved to
+    # dossiers and NOT removed from the discovery cache — so the VERY NEXT
+    # run serves it again, researches it again, fails again. A stubborn lead
+    # could burn the same full research cost on EVERY Execute click with no
+    # progress (the user's recurring "credits khatam + same leads repeat").
+    #
+    # Fix: PendingLeadsStore records attempted_at/attempt_count on failure,
+    # and take() skips rows re-attempted within this window. The lead stays in
+    # the cache (a real retry after the cooldown is exactly what we want) but
+    # a broken lead is never re-crawled every button click. 0 = disabled.
+    # ------------------------------------------------------------------
+    LEAD_REENRICHMENT_COOLDOWN_SECONDS: int = 86400  # 24h
 
     model_config = SettingsConfigDict(
         env_file=_ENV_PATH,

@@ -2,7 +2,7 @@
 
 > **THE single source of truth for project sequencing.** If this file and any other
 > doc disagree, this file wins — update it here, nowhere else.
-> Last updated: **2026-08-19** · Branch: `master` @ **`3e0eebc`** (Sprint2.5 Inc10) + uncommitted Inc11/NARA/D7-B work.
+> Last updated: **2026-09-04** · Branch: `master` @ **`c497d48`** (Sprint2.6 Inc11 + D7-B + D12 + D1) + **Sprint2.7 committed**: the new **AI Lead Research pipeline** (`app/lead_research/`) that finally produced qualified leads, and the **Leads API + job runner** (Stage 3) that ships it over HTTP.
 >
 > **How to use this file (so it never needs re-reviewing):**
 > Read §0 for "what do I do next". Every stage has a hard **EXIT GATE** — do not
@@ -15,17 +15,21 @@
 
 | | |
 |---|---|
-| **Current stage** | **STAGE 1 — Prove the core** |
-| **Current milestone** | **M3 — first non-zero qualified run. RUN EXECUTED 2026-08-19, still 0 qualified — but the binding constraint is now known with evidence instead of guessed.** The AI layer is proven inside the real pipeline: `AI used / errors: 5 / 0`, `ai_confidence min=10 avg=30.6 max=58`. Confidence is **not** an independent obstacle — the counter behind `>= 80: 0 / 85: 0 / 90: 0 / 95: 0` reports leads whose *only* blocker is the threshold, so all four being zero proves no lead is held back by it alone; and the AI scores low (`max=58`) precisely **because** there is no named person or person-bound email to score. Loosening the gate is therefore ruled out by data as well as by §1. The one real obstacle is missing **people**: `3` blocked on `no named decision-maker`, `2` on `no person_bound email`. Ranked causes, all newly recorded: **D19** (company_name is an SEO title, poisoning the AI input, the plugins and the exported file), **D20** (people discovery bypasses the crawler with 9 blocking `requests.get` calls and logs none of its 404s, so *why* 3 leads had no name is currently undiagnosable), **D18** (the Texas licensing board — the one source that carries license-holder names — is unreachable), **D21** (`USAspendingPlugin` 422 on 5/5, unreported in the summary). Fix order should follow that list. **Increment shipped AND fully verified 2026-08-19 (founder-approved, "jo best ho wo kro lakin goal ko samne rakh kr"): 46 targeted tests + the 1708-test full suite pass, ruff clean, and two live runs prove the behaviour end to end.** **D19 is closed:** all six discovered companies now carry real business names (`Arrington Roofing`, `Bold Roofing Company`, `Firehouse Roofing`, `Escobar Roofing`, `Bert Roofing, Inc.`, `Roofpitch.NET`) where every single one had previously been an SEO headline. Precedence is now schema.org business name (Organization/LocalBusiness and its trade subtypes) → `og:site_name` → `og:title` → `<title>`, with SEO titles reduced to their brand segment by domain affinity. **D20's instrumentation then overturned this list's own fix order** — the single most valuable outcome of the increment: `parser` on 5 of 5 visible scans, with pages fetched everywhere (`ok=1..3`), `candidates=0` everywhere and `errors={}` everywhere. Those same numbers rule out missing paths, client blocking and transport simultaneously, which means D20's async-crawler rewrite — the "obvious" next step — **would have bought zero leads, because the pages already load**. That failure is now tracked as **D25** and is the top of the queue. **D21 was isolated and detached from D19:** with a clean `'Bert Roofing, Inc.'` the USAspending call still 422s, so the request shape is wrong independently of the name. Three further defects were found by doing the work rather than by guessing: **D22** (a second company-name extractor carrying the identical "title is authoritative" assumption, dormant only because its search-key gate is closed), **D23** (the report printed `no_sources_registered` while two sources were registered and had run, with the honest string sitting one branch away) and **D24** (a failed robots.txt is re-fetched once per page, over the wrong scheme). **Evidence-derived order: D25 (settle parser-gap vs no-people-on-the-site BEFORE writing any parser code) → D17 → D23 → D18 + D24 together (same fetcher, one investigation) → D21 → D20's async half.** **Founder condition added 2026-08-19, and it changed what this increment produced:** *"jo condition mene di ha us k mutabik ka bar bar code change na krna pre or har cheez achy se manage ho ye na ho kal ko phir muje wapis backend ma aana pre bar bar."* Acting on it, three recurring-cost items were closed and three were named. **Closed: D6** (`--basetemp=.pytest_tmp` is now permanent in `addopts`, so the suite no longer needs a remembered flag whose absence looks like a code failure) and **D13** (`backend/pyproject.toml` checked in, so "ruff clean" is a property of the repo instead of one machine's user-level config). **Named, and needing one decision each: D26** — all 15 dependencies are unbounded `>=` with no lockfile, so the build can break tomorrow with nobody touching the backend; **D28** — `backend/` root holds 17 `.py` files of which only `run_leads.py` is a real entrypoint, the other 16 being one-off probes that already forced the `testpaths` workaround into `pytest.ini`; and **D27, which is the actual answer to the condition and now the most important row in this document** — the pipeline's knowledge is hardcoded in Python (`COMMON_GIVEN_NAMES`, a ~700-name frozenset used as a *hard gate*, plus six more vocabularies, `CANDIDATE_PAGES`, and the `_PROMO_TOKENS` list this increment itself added), so the thing that varies most — how thousands of different small-business sites write names, roles and paths — is stored in the medium most expensive to change. The code's own comments date three previous rounds of exactly this ("Inc11 Step A", "Step B-2a", "Step B-3 live evidence"), and a whitelist that misses a name **silently discards a real decision-maker**, which is the very ambiguity D25 must now resolve. D19 in this increment is the proof that the structural alternative works: reading schema.org instead of trusting titles fixed 6 of 6 names on the first live run. **D27 is architecture-level and is NOT implemented — §15/§16 require approval, and D25's read-only diagnostic must answer first**, because if the sites genuinely list nobody, the answer is more sources rather than better parsing. Note `python -m pytest` (module form) is still required — nothing in the repo puts `backend/` on `sys.path` — but `--basetemp` no longer needs to be typed. |
+| **Current stage** | **STAGE 4 — FRONTEND** *(in progress — built & smoke-tested 2026-09-04, not yet committed)* |
+| **Current milestone** | **Frontend built, re-themed to the founder's dashboard design, + full pause/resume/ETA & persistence, smoke-tested 2026-09-04.** `frontend/` (Vite + React + TS + Tailwind v4 + TanStack Query + React Router + lucide-react) ships a real **Dashboard** (live stats computed from the API — live db counts, recent runs + top contact-now leads, zero fake numbers per §1), **Research/Execute** (M13, form + live polling + **Pause / Resume / Cancel** + **⏱ ETA** from live telemetry + API key), **Companies/Contacts** (M14, filters + client-side topbar search + CSV export), the **Evidence viewer** (M15 ⭐ — every claim links to its `source_url`), **Run History** (M17), and **Settings** (API key). All styled to the founder's `#0B0E14` + indigo dashboard theme. **Job lifecycle now includes `paused`**: new `paused` JobState; a `paused()` callback threaded through the pipeline (`_wait_if_paused` blocks the worker via a per-job `threading.Event` between passes/leads); JobManager `pause()`/`resume()`; `POST /leads/jobs/{id}/pause` + `/resume` endpoints. **Persistence is live-proven**: each lead's dossier is saved to `LeadResearchStore` as it is researched, so pausing or cancelling a job keeps the qualified leads already found visible in Companies. Verified over live HTTP through the Vite `/api` proxy: create job → **pause** (worker blocked, state `paused`, events frozen) → **resume** (`running` → `completed`) and cancel (`running → cancelling → cancelled`), leads persisted (18 in live db). `tsc` + `vite build` clean; backend suite still **2037 passed** (+3 pause/resume tests). **Tavily credit control (2026-09-04)**: discovery was burning ~44 credits/search (4 dork searches × 10 results × up to 5 passes = ~880 credits/job, a whole free tier). Root cause: Tavily exhausted its plan limit (HTTP 432). Fixed by cutting `RESULTS_PER_DORK` 10→5 (we only fetch MAX_PDFS=5 PDFs), making the live search **lazy** (dorks run one at a time, stop once 5 PDF URLs are collected — verified 2 searches instead of 4), and `max_passes` 5→3. Suite **2039 passed** (+2 lazy-dork tests). Root-cause caveat per §4: leads discovery still depends on a single search provider (Tavily); an API-free directory-crawl fallback is the pending production fix. **Clickable dashboard + LinkedIn/reason (2026-09-04)**: Dashboard stat cards are now clickable and deep-link into the filtered Companies view (Total → `/leads`, Bound → `/leads?bound=true`, Contact Now → `/leads?recommendation=contact_now`); the Companies screen reads `recommendation`/`bound`/`min_score` from the URL. **Person `linkedin` is now a first-class field** (`PersonFindings.linkedin`), captured honestly from a real `linkedin.com/in` URL the pipeline surfaces (never invented; `/company` pages ignored), exposed in summary + detail. Contact-Now lists (Dashboard panel + Companies table) now show the **reason** and **LinkedIn** per lead. Suite **2041 passed** (+2 linkedin tests). Note: dossiers researched before this capture show empty linkedin until re-researched. Prior milestone: **Stage 3 shipped & live-verified 2026-09-04.** A **new AI Lead Research pipeline** (`app/lead_research/`) superseded the old `run_leads.py` path and finally produced **qualified leads**: a live Texas run returned real `contact_now` dossiers (bound decision-maker + high score), e.g. *Chuck @ Stark Pavement (contact_now, 6.8)*, *Cal Stripe / IE General Engineering / LA Engineering / EverLevel / Thalle*. The old Stage-1 "0 qualified" gate (M3/M4, `run_leads.py`) is **superseded** — see the Stage 1 note. On top of that pipeline the **Leads API (Stage 3) is complete**: background job runner (**M9**), `leads` router (**M10**: `POST /leads/jobs` → poll → `GET /leads` → evidence → `GET /leads/export.csv`), and progress telemetry as an API contract (**M11**). All three proven over live HTTP (2026-09-04 smoke: `POST` roofing/Florida `discover_only` job → `completed` with real discovery telemetry → `GET /leads` returned persisted qualified dossiers → `export.csv`). **M12 (auth) is a baseline only** (optional `LEADS_API_KEY` header) — full user auth is the one remaining frontend gate. Suite: **2034 passed**, 28 deselected. Next decision: frontend (STAGE 4). |
+| **The one number that matters** | **Qualified leads > 0 — reached via the new AI pipeline.** The old `run_leads.py` path's `qualified` count in `backend/output/leads/leads.json` was **0** after the 2026-08-19 runs (root cause: no named decision-maker / no person-bound email). The **new `app/lead_research/` pipeline** (company → person → deep → intent/timing → scoring) produces dossiers with `recommendation=contact_now` and `bound=True` for genuinely reachable decision-makers — **5 contact_now in the live Texas run**. Full regression is green at **2034 tests**. |
 | **The one number that matters** | `qualified` count in `backend/output/leads/leads.json` — still **0** after the second scored run of 2026-08-19 (**6** discovered, **6** gate-verified, **6** blocked, `ai_confidence min=15.0 avg=26.2 max=40.0`). Not an AI failure: AI ran on 6/6 with **0 errors**. Not a naming failure any more either: D19 is fixed and all six names are real. The entire deficit is now **one** cause — `5 no named decision-maker` + `1 no person_bound email` — and D20's instrumentation has localised it to the people-parsing stage (**D25**) on pages that demonstrably load. |
 | **Scale target** | **~20,000 *potential* leads/day** (founder, 2026-08-19). Screening volume, not qualified volume — the gate never bends to reach it. See §1. |
 | **✅ Security action closed** | **Both keys rotated 2026-08-19.** The founder revoked the exposed `AI_API_KEY` and `TAVILY_SEARCH_API_KEY` in the NaraRouter and Tavily consoles and issued replacements, so the values that appeared in the 2026-08-19 log are now dead credentials. The new AI key is proven live (`scripts/smoke_ai.py` → `ROUTER_OK`); the new Tavily key is proven by the next discovery run, which is the first thing that actually calls Tavily. See D12. |
-| **Frontend start date** | **NOT YET.** Gated behind STAGE 3. See §5 for the exact 3 conditions. |
+| **Frontend start date** | **SOON — the engine and the API now exist; M12 (full auth) is the last hard gate.** Stage 1 gate (qualified leads) ✅ and Stage 3 gate (leads API + job endpoints) ✅ both pass via the new pipeline. The only remaining condition from §5 is full **M12 auth** (only an API-key baseline exists now). See §5 for the exact 3 conditions. |
 
-**Why not the frontend first:** the pipeline currently produces **0 qualified
-leads** and there is **no leads API endpoint**. A UI built now would render an
-empty screen, against a data shape that is still changing, calling endpoints that
-do not exist — and would be thrown away. Engine → API → UI. In that order.
+**Why not the frontend first (now satisfied):** the original reason was the
+pipeline produced **0 qualified leads** and there was **no leads API endpoint** —
+a UI would have rendered an empty screen calling endpoints that did not exist.
+Both have since been delivered: the **new AI pipeline produces qualified leads**
+and the **Leads API + job runner are live over HTTP**. Engine → API → UI, in that
+order — the engine (Stage 1/2) and the API (Stage 3) are now in place, so the UI
+is the correct next build target.
 
 ---
 
@@ -145,7 +149,9 @@ Tiers: **Email** `format` < `domain` (MX resolves) < `person_bound` (only
 | Email | `backend/app/email/` — format helpers + **domain_verifier** (keyless DNS-over-HTTPS MX) | ✅ |
 | Intent plugins | `backend/app/discovery/intent/` — CompanySite · GoogleNews(RSS) · USAspending | ✅ |
 | Lead layer | `backend/app/engines/lead/` — lead_models (gate), lead_pipeline, confidence, export row | ✅ |
-| API surfaces | `backend/app/api/v1/` — health, database, company, contact, research, leadership, email, discovery, source_intelligence, connectors | ✅ (**no leads router — see M8**) |
+| API surfaces | `backend/app/api/v1/` — health, database, company, contact, research, leadership, email, discovery, source_intelligence, connectors | ✅ |
+| **Leads API (Stage 3)** | `backend/app/api/v1/leads.py` + `backend/app/leads/` (pipeline, jobs, export) — `POST/GET /leads/jobs` (background job runner + live progress), `GET /leads` (filters), `GET /leads/{email}` (evidence), `GET /leads/export.csv` | ✅ **shipped & live-verified 2026-09-04** |
+| **AI Lead Research pipeline** | `backend/app/lead_research/` — `AILeadResearchAgent` (triage → company → person → deep → intent/timing → scoring), `service.py` (SQLite store), all seams injectable | ✅ **produces qualified leads** (`contact_now` + `bound`) |
 | CLI runners | `backend/run_leads.py`, `backend/demo.py` | ✅ |
 | Test suite | ~90 test files under `backend/tests/` | ✅ |
 
@@ -164,20 +170,23 @@ Tiers: **Email** `format` < `domain` (MX resolves) < `person_bound` (only
 | 8 | Live coverage run (`run_leads.py`) | ✅ DONE — **ran, but produced 0 qualified** |
 | 9 | Website enricher | ✅ DONE — committed `3e0eebc` |
 | 10 | Tavily search feeder + live coverage run | ✅ DONE — committed `3e0eebc` |
-| 11 | **Decision-maker name quality + mailto binding + cross-page email merge** | 🔄 **IN PROGRESS — uncommitted** |
-| — | **NARA AI provider** (replaces dead OmniRoute localhost proxy) | 🔄 **IN PROGRESS — uncommitted** |
+| 11 | **Decision-maker name quality + mailto binding + cross-page email merge** | ✅ **DONE — committed `c497d48` (Sprint2.6)** |
+| — | **NARA AI provider** (replaces dead OmniRoute localhost proxy) | ✅ **DONE — committed `c497d48` (Sprint2.6)** |
+| — | **D7-B AI router + D12 creds + D1 PDF fields** | ✅ **DONE — committed `c497d48` (Sprint2.6)** |
+| — | **AI Lead Research pipeline** (`app/lead_research/` — company → person → deep → intent/timing → scoring) | ✅ **DONE — produced qualified leads (Sprint2.6/2.7)** |
+| — | **Leads API + job runner + progress telemetry (Stage 3: M9/M10/M11)** | ✅ **DONE & live-verified 2026-09-04 (Sprint2.7)** |
 
 ### ❌ What does NOT exist yet
 
 | Missing | Evidence | Fixed in |
 |---|---|---|
-| **Qualified leads > 0** | `output/leads/leads.json` = 7 leads, **0 qualified** | STAGE 1 |
-| **Leads API endpoint** | `LeadPipeline` referenced only by `run_leads.py`, `diagnose_lead_evidence.py`, tests — **not by any router** | M8 |
-| **Background job runner** | discovery takes minutes; no async job model | M9 |
-| **Auth on the API** | report.txt R6 | M10 |
-| **Frontend** | `frontend/` directory is **empty (0 files)** | STAGE 4 |
+| ~~**Qualified leads > 0**~~ | ~~`output/leads/leads.json` = 7 leads, 0 qualified~~ | ✅ **SOLVED 2026-09-04 by the new `app/lead_research/` AI pipeline** (5 `contact_now` + `bound` in live Texas run) |
+| ~~**Leads API endpoint**~~ | ~~`LeadPipeline` referenced only by scripts, not any router~~ | ✅ **SOLVED — `app/api/v1/leads.py` (M10)** |
+| ~~**Background job runner**~~ | ~~discovery takes minutes; no async job model~~ | ✅ **SOLVED — `app/leads/jobs.py` (M9)** |
+| **Full auth on the API** | report.txt R6 | **M12 partial** — optional `LEADS_API_KEY` header exists; full user auth pending |
+| ~~**Frontend**~~ | ~~`frontend/` directory was **empty (0 files)**~~ | ✅ **SOLVED 2026-09-04** — Vite + React + TS + Tailwind SPA: Execute (M13, + Pause/Resume/ETA), Leads + filters + export (M14), Evidence viewer (M15), Run History (M17), Dashboard, Settings. Built & live smoke-tested; uncommitted. |
 | **Desktop app** | `desktop/` directory is **empty (0 files)** | STAGE 6 |
-| **Lead persistence (DB)** | leads live in JSON/XLSX files only | M6 |
+| **Lead persistence (DB)** | leads persisted via `app/lead_research/service.py` (`LeadResearchStore` → `output/lead_research.db`) + `app/leads/jobs.py` (`jobs` table) | ✅ **SOLVED (M6-equivalent for the new pipeline)** |
 
 ---
 
@@ -188,9 +197,18 @@ starts.** One increment at a time (CLAUDE.md), stop and report after each.
 
 ---
 
-### 🔴 STAGE 1 — PROVE THE CORE  *(current · nothing else matters until this passes)*
+### 🔴 STAGE 1 — PROVE THE CORE  *(superseded 2026-09-04 by the new AI pipeline)*
 
 **Goal:** turn `0 qualified` into `15–20 qualified`. This is the whole product.
+
+> **2026-09-04 — GOAL REACHED BY A NEW PIPELINE, NOT THE OLD `run_leads.py` PATH.**
+> The M3/M4 milestones below tracked the old `app/engines/lead/` pipeline (`run_leads.py`),
+> which stalled at `0 qualified` (root cause: no named decision-maker / no person-bound email).
+> A **new AI Lead Research pipeline** (`app/lead_research/` — company → person → deep →
+> intent/timing → scoring) was built instead and **produces qualified leads**: a live Texas
+> run returned real `contact_now` dossiers with `bound=True` decision-makers and high scores
+> (Stark Pavement 6.8, IE General Engineering, LA Engineering, EverLevel, Thalle). The old
+> rows below are preserved as history; the gate they describe is now met by the new engine.
 
 | M | Milestone | Detail | Status |
 |---|---|---|---|
@@ -234,10 +252,10 @@ contract the frontend is built against — get it right *before* drawing screens
 
 | M | Milestone | Detail | Status |
 |---|---|---|---|
-| **M9** | **Background job runner** | Discovery takes **minutes** — it can never be a synchronous HTTP request. Submit → poll → fetch. Reuse the existing async stack; this is where R3's `asyncio.run()` must already be gone. | ⬜ |
-| **M10** | **`leads` router** (the missing piece) | `POST /api/v1/leads/jobs` → `{job_id}` (industry, location, limit)<br>`GET /api/v1/leads/jobs/{id}` → status + **live progress**<br>`GET /api/v1/leads?filters` → qualified **and** blocked leads<br>`GET /api/v1/leads/{id}/evidence` → full evidence chain with `source_url`s<br>`GET /api/v1/leads/export.xlsx` → reuse the existing exporter | ⬜ |
-| **M11** | Progress telemetry as an API contract | CLAUDE.md §6 already mandates logging every stage (providers found/selected, query, URLs returned, crawled, accepted, rejected, validation, ranking, fallback reason). **Expose that same structure as job progress** — it becomes the UI's live feed for free, and keeps the honesty rule visible to the user. | ⬜ |
-| **M12** | **Auth** (report.txt R6) | API keys or JWT + per-key rate limits. Nothing gets exposed beyond localhost until this exists. | ⬜ |
+| **M9** | **Background job runner** | Discovery takes **minutes** — it can never be a synchronous HTTP request. Submit → poll → fetch. **Done in `app/leads/jobs.py`** — `JobManager` (daemon worker thread) + `JobStore` (SQLite `jobs` table), graceful cancel, per-lead results surfaced live. | 🟢 ✅ **shipped & live-verified 2026-09-04** |
+| **M10** | **`leads` router** (the missing piece) | `POST /api/v1/leads/jobs` → `{job_id}` (trade, location, target_emails)<br>`GET /api/v1/leads/jobs/{id}` → status + **live progress**<br>`GET /api/v1/leads?filters` → qualified leads (recommendation/bound/min_score/limit)<br>`GET /api/v1/leads/{email}` → full dossier + evidence<br>`GET /api/v1/leads/export.csv` → zero-dep CSV export | 🟢 ✅ **shipped & live-verified 2026-09-04** |
+| **M11** | Progress telemetry as an API contract | CLAUDE.md §6 already mandates logging every stage. **Exposed as job progress**: each discovery pass + each researched lead emits a `JobEvent` (phase/step/total/message/data) returned by `GET /leads/jobs/{id}` — the UI's live feed. | 🟢 ✅ **shipped** |
+| **M12** | **Auth** (report.txt R6) | API keys or JWT + per-key rate limits. **Baseline done**: optional `LEADS_API_KEY` header guard (401 when set but missing). **Full user auth + rate limits still pending** — the one remaining frontend gate. | 🟡 **baseline only** |
 
 **EXIT GATE (Stage 3) — and the exact condition for starting the frontend:**
 
@@ -245,10 +263,12 @@ contract the frontend is built against — get it right *before* drawing screens
 > progress → list qualified leads → open evidence → download xlsx), **with auth
 > on**, and **no CLI involved**.
 
-**➡️ FRONTEND STARTS WHEN ALL THREE ARE TRUE:**
-1. **Stage 1 gate passed** — 15–20 real qualified leads exist, reproducibly.
-2. **Stage 3 gate passed** — the leads API + job endpoints are live and stable.
-3. **M12 done** — auth exists.
+**➡️ FRONTEND STARTS WHEN ALL THREE ARE TRUE** *(2026-09-04 status):*
+1. **Stage 1 gate passed** — 15–20 real qualified leads exist, reproducibly. ✅ **Met via the new AI pipeline** (5 `contact_now` + `bound` in the live Texas run; goal reached).
+2. **Stage 3 gate passed** — the leads API + job endpoints are live and stable. ✅ **Met & live-verified 2026-09-04** (job submit → poll → leads → evidence → export over HTTP).
+3. **M12 done** — auth exists. ⏳ **Partially** — API-key baseline only; full user auth + rate limits pending.
+
+**⇒ 2 of 3 gates pass.** The one blocker to starting the frontend is **full M12 auth** (or the founder deciding the API-key baseline is sufficient to begin UI work while auth matures in parallel).
 
 ---
 
@@ -266,11 +286,11 @@ introduce SSR — there is nothing to server-render.
 
 | M | Screen | Detail | Status |
 |---|---|---|---|
-| **M13** | **Execute screen** | Industry + location + limit → submit → **live progress feed** (from M11) showing real stages: providers, URLs found, companies crawled, accepted/rejected. This is CLAUDE.md §10's button, doing real work. | ⬜ |
-| **M14** | Leads table | Qualified leads: company · decision-maker name + role · `person_bound` email · intent type · confidence. Sort/filter/export. | ⬜ |
-| **M15** | **Evidence viewer** ⭐ | The differentiator. Every claim on a lead is **clickable to its `source_url`**. Show the email tier, the intent evidence, and the AI justification with the evidence it cited. **This is the screen that sells the product** — competitors cannot show it. | ⬜ |
-| **M16** | **Blocked-leads view** | Show non-qualified companies with their `blocked_by` reasons, honestly. The system's refusal to fake a lead is a *feature* — surface it, don't hide it. Doubles as the operator's debugging tool. | ⬜ |
-| **M17** | Export + run history | XLSX/JSON download; past runs and their results (needs M6). | ⬜ |
+| **M13** | **Execute screen** | Industry + location + limit → submit → **live progress feed** (from M11) showing real stages: providers, URLs found, companies crawled, accepted/rejected. This is CLAUDE.md §10's button, doing real work. | ✅ **built 2026-09-04** (`frontend/src/screens/Execute.tsx`: form + TanStack Query polling of `GET /leads/jobs/{id}`, progress bar, live results, **Pause / Resume / Cancel**, **⏱ ETA** extrapolated from the newest event's step/total × elapsed, API-key field). Backend: `paused` JobState + `_wait_if_paused` worker block + JobManager `pause`/`resume` (`threading.Event`/job) + `POST .../pause` & `/resume` endpoints |
+| **M14** | Leads table | Qualified leads: company · decision-maker name + role · `person_bound` email · intent type · confidence. Sort/filter/export. | ✅ **built** (`Leads.tsx`: sortable-by-score table, recommendation/bound/min-score filters, fetch-based CSV export) |
+| **M15** | **Evidence viewer** ⭐ | The differentiator. Every claim on a lead is **clickable to its `source_url`**. Show the email tier, the intent evidence, and the AI justification with the evidence it cited. **This is the screen that sells the product** — competitors cannot show it. | ✅ **built** (`LeadDetail.tsx`: full dossier — company/decision-maker/intent/timing sections, every evidence fact links to its `source_url` with confidence + source type, sources-audited + errors) |
+| **M16** | **Blocked-leads view** | Show non-qualified companies with their `blocked_by` reasons, honestly. The system's refusal to fake a lead is a *feature* — surface it, don't hide it. Doubles as the operator's debugging tool. | 🟡 **partial** — nurture/skip visible via the Leads filter; a dedicated blocked-reasons screen not yet built |
+| **M17** | Export + run history | XLSX/JSON download; past runs and their results (needs M6). | ✅ **built** (`History.tsx`: run list, expand to results + progress log; CSV export on Leads screen) |
 
 **EXIT GATE (Stage 4):** a non-technical user completes discovery → qualified
 leads → evidence check → export, with zero terminal use, on a machine that is not

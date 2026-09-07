@@ -191,6 +191,44 @@ def test_facts_summary_minimal_info():
     assert "no facts available" in prompt.lower() or "Company:" in prompt
 
 
+def test_source_note_passes_through_intent_and_timing():
+    """source_note from the AI response survives in intent evidence + timing
+    events — the human-readable WHERE travels with every cited observation."""
+    response = dict(_good_ai_intent_response())
+    response["evidence"][0]["source_note"] = "TxDOT bid board"
+    response["timing_events"][0]["source_note"] = "RFP listing"
+
+    analyzer = IntentTimingAnalyzer(ai_ask=lambda p: json.dumps(response))
+    intent, timing = analyzer.analyze("john@acme.com", _company(), _person())
+
+    assert intent.evidence[0].source_note == "TxDOT bid board"
+    assert timing.events[0].source_note == "RFP listing"
+
+
+def test_bare_root_verified_intent_evidence_demoted():
+    """Exact-page guard on the intent/timing path: a 'verified' observation
+    citing only a bare domain root is demoted to 'unverified'."""
+    response = {
+        "needs_estimation": "yes",
+        "signal": "Hiring estimators",
+        "reason": "Careers page lists open estimator roles",
+        "evidence": [
+            {"claim": "Hiring estimators", "source_url": "https://acme.com", "source_type": "website", "confidence": "verified"},
+        ],
+        "timing_window": "soon",
+        "timing_reason": "Hiring signals",
+        "timing_events": [
+            {"claim": "Opened roles", "source_url": "https://acme.com/careers", "source_type": "careers_page", "confidence": "verified"},
+        ],
+    }
+    analyzer = IntentTimingAnalyzer(ai_ask=lambda p: json.dumps(response))
+    intent, timing = analyzer.analyze("x@acme.com", _company(), _person())
+
+    assert intent.evidence[0].confidence == "unverified"
+    assert intent.evidence[0].source_note == "source location not reported"
+    assert timing.events[0].confidence == "verified"  # exact /careers URL survives
+
+
 def test_facts_summary_unbound_person():
     """Unbound person with evidence shows person details."""
     captured = {}

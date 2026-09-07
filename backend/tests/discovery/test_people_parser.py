@@ -165,7 +165,9 @@ class TestEdgeCases:
         assert len(records) == 1
         assert records[0].person.name == "Tom Alvarez"
         assert records[0].person.role == "Estimator"
-        assert records[0].person.role_relevance is True
+        # Estimators DO estimation in-house (competitor, not buyer) — founder
+        # rule: never a relevant decision-maker. Only the dedup is under test.
+        assert records[0].person.role_relevance is False
 
     def test_person_without_email_is_still_emitted(self):
         """A named decision-maker is a record even with no bound email — the

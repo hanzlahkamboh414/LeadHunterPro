@@ -157,6 +157,41 @@ def test_no_pdf_results_is_empty() -> None:
     assert meta["reason"] == "no_pdf_results"
 
 
+@pytestmark_fixture
+def test_skip_pdfs_filters_seen_urls() -> None:
+    """A pass that already parsed PDFs only parses the unseen ones — the
+    mechanism that lets multi-pass discovery ADVANCE instead of repeating."""
+    source = _make_source(
+        search=lambda dorks: [
+            _FakeResult("https://a.com/old.pdf"),
+            _FakeResult(FIXTURE_URL),
+        ],
+    )
+    status, records, meta = source.discover(
+        industry="Roofing", location="Cedar Rapids IA", limit=50,
+        skip_pdfs={"https://a.com/old.pdf"},
+    )
+    assert status == SourceStatus.SUCCESS
+    assert len(records) == 28  # only the fixture was parsed
+    assert meta["pdf_urls"] == [FIXTURE_URL]  # old.pdf filtered out
+    assert meta["pdfs_skipped"] == 1
+
+
+def test_all_pdfs_already_parsed_is_honest_empty() -> None:
+    """When every surfaced PDF was parsed in an earlier pass, the source says
+    so explicitly (no_unseen_pdfs) so the caller can stop discovery — it must
+    not silently re-parse the identical documents."""
+    source = _make_source(search=lambda dorks: [_FakeResult("https://a.com/seen.pdf")])
+    status, records, meta = source.discover(
+        industry="R", location="TX", limit=10,
+        skip_pdfs={"https://a.com/seen.pdf"},
+    )
+    assert status == SourceStatus.EMPTY
+    assert records == []
+    assert meta["reason"] == "no_unseen_pdfs"
+    assert meta["pdfs_already_parsed"] == 1
+
+
 def test_only_non_pdf_urls_are_filtered_out() -> None:
     source = _make_source(
         search=lambda dorks: [_FakeResult("https://a.com/list.html"), _FakeResult("https://a.com/list.pdf")]
@@ -218,6 +253,93 @@ def test_pdf_cap_limits_fetches() -> None:
     assert status == SourceStatus.UNAVAILABLE
     assert meta["pdfs_targeted"] == MAX_PDFS
     assert meta["fetch_failures"] == MAX_PDFS
+
+
+# ---------------------------------------------------------------------------
+# Lazy default search (credit control)
+# ---------------------------------------------------------------------------
+
+
+class _FakeSearchResult:
+    def __init__(self, url: str) -> None:
+        self.url = url
+
+
+class _FakeSearchResponse:
+    def __init__(self, results: list[_FakeSearchResult]) -> None:
+        self.results = results
+
+
+def _patch_manager(monkeypatch: pytest.MonkeyPatch, fake: object) -> None:
+    monkeypatch.setattr(
+        "app.search_providers.manager.SearchProviderManager", lambda: fake
+    )
+
+
+def test_default_search_is_lazy_stops_at_pdf_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Live path runs dorks one at a time and stops once MAX_PDFS PDF URLs are
+    collected, so a dork that already surfaces enough PDFs does not spend
+    search credits on the remaining dorks (credit control)."""
+    called: list[str] = []
+
+    class _FakeManager:
+        async def search(self, query: object) -> _FakeSearchResponse:  # noqa: ANN001
+            called.append(query.keywords)
+            # Each dork surfaces MAX_PDFS PDFs -> the loop must stop after the first.
+            return _FakeSearchResponse(
+                [_FakeSearchResult(f"https://a.com/list{i}.pdf") for i in range(MAX_PDFS)]
+            )
+
+    _patch_manager(monkeypatch, _FakeManager())
+    source = PlanHolderSource()
+    urls = source._default_search_pdfs(["dork1", "dork2", "dork3"])  # noqa: SLF001
+    assert len(urls) == MAX_PDFS
+    assert called == ["dork1"]  # stopped after the first dork
+
+
+def test_default_search_continues_until_cap_met(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When each dork surfaces one PDF, the loop keeps searching until it has
+    MAX_PDFS URLs or the dorks run out — it must not stop before the cap."""
+    called: list[str] = []
+
+    class _FakeManager:
+        async def search(self, query: object) -> _FakeSearchResponse:  # noqa: ANN001
+            called.append(query.keywords)
+            return _FakeSearchResponse(
+                [_FakeSearchResult(f"https://a.com/{query.keywords}.pdf")]
+            )
+
+    _patch_manager(monkeypatch, _FakeManager())
+    source = PlanHolderSource()
+    urls = source._default_search_pdfs(  # noqa: SLF001
+        ["d1", "d2", "d3", "d4", "d5", "d6", "d7", "d8", "d9", "d10", "d11", "d12"]
+    )
+    assert len(urls) == MAX_PDFS
+    assert len(called) == MAX_PDFS  # one dork per PDF needed
+
+
+def test_default_search_skips_already_parsed_pdfs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A pass that already parsed PDFs must not re-collect them — the loop keeps
+    querying dorks until it has MAX_PDFS *unseen* URLs (advance, not repeat)."""
+    called: list[str] = []
+
+    class _FakeManager:
+        async def search(self, query: object) -> _FakeSearchResponse:  # noqa: ANN001
+            called.append(query.keywords)
+            # Every dork surfaces the same two PDFs already parsed.
+            return _FakeSearchResponse(
+                [_FakeSearchResult("https://a.com/list1.pdf"),
+                 _FakeSearchResult("https://a.com/list2.pdf")]
+            )
+
+    _patch_manager(monkeypatch, _FakeManager())
+    source = PlanHolderSource()
+    urls = source._default_search_pdfs(  # noqa: SLF001
+        ["d1", "d2", "d3", "d4", "d5", "d6"],
+        skip={"https://a.com/list1.pdf", "https://a.com/list2.pdf"},
+    )
+    assert urls == []  # everything surfaced is already parsed
+    assert len(called) == len(["d1", "d2", "d3", "d4", "d5", "d6"])  # exhausted all dorks
 
 
 # ---------------------------------------------------------------------------

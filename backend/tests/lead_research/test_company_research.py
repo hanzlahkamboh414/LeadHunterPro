@@ -228,7 +228,7 @@ def test_research_gathers_multiple_search_queries():
         refine_domain=make_fake_refine("acme.com"),
     )
     researcher.research("john@acme.com", "acme.com")
-    assert len(seen) == 5  # screening: email, domain, company, LinkedIn, BBB
+    assert len(seen) == 4  # screening: email, domain, company, LinkedIn (BBB dork dropped — 1% yield)
 
 
 def test_research_fetches_home_about_contact():
@@ -277,6 +277,57 @@ def test_research_empty_search_results():
     )
     profile = researcher.research("john@acme.com", "acme.com")
     assert profile.name == "Acme Construction"
+
+
+def test_research_unreadable_site_without_citations_wipes_identity():
+    """R3 regression (the nsarro@unitedcr.com bug): when the site is unreadable
+    AND the AI returned no source-bearing fact (nothing it could actually have
+    seen), a name/industry/location is fabrication — wipe the identity block so
+    the company reads 'unknown' and can never be scored as a real contractor."""
+    ai_response = {
+        "company_name": "United Construction Company",
+        "industry": "Insurance Restoration Contractor",  # fabricated identity
+        "location": "Somewhere",
+        "website": "https://unitedcr.com",
+        "facts": [
+            {"claim": "Player in restoration", "source_url": "", "source_type": "inferred", "confidence": "unverified"},
+        ],
+    }
+    researcher = CompanyResearcher(
+        ai_ask=make_fake_ai(ai_response),
+        search=make_fake_search(),
+        fetch_page=make_fake_fetch(pages={}),  # every page → unreadable
+        refine_domain=make_fake_refine("unitedcr.com"),
+    )
+    profile = researcher.research("nsarro@unitedcr.com", "unitedcr.com")
+    assert profile.name == ""      # wiped
+    assert profile.industry == ""  # wiped
+    assert profile.location == ""  # wiped
+
+
+def test_research_unreadable_site_keeps_identity_when_cited():
+    """Same unreadable site, but the AI DID produce a source-bearing fact —
+    that citation is the evidence trail, so identity survives the guard."""
+    ai_response = {
+        "company_name": "United Construction Company",
+        "industry": "General Contractor",
+        "location": "Houston, TX",
+        "website": "https://unitedcr.com",
+        "facts": [
+            {"claim": "Founded 1988", "source_url": "https://search-result.com/unitedcr", "source_type": "search_result", "confidence": "verified"},
+        ],
+    }
+    researcher = CompanyResearcher(
+        ai_ask=make_fake_ai(ai_response),
+        search=make_fake_search(),
+        fetch_page=make_fake_fetch(pages={}),  # every page → unreadable
+        refine_domain=make_fake_refine("unitedcr.com"),
+    )
+    profile = researcher.research("nsarro@unitedcr.com", "unitedcr.com")
+    assert profile.name == "United Construction Company"  # kept
+    assert profile.industry == "General Contractor"        # kept
+    assert len(profile.facts) == 1
+    assert profile.facts[0].source_url  # the citation that kept it honest
 
 
 def test_research_with_domain_returns_dict():
@@ -332,7 +383,7 @@ def test_research_deep_runs_deep_queries():
         refine_domain=make_fake_refine("acme.com"),
     )
     researcher.research_deep("acme.com", "Acme Construction")
-    assert len(seen) == 6
+    assert len(seen) == 5  # state-aware license + 4 growth signals
     # Deep queries target growth/need signals, not identity screening
     joined = " ".join(seen).lower()
     assert "license" in joined
@@ -371,3 +422,153 @@ def test_research_deep_ai_error_returns_empty():
         refine_domain=make_fake_refine("acme.com"),
     )
     assert researcher.research_deep("acme.com", "Acme Construction") == []
+
+
+# ---------------------------------------------------------------------------
+# Phase E — labeled page blocks + LinkedIn company lane + exact-page guard
+# ---------------------------------------------------------------------------
+
+def test_gather_site_labels_pages_with_real_urls():
+    """The exact-page fix: every fetched page is a LABELED block stamped with
+    its real URL + human name, so the AI can cite ``/about`` instead of the
+    bare domain root."""
+    researcher = CompanyResearcher(
+        ai_ask=make_fake_ai(_good_ai_response()),
+        search=make_fake_search(),
+        fetch_page=make_fake_fetch(),
+        refine_domain=make_fake_refine("acme.com"),
+    )
+    content = researcher._gather_site(make_fake_fetch({
+        "https://acme.com": "<html>Acme Construction</html>",
+        "https://acme.com/about": "<html>About Acme Construction</html>",
+        "https://acme.com/contact": "<html>Contact us</html>",
+        "https://acme.com/services": "<html>Services</html>",
+    }), "acme.com")
+    assert "[PAGE: Homepage — https://acme.com]" in content
+    assert "[PAGE: About us — https://acme.com/about]" in content
+    assert "[PAGE: Contact — https://acme.com/contact]" in content
+
+
+def test_linkedin_company_lane_extracts_and_labels_in_prompt(monkeypatch):
+    """A linkedin.com/company page surfaced in search results is extracted and
+    injected as a labeled block — the AI can cite company activity on LinkedIn
+    (the plan-approved lane), source_type 'linkedin' downstream."""
+    monkeypatch.delenv("LINKEDIN_LANE_ENABLED", raising=False)
+    captured = {}
+    li_url = "https://www.linkedin.com/company/acme-construction"
+
+    def capturing_ai(prompt: str) -> str:
+        captured["prompt"] = prompt
+        return json.dumps(_good_ai_response())
+
+    researcher = CompanyResearcher(
+        ai_ask=capturing_ai,
+        search=make_fake_search([
+            {"url": li_url, "title": "Acme Construction", "snippet": "Commercial GC"},
+            {"url": "https://example.com/about", "title": "About", "snippet": ""},
+        ]),
+        fetch_page=make_fake_fetch(),
+        refine_domain=make_fake_refine("acme.com"),
+        linkedin_extract=lambda url: "Latest posts: hired 2 estimators, opened Houston office.",
+    )
+    researcher.research("john@acme.com", "acme.com")
+    assert f"[PAGE: LinkedIn — {li_url}]" in captured["prompt"]
+    assert "hired 2 estimators" in captured["prompt"]
+
+
+def test_linkedin_company_lane_skipped_when_disabled(monkeypatch):
+    """LINKEDIN_LANE_ENABLED=0 disables the extract lane entirely."""
+    monkeypatch.setenv("LINKEDIN_LANE_ENABLED", "0")
+    called = []
+
+    researcher = CompanyResearcher(
+        ai_ask=make_fake_ai(_good_ai_response()),
+        search=make_fake_search([
+            {"url": "https://www.linkedin.com/company/acme-construction", "title": "Acme", "snippet": ""},
+        ]),
+        fetch_page=make_fake_fetch(),
+        refine_domain=make_fake_refine("acme.com"),
+        linkedin_extract=lambda url: (called.append(url), "content")[1],
+    )
+    researcher.research("john@acme.com", "acme.com")
+    assert called == []  # lane off -> no extract call
+
+
+def test_linkedin_company_lane_no_search_url_no_extract():
+    """No LinkedIn company URL surfaced -> the extract seam is never called."""
+    called = []
+
+    researcher = CompanyResearcher(
+        ai_ask=make_fake_ai(_good_ai_response()),
+        search=make_fake_search(),  # default results: no linkedin.com/company
+        fetch_page=make_fake_fetch(),
+        refine_domain=make_fake_refine("acme.com"),
+        linkedin_extract=lambda url: (called.append(url), "content")[1],
+    )
+    researcher.research("john@acme.com", "acme.com")
+    assert called == []
+
+
+def test_guard_demotes_bare_root_verified_fact():
+    """Exact-page guard on the company path: a 'verified' fact citing only the
+    bare domain root is demoted to 'unverified' with the honest source_note."""
+    response = {
+        "company_name": "Acme Construction",
+        "industry": "General Contractor",
+        "location": "Dallas, TX",
+        "website": "https://acme.com",
+        "facts": [
+            {"claim": "Full service general contractor", "source_url": "https://acme.com", "source_type": "website", "confidence": "verified"},
+            {"claim": "Founded in 1990", "source_url": "https://acme.com/about", "source_type": "about_page", "confidence": "verified"},
+        ],
+    }
+    researcher = CompanyResearcher(
+        ai_ask=make_fake_ai(response),
+        search=make_fake_search(),
+        fetch_page=make_fake_fetch(),
+        refine_domain=make_fake_refine("acme.com"),
+    )
+    profile = researcher.research("john@acme.com", "acme.com")
+    assert profile.facts[0].confidence == "unverified"
+    assert profile.facts[0].source_note == "source location not reported"
+    assert profile.facts[1].confidence == "verified"  # exact /about page survives
+
+
+def test_research_deep_demotes_bare_root_verified_fact():
+    """The exact-page guard also applies to deep-research growth facts."""
+    researcher = CompanyResearcher(
+        ai_ask=make_fake_ai({
+            "facts": [
+                {"claim": "Expanding", "source_url": "https://acme.com", "source_type": "website", "confidence": "verified"},
+                {"claim": "Won bid", "source_url": "https://news.com/award-2026", "source_type": "news", "confidence": "verified"},
+            ]
+        }),
+        search=make_fake_search(),
+        fetch_page=make_fake_fetch(),
+        refine_domain=make_fake_refine("acme.com"),
+    )
+    facts = researcher.research_deep("acme.com", "Acme Construction")
+    assert facts[0].confidence == "unverified"
+    assert facts[1].confidence == "verified"
+
+
+def test_source_note_roundtrip_from_ai():
+    """source_note from the AI response survives into the parsed fact."""
+    response = {
+        "company_name": "Acme",
+        "industry": "General Contractor",
+        "location": "",
+        "website": "https://acme.com",
+        "facts": [
+            {"claim": "Offices in Austin", "source_url": "https://acme.com/contact", "source_type": "contact_page", "confidence": "verified", "source_note": "Contact page"},
+        ],
+    }
+    researcher = CompanyResearcher(
+        ai_ask=make_fake_ai(response),
+        search=make_fake_search(),
+        fetch_page=make_fake_fetch(),
+        refine_domain=make_fake_refine("acme.com"),
+    )
+    profile = researcher.research("john@acme.com", "acme.com")
+    assert profile.facts[0].source_note == "Contact page"
+    assert profile.facts[0].confidence == "verified"

@@ -242,3 +242,104 @@ class TestTavilyProvider:
         results = provider._parse_results(data, query)
         assert len(results) == 1
         assert results[0].url == "https://valid.com"
+
+    # ------------------------------------------------------------------
+    # /extract capability (LinkedIn lane feeder)
+    # ------------------------------------------------------------------
+
+    def test_supports_extract_capability(self, provider):
+        """The provider advertises extraction so the adapter can find it."""
+        assert provider.supports_extract is True
+
+    @pytest.mark.asyncio
+    async def test_extract_urls_success(self, provider, mock_session):
+        """Successful extract returns {url: trimmed text} for readable pages."""
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.json = AsyncMock(
+            return_value={
+                "results": [
+                    {"url": "https://www.linkedin.com/company/acme", "raw_content": "Acme Construction. 500 followers."},
+                    {"url": "https://www.linkedin.com/company/walled", "raw_content": ""},
+                ],
+                "failed_results": [],
+                "response_time": 0.3,
+            }
+        )
+        mock_response.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_response.__aexit__ = AsyncMock(return_value=False)
+        mock_session.post.return_value = mock_response
+
+        with patch.object(
+            provider, "_get_session", new=AsyncMock(return_value=mock_session)
+        ):
+            out = await provider.extract_urls(
+                ["https://www.linkedin.com/company/acme",
+                 "https://www.linkedin.com/company/walled"]
+            )
+
+        # Empty raw_content -> page absent from the dict, never fabricated.
+        assert set(out) == {"https://www.linkedin.com/company/acme"}
+        assert "500 followers" in out["https://www.linkedin.com/company/acme"]
+        _, kwargs = mock_session.post.call_args
+        assert kwargs["json"]["urls"] == [
+            "https://www.linkedin.com/company/acme",
+            "https://www.linkedin.com/company/walled",
+        ]
+        assert kwargs["json"]["api_key"] == "tvly-test"
+
+    @pytest.mark.asyncio
+    async def test_extract_urls_respects_max_length(self, provider, mock_session):
+        """Per-page output is bounded to max_length."""
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.json = AsyncMock(
+            return_value={
+                "results": [{"url": "https://a.com", "raw_content": "x" * 8000}],
+                "failed_results": [],
+            }
+        )
+        mock_response.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_response.__aexit__ = AsyncMock(return_value=False)
+        mock_session.post.return_value = mock_response
+
+        with patch.object(
+            provider, "_get_session", new=AsyncMock(return_value=mock_session)
+        ):
+            out = await provider.extract_urls(["https://a.com"], max_length=4000)
+        assert len(out["https://a.com"]) == 4000
+
+    @pytest.mark.asyncio
+    async def test_extract_urls_http_error_returns_empty(self, provider, mock_session):
+        """Non-200 /extract -> {} (additive, never fatal)."""
+        mock_response = MagicMock()
+        mock_response.status = 429
+        mock_response.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_response.__aexit__ = AsyncMock(return_value=False)
+        mock_session.post.return_value = mock_response
+
+        with patch.object(
+            provider, "_get_session", new=AsyncMock(return_value=mock_session)
+        ):
+            assert await provider.extract_urls(["https://a.com"]) == {}
+
+    @pytest.mark.asyncio
+    async def test_extract_urls_no_key_returns_empty(self, monkeypatch):
+        """No key configured -> {} without a request (login-walled, not fake)."""
+        monkeypatch.setenv("TAVILY_SEARCH_API_KEY", "")
+        p = TavilySearchProvider(endpoint="https://api.tavily.example/search")
+        assert await p.extract_urls(["https://a.com"]) == {}
+
+    @pytest.mark.asyncio
+    async def test_extract_urls_exception_returns_empty(self, provider, mock_session):
+        """A transport exception -> {} (translated, never raised)."""
+        mock_session.post.side_effect = ConnectionError("network down")
+        with patch.object(
+            provider, "_get_session", new=AsyncMock(return_value=mock_session)
+        ):
+            assert await provider.extract_urls(["https://a.com"]) == {}
+
+    @pytest.mark.asyncio
+    async def test_extract_urls_empty_input(self, provider):
+        """No URLs -> {} without a request."""
+        assert await provider.extract_urls([]) == {}

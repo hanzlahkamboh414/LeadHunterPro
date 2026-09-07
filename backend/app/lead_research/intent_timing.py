@@ -19,6 +19,7 @@ from typing import Any, Callable, Protocol
 
 from app.lead_research.models import AIEvidence, CompanyProfile, IntentAssessment, PersonFindings, TimingAssessment
 from app.lead_research.prompts import intent_timing_prompt
+from app.lead_research.provenance import guard_evidence_location
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,7 @@ def _dict_to_evidence(d: dict[str, Any]) -> AIEvidence:
         source_url=d.get("source_url", ""),
         source_type=d.get("source_type", ""),
         confidence=d.get("confidence", "unverified"),
+        source_note=d.get("source_note", ""),
     )
 
 
@@ -126,18 +128,28 @@ class IntentTimingAnalyzer:
             )
 
         # Parse intent
+        # Exact-page guard (same enforcement as company/person research): a
+        # "verified" observation citing only a bare domain root is demoted, so
+        # intent/timing never claims verification for an unlocatable source.
+        evidence = guard_evidence_location(
+            [_dict_to_evidence(e) for e in data.get("evidence", []) if isinstance(e, dict)]
+        )
+        events = guard_evidence_location(
+            [_dict_to_evidence(e) for e in data.get("timing_events", []) if isinstance(e, dict)]
+        )
+
         intent = IntentAssessment(
             needs_estimation=data.get("needs_estimation", "unknown"),
             signal=data.get("signal", ""),
             reason=data.get("reason", ""),
-            evidence=[_dict_to_evidence(e) for e in data.get("evidence", []) if isinstance(e, dict)],
+            evidence=evidence,
         )
 
         # Parse timing
         timing = TimingAssessment(
             window=data.get("timing_window", "unknown"),
             reason=data.get("timing_reason", ""),
-            events=[_dict_to_evidence(e) for e in data.get("timing_events", []) if isinstance(e, dict)],
+            events=events,
         )
 
         return intent, timing

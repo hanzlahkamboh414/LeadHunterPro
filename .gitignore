@@ -27,6 +27,11 @@ service-account.json
 # and would otherwise stage the whole folder.
 backend/output/
 
+# Generated discovery artifact — UTF-16 scrape log of the Texas CMBL page
+# from the plan-holder discovery runner. No code reads it; it is regenerated
+# every crawl, so it has no value in history (same policy as backend/output/).
+backend/cmbl_links.txt
+
 # VS Code
 .vscode/
 

@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 #: Tavily caps each request at 20 results. Kept as a module constant so a
 #: future API change is a one-line fix, not a search-and-replace.
 _ENDPOINT = "https://api.tavily.com/search"
+_EXTRACT_ENDPOINT = "https://api.tavily.com/extract"
 _MAX_RESULTS = 20
 
 
@@ -49,6 +50,12 @@ class TavilySearchProvider(BaseSearchProvider):
     description = "Tavily Search API"
     priority = 20
 
+    #: Capability flag: this provider can also EXTRACT page content (the
+    #: LinkedIn activity lane). ``RegistryIndexedSearch.extract_many`` only
+    #: offers extraction to providers that advertise this — a provider without
+    #: it is skipped, keeping the architecture provider-agnostic (§4).
+    supports_extract = True
+
     def __init__(
         self,
         api_key: str | None = None,
@@ -56,6 +63,7 @@ class TavilySearchProvider(BaseSearchProvider):
         timeout: int = 10,
         max_results: int = 20,
         endpoint: str = _ENDPOINT,
+        extract_endpoint: str = _EXTRACT_ENDPOINT,
     ) -> None:
         """Initialize the Tavily Search provider.
 
@@ -64,11 +72,13 @@ class TavilySearchProvider(BaseSearchProvider):
             timeout: Request timeout in seconds.
             max_results: Maximum results to request per query (Tavily caps at 20).
             endpoint: Tavily API endpoint (overridable for tests/proxies).
+            extract_endpoint: Tavily /extract endpoint (overridable for tests).
         """
         self._api_key = api_key or self._load_api_key()
         self._timeout = timeout
         self._max_results = min(max(max_results, 1), _MAX_RESULTS)
         self._endpoint = endpoint
+        self._extract_endpoint = extract_endpoint
         self._session: Any = None
 
     @staticmethod
@@ -186,6 +196,61 @@ class TavilySearchProvider(BaseSearchProvider):
                 error=f"Tavily error: {exc}",
                 status="error",
             )
+
+    async def extract_urls(
+        self, urls: list[str], *, max_length: int = 4000
+    ) -> dict[str, str]:
+        """Extract readable page text for the given URLs via Tavily ``/extract``.
+
+        Returns ``{url: trimmed text}`` for URLs that yielded content. A URL
+        that failed (auth, 404, login wall) is simply ABSENT from the dict —
+        never fabricated (§12). Empty output is the honest fallback the
+        LinkedIn lane relies on; a missing key, 401/403, or 429 returns ``{}``
+        rather than raising, because extraction is additive, never fatal.
+
+        Args:
+            urls: URLs to extract (bounded to 20 — Tavily's per-call cap).
+            max_length: Per-page text cap (characters).
+        """
+        if not self._api_key:
+            logger.debug("Tavily extract: no API key configured, skipping")
+            return {}
+        usable = [u for u in urls if (u or "").strip()][:20]
+        if not usable:
+            return {}
+
+        start = time.monotonic()
+        try:
+            session = await self._get_session()
+            headers = {"Content-Type": "application/json", "Accept": "application/json"}
+            payload = {
+                "api_key": self._api_key,
+                "urls": usable,
+                "include_images": False,
+                "extract_depth": "basic",
+            }
+            async with session.post(
+                self._extract_endpoint, json=payload, headers=headers
+            ) as resp:
+                if resp.status != 200:
+                    logger.warning("Tavily extract HTTP %s", resp.status)
+                    return {}
+                data = await resp.json()
+        except Exception as exc:  # translated, never raised (§12)
+            logger.exception("Tavily extract failed: %s", exc)
+            return {}
+
+        out: dict[str, str] = {}
+        for item in data.get("results", []):
+            url = (item.get("url") or "").strip()
+            content = (item.get("raw_content") or "").strip()
+            if url and content:
+                out[url] = content[:max_length]
+        logger.info(
+            "Tavily extract returned %d page(s) in %.0f ms", len(out),
+            (time.monotonic() - start) * 1000,
+        )
+        return out
 
     def _build_payload(self, query: SearchQuery) -> dict[str, Any]:
         """Build the JSON request body.

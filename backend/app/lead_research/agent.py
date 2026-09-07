@@ -24,6 +24,22 @@ from app.lead_research.scoring import LeadScorer
 
 logger = logging.getLogger(__name__)
 
+#: Substring that marks a dossier rejected at the dead-domain MX gate. Used by
+#: the pipeline (don't persist/emit dead leads) and store cleanup (delete
+#: already-stored dead dossiers), so the marker lives here — one definition.
+DEAD_DOMAIN_MARKER = "no MX record"
+
+
+def _default_domain_delivers_email(domain: str) -> bool:
+    """Default dead-domain gate — real MX check via :func:`domain_delivers_email`.
+
+    Lives at module level so the class references a stable callable
+    (tests can still inject a stub through the constructor seam).
+    """
+    from app.lead_research.company_research import domain_delivers_email
+
+    return domain_delivers_email(domain)
+
 #: Industry keywords that flag a company as construction-related, triggering
 #: the deep-dive (growth/need) research stage.
 _CONSTRUCTION_KEYWORDS = (
@@ -72,14 +88,25 @@ class AILeadResearchAgent:
         person_researcher: PersonResearcherAI | None = None,
         intent_analyzer: IntentTimingAnalyzer | None = None,
         scorer: LeadScorer | None = None,
+        domain_delivers_email: Callable[[str], bool] | None = None,
     ) -> None:
         self._company = company_researcher or CompanyResearcher()
         self._person = person_researcher or PersonResearcherAI()
         self._intent = intent_analyzer or IntentTimingAnalyzer()
         self._scorer = scorer or LeadScorer()
+        # Dead-domain gate seam (defaults to the real MX check). Tests inject
+        # a stub so no network is hit offline.
+        self._domain_delivers_email = domain_delivers_email or _default_domain_delivers_email
 
-    def research(self, email: str, domain: str) -> LeadDossier:
+    def research(
+        self, email: str, domain: str, *, trade: str = "", location: str = "",
+    ) -> LeadDossier:
         """Run the full pipeline for one email+domain.
+
+        ``trade``/``location`` (optional) are the known construction context
+        from the discovery layer (plan-holder/bid list) — threaded into the
+        company research so the AI anchors on the construction-bid provenance
+        instead of drifting to generic (e.g. IT) results.
 
         Returns a complete LeadDossier.
         """
@@ -116,9 +143,21 @@ class AILeadResearchAgent:
             logger.info("Triage: %s has generic local part → generic section", email)
             return dossier
 
+        # Stage 0.5: dead-domain gate. A domain that resolves no MX record
+        # cannot receive email, so the address is undeliverable — such leads
+        # are skipped outright (never contact_now), and the expensive AI
+        # company/person pipeline is never started for them (credit saver).
+        if not self._domain_delivers_email(domain):
+            dossier.fit = f"Dead/expired domain — {DEAD_DOMAIN_MARKER} (undeliverable)"
+            dossier.recommendation = "skip"
+            logger.info("Triage: %s has dead/expired domain %s → skip", email, domain)
+            return dossier
+
         # Stage 1: company research
         try:
-            company_result = self._company.research_with_domain(email, domain)
+            company_result = self._company.research_with_domain(
+                email, domain, trade=trade, location=location,
+            )
             dossier.refined_domain = company_result.get("refined_domain", domain)
             dossier.refined_company = company_result.get("name", "")
 
@@ -167,6 +206,10 @@ class AILeadResearchAgent:
                 deep_facts = self._company.research_deep(
                     domain=dossier.refined_domain or domain,
                     company_name=dossier.company.name,
+                    # Stage 1 already researched the company's location; pass it
+                    # so the contractor-licence query hits the RIGHT state
+                    # registry instead of a hardcoded one.
+                    location=dossier.company.location,
                 )
                 if deep_facts:
                     dossier.company.facts.extend(deep_facts)

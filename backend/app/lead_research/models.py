@@ -11,6 +11,7 @@ the gathered evidence.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -18,12 +19,19 @@ from typing import Any
 @dataclass
 class AIEvidence:
     """One traceable claim. ``confidence`` is ``verified`` only when a
-    ``source_url`` backs the claim; otherwise ``unverified``."""
+    ``source_url`` backs the claim; otherwise ``unverified``.
+
+    ``source_note`` is the human-readable WHERE — the exact page the claim
+    was observed on ("About us", "Contact page", "LinkedIn company page").
+    The pipeline demotes a "verified" claim whose source is only a bare
+    domain root with no location reported, so an unlocatable citation is
+    never presented as verified."""
 
     claim: str
     source_url: str = ""
     source_type: str = ""
     confidence: str = "verified"
+    source_note: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -31,6 +39,7 @@ class AIEvidence:
             "source_url": self.source_url,
             "source_type": self.source_type,
             "confidence": self.confidence,
+            "source_note": self.source_note,
         }
 
     @staticmethod
@@ -40,6 +49,7 @@ class AIEvidence:
             source_url=d.get("source_url", ""),
             source_type=d.get("source_type", ""),
             confidence=d.get("confidence", "verified"),
+            source_note=d.get("source_note", ""),
         )
 
 
@@ -81,6 +91,12 @@ class PersonFindings:
     role: str = ""
     role_relevance: bool = False
     bound: bool = False
+    linkedin: str = ""
+    #: Phone is a FUTURE-ready field: the current research pipeline does not
+    #: collect it (contractor sites rarely expose it), so it is empty today.
+    #: Kept in the contract so a later phone-collection step is a pure fill-in,
+    #: and the Contacts view can render a (honest, empty) Phone column now.
+    phone: str = ""
     evidence: list[AIEvidence] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -89,6 +105,8 @@ class PersonFindings:
             "role": self.role,
             "role_relevance": self.role_relevance,
             "bound": self.bound,
+            "linkedin": self.linkedin,
+            "phone": self.phone,
             "evidence": [e.to_dict() for e in self.evidence],
         }
 
@@ -99,6 +117,8 @@ class PersonFindings:
             role=d.get("role", ""),
             role_relevance=d.get("role_relevance", False),
             bound=d.get("bound", False),
+            linkedin=d.get("linkedin", ""),
+            phone=d.get("phone", ""),
             evidence=[AIEvidence.from_dict(e) for e in d.get("evidence", [])],
         )
 
@@ -152,6 +172,29 @@ class TimingAssessment:
             reason=d.get("reason", ""),
             events=[AIEvidence.from_dict(e) for e in d.get("events", [])],
         )
+
+
+@dataclass
+class LeadMeta:
+    """User organization metadata for one dossier — deliberately SEPARATE from
+    :class:`LeadDossier` (which holds the researched payload), so a future
+    pipeline re-research can never wipe the user's folders/tags.
+
+    ``folder`` is the one primary folder (exclusive); ``tags`` is the free-form
+    multi-label list. Both live in their own columns on the ``dossiers`` row.
+    """
+
+    folder: str = ""
+    tags: list[str] = field(default_factory=list)
+
+    @staticmethod
+    def from_db(folder: str, tags_json: str) -> "LeadMeta":
+        """Build from raw column values (``tags`` is a JSON array string)."""
+        try:
+            tags = json.loads(tags_json) if tags_json else []
+        except (ValueError, TypeError):
+            tags = []
+        return LeadMeta(folder=folder or "", tags=[t for t in tags if isinstance(t, str)])
 
 
 @dataclass

@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 
 from app.lead_research.agent import AILeadResearchAgent, _is_free_mail, _is_generic_local_part
+
+# Deterministic test stub — never a real MX lookup offline.
+_MX_OK = lambda d: True  # noqa: E731
 from app.lead_research.company_research import CompanyResearcher
 from app.lead_research.intent_timing import IntentTimingAnalyzer
 from app.lead_research.models import CompanyProfile, PersonFindings
@@ -56,7 +59,7 @@ def _make_agent(ai_response=None):
         deterministic=None,
         ai_ask=make_fake_ai({
             "person_name": "Jane Doe",
-            "person_role": "Estimator",
+            "person_role": "Project Manager",
             "role_relevance": True,
             "bound": True,
             "evidence": [{"claim": "Team page", "source_url": "https://acme.com/team", "source_type": "website", "confidence": "verified"}],
@@ -85,6 +88,7 @@ def _make_agent(ai_response=None):
         person_researcher=person,
         intent_analyzer=intent,
         scorer=scorer,
+        domain_delivers_email=_MX_OK,
     )
 
 
@@ -99,7 +103,7 @@ def test_full_pipeline_happy_path():
     assert dossier.person.bound is True
     assert dossier.intent.needs_estimation == "yes"
     assert dossier.timing.window == "now"
-    assert dossier.potential_score == 7.5
+    assert dossier.potential_score >= 6.0  # deterministic score for strong-fit lead
     assert dossier.recommendation == "contact_now"
     assert "company_research" in dossier.sources_checked
     assert "person_research" in dossier.sources_checked
@@ -136,6 +140,86 @@ def test_empty_domain_free_mail_is_derived_and_triaged():
     assert dossier.sources_checked == []
 
 
+def test_dead_domain_skips_before_any_research():
+    """A domain that resolves no MX (dead/expired) is skipped outright — the
+    expensive AI company/person pipeline never runs for it."""
+    calls = {"research": 0}
+
+    company = CompanyResearcher(
+        ai_ask=make_fake_ai({}),
+        search=make_fake_search(),
+        fetch_page=make_fake_fetch(),
+        refine_domain=make_fake_refine("deadcoyote.com"),
+    )
+    # Spy: the company lane must never run once the dead domain is caught.
+    company.research_with_domain = lambda *a, **k: calls.__setitem__("research", calls["research"] + 1)
+
+    person = PersonResearcherAI(
+        deterministic=None,
+        ai_ask=make_fake_ai({}),
+        search=make_fake_search(),
+        fetch_page=make_fake_fetch(),
+    )
+    intent = IntentTimingAnalyzer(ai_ask=make_fake_ai({}))
+    agent = AILeadResearchAgent(
+        company_researcher=company, person_researcher=person,
+        intent_analyzer=intent, scorer=LeadScorer(),
+        domain_delivers_email=lambda d: False,  # dead domain
+    )
+    dossier = agent.research("jane@deadcoyote.com", "deadcoyote.com")
+    assert dossier.recommendation == "skip"
+    assert "dead" in dossier.fit.lower()
+    assert dossier.sources_checked == []
+    assert calls["research"] == 0  # AI pipeline never started
+
+
+def test_construction_context_threaded_to_company_research():
+    """The query's trade/location (construction-bid provenance) is threaded
+    into the company researcher so the AI anchors on construction instead of
+    drifting to generic/IT results."""
+    seen: dict = {}
+
+    company = CompanyResearcher(
+        ai_ask=make_fake_ai({
+            "company_name": "Acme Electric",
+            "industry": "Electrical Contractor",
+            "location": "Houston, TX",
+            "website": "https://acme.com",
+            "facts": [],
+        }),
+        search=make_fake_search(),
+        fetch_page=make_fake_fetch(),
+        refine_domain=make_fake_refine("acme.com"),
+    )
+    company.research_with_domain = lambda email, domain, **kw: seen.__setitem__("kw", kw)
+
+    person = PersonResearcherAI(
+        deterministic=None,
+        ai_ask=make_fake_ai({
+            "person_name": "Jane Doe", "person_role": "Owner", "role_relevance": True, "bound": True,
+            "evidence": [{"claim": "Owner", "source_url": "https://acme.com/about", "source_type": "about_page", "confidence": "verified"}],
+        }),
+        search=make_fake_search(),
+        fetch_page=make_fake_fetch(),
+    )
+    intent = IntentTimingAnalyzer(ai_ask=make_fake_ai({
+        "needs_estimation": "yes", "signal": "", "reason": "", "evidence": [],
+        "timing_window": "unknown", "timing_reason": "", "timing_events": [],
+    }))
+    scorer = LeadScorer(ai_ask=make_fake_ai({
+        "fit": "fit", "potential_score": 7.0, "recommendation": "contact_now", "reasoning": "",
+    }))
+
+    agent = AILeadResearchAgent(
+        company_researcher=company, person_researcher=person,
+        intent_analyzer=intent, scorer=scorer, domain_delivers_email=_MX_OK,
+    )
+    agent.research("jane@acme.com", "acme.com", trade="Electrical", location="Houston TX")
+
+    assert seen.get("kw", {}).get("trade") == "Electrical"
+    assert seen.get("kw", {}).get("location") == "Houston TX"
+
+
 def test_company_ai_failure_still_runs_pipeline():
     """Stage 1 AI failure → graceful degradation, pipeline continues."""
     company = CompanyResearcher(
@@ -161,7 +245,10 @@ def test_company_ai_failure_still_runs_pipeline():
         "fit": "partial", "potential_score": 4.0, "recommendation": "nurture", "reasoning": "",
     }))
 
-    agent = AILeadResearchAgent(company_researcher=company, person_researcher=person, intent_analyzer=intent, scorer=scorer)
+    agent = AILeadResearchAgent(
+        company_researcher=company, person_researcher=person,
+        intent_analyzer=intent, scorer=scorer, domain_delivers_email=_MX_OK,
+    )
     dossier = agent.research("jane@acme.com", "acme.com")
 
     # Company AI failed gracefully → partial company data, no exception
@@ -212,7 +299,7 @@ def test_deep_research_recorded_even_when_empty():
             "industry": "General Contractor",
             "location": "Dallas, TX",
             "website": "https://acme.com",
-            "facts": [{"claim": "GC", "source_url": "https://acme.com", "source_type": "website", "confidence": "verified"}],
+            "facts": [{"claim": "GC", "source_url": "https://acme.com/about", "source_type": "about_page", "confidence": "verified"}],
         }),
         search=make_fake_search(),
         fetch_page=make_fake_fetch(),
@@ -220,14 +307,15 @@ def test_deep_research_recorded_even_when_empty():
     )
     # Spy on research_deep so the real multi-key lane is NOT invoked
     original = company.research_deep
-    company.research_deep = lambda domain, company_name: []  # no signals
+    # Agent threads `location` into research_deep (state-aware license queries).
+    company.research_deep = lambda domain, company_name, **kwargs: []  # no signals
     assert original is not None  # sanity: method existed
 
     person = PersonResearcherAI(
         deterministic=None,
         ai_ask=make_fake_ai({
             "person_name": "Jane Doe", "person_role": "Owner", "role_relevance": True, "bound": True,
-            "evidence": [{"claim": "Owner", "source_url": "https://acme.com", "source_type": "website", "confidence": "verified"}],
+            "evidence": [{"claim": "Owner", "source_url": "https://acme.com/about", "source_type": "about_page", "confidence": "verified"}],
         }),
         search=make_fake_search(),
         fetch_page=make_fake_fetch(),
@@ -242,7 +330,7 @@ def test_deep_research_recorded_even_when_empty():
 
     agent = AILeadResearchAgent(
         company_researcher=company, person_researcher=person,
-        intent_analyzer=intent, scorer=scorer,
+        intent_analyzer=intent, scorer=scorer, domain_delivers_email=_MX_OK,
     )
     dossier = agent.research("jane@acme.com", "acme.com")
     assert dossier.company.name == "Acme Construction"

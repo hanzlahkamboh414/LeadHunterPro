@@ -6,29 +6,58 @@ the shared search-provider registry (CLAUDE.md §4/§5): every enabled provider 
 tried in priority order until one returns results. With no provider registered
 or enabled it returns ``[]`` — the architecture never depends on a single
 provider, and live search is purely additive.
+
+This adapter is also the ONE seam where the persistent search cache
+(:mod:`app.search_providers.cache`) is applied, so every research stage —
+company screening, deep research, person research, LinkedIn extract — shares a
+single implementation instead of caching in four places (CLAUDE.md §14). The
+cache lives above the registry and below the stages, so it stays
+provider-agnostic: swapping Tavily out changes nothing here.
 """
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
+from app.search_providers.cache import get_search_cache
 from app.search_providers.models import SearchQuery
 from app.search_providers.registry import get_registry
 
+logger = logging.getLogger(__name__)
+
 
 class RegistryIndexedSearch:
-    """A ``search`` callable backed by the shared search-provider registry."""
+    """A ``search`` callable backed by the shared search-provider registry.
 
-    def __init__(self, max_results_per_query: int = 5) -> None:
+    Args:
+        max_results_per_query: results requested per query.
+        use_cache: read/write the persistent search cache. ``False`` forces
+            every query to hit a live provider (paid) — used by callers that
+            must prove live behaviour rather than replay it.
+    """
+
+    def __init__(self, max_results_per_query: int = 5, *, use_cache: bool = True) -> None:
         self._max = max_results_per_query
+        self._cache = get_search_cache() if use_cache else None
 
     def __call__(self, query: str) -> list[dict[str, Any]]:
+        if self._cache is not None:
+            cached = self._cache.get(query, self._max)
+            if cached is not None:
+                return cached
         providers = [p for p in get_registry().get_enabled()]
         if not providers:
+            # CLAUDE.md §5 — never go quiet about an empty registry.
+            logger.warning(
+                "NO SEARCH PROVIDERS REGISTERED — live search skipped for query=%r", query
+            )
             return []
         for provider in providers:
             results = _run_provider(provider, query, self._max)
             if results:
+                if self._cache is not None:
+                    self._cache.set(query, self._max, results)
                 return results
         return []
 
@@ -46,6 +75,10 @@ class RegistryIndexedSearch:
         then every provider session is closed inside that same loop — the
         exact pattern ``PlanHolderSource._default_search`` already relies on.
 
+        Cached queries are answered from disk and NEVER dispatched, so a
+        re-researched domain or a second lead at the same company costs zero
+        provider credits. Only the misses go live, in one batch.
+
         Returns one list of result-dicts per query (same length/order as
         ``queries``); a failed query yields ``[]``.
         """
@@ -57,6 +90,32 @@ class RegistryIndexedSearch:
         from app.search_providers.models import SearchQuery
         from app.search_providers.registry import get_registry
 
+        # Resolve cache hits first; only the misses are dispatched live. The
+        # index map keeps the returned order identical to ``queries``.
+        out: list[list[dict[str, Any]]] = [[] for _ in queries]
+        pending: list[tuple[int, str]] = []
+        for idx, q in enumerate(queries):
+            cached = self._cache.get(q, self._max) if self._cache is not None else None
+            if cached is not None:
+                out[idx] = cached
+            else:
+                pending.append((idx, q))
+
+        if not pending:
+            logger.info(
+                "SEARCH CACHE served all %d queries from cache (0 provider credits)",
+                len(queries),
+            )
+            return out
+
+        if self._cache is not None and len(pending) < len(queries):
+            logger.info(
+                "SEARCH CACHE %d/%d queries from cache, %d dispatched live",
+                len(queries) - len(pending),
+                len(queries),
+                len(pending),
+            )
+
         manager = SearchProviderManager()
 
         async def _run_all() -> list[Any]:
@@ -64,7 +123,7 @@ class RegistryIndexedSearch:
                 responses = await asyncio.gather(
                     *[
                         manager.search(SearchQuery(keywords=q, num_results=self._max))
-                        for q in queries
+                        for _, q in pending
                     ],
                     return_exceptions=True,
                 )
@@ -81,24 +140,95 @@ class RegistryIndexedSearch:
         try:
             responses = asyncio.run(_run_all())
         except Exception:  # noqa: BLE001 — a batch failure is not fatal
-            return [[] for _ in queries]
+            return out
 
-        out: list[list[dict[str, Any]]] = []
-        for resp in responses:
+        for (idx, q), resp in zip(pending, responses):
             if isinstance(resp, Exception) or not resp or not getattr(resp, "results", None):
-                out.append([])
                 continue
-            out.append(
-                [
-                    {
-                        "url": r.url,
-                        "snippet": r.snippet or "",
-                        "title": r.title or "",
-                    }
-                    for r in resp.results[: self._max]
-                ]
-            )
+            results = [
+                {
+                    "url": r.url,
+                    "snippet": r.snippet or "",
+                    "title": r.title or "",
+                }
+                for r in resp.results[: self._max]
+            ]
+            out[idx] = results
+            if self._cache is not None:
+                self._cache.set(q, self._max, results)
         return out
+
+    def extract_many(self, urls: list[str], *, max_length: int = 4000) -> dict[str, str]:
+        """Extract page text for the given URLs via the first ENABLED provider
+        that advertises extraction (``supports_extract``), in ONE event loop.
+
+        Same single-loop rule as ``search_many`` (shared aiohttp sessions must
+        stay in one loop). Returns ``{url: trimmed text}`` for pages that
+        yielded content; returns ``{}`` on any failure or when no enabled
+        provider has extraction — extraction is additive, never fabricated,
+        so the LinkedIn lane treats an empty dict as "no page readable".
+
+        Extraction is billed PER URL, so already-extracted pages are served
+        from the persistent cache and only the unseen URLs are dispatched.
+        """
+        if not urls:
+            return {}
+        import asyncio
+
+        from app.search_providers.registry import get_registry
+
+        out: dict[str, str] = {}
+        pending: list[str] = []
+        for url in urls:
+            cached = (
+                self._cache.get_extract(url, max_length)
+                if self._cache is not None
+                else None
+            )
+            if cached:
+                out[url] = cached
+            else:
+                pending.append(url)
+        if not pending:
+            return out
+
+        provider = next(
+            (p for p in get_registry().get_enabled()
+             if getattr(p, "supports_extract", False)),
+            None,
+        )
+        if provider is None:
+            return out
+
+        async def _run() -> dict[str, str]:
+            try:
+                extract = getattr(provider, "extract_urls", None)
+                if extract is None:
+                    return {}
+                return await extract(list(pending), max_length=max_length)
+            finally:
+                close = getattr(provider, "close", None)
+                if close:
+                    try:
+                        await close()
+                    except Exception:  # noqa: BLE001 — closing is best-effort
+                        pass
+
+        try:
+            fetched = asyncio.run(_run())
+        except Exception:  # noqa: BLE001 — extract failure is not fatal
+            return out
+        for url, text in (fetched or {}).items():
+            if not text:
+                continue
+            out[url] = text
+            if self._cache is not None:
+                self._cache.set_extract(url, max_length, text)
+        return out
+
+    def extract_one(self, url: str, *, max_length: int = 4000) -> str:
+        """Extract ONE URL's text (convenience over ``extract_many``)."""
+        return self.extract_many([url], max_length=max_length).get(url, "")
 
 
 def _run_provider(provider: Any, query: str, num: int) -> list[dict[str, Any]]:

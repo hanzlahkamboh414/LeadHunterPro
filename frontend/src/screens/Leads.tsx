@@ -1,0 +1,1153 @@
+import { useCallback, useLayoutEffect, useMemo, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useNavigate, useLocation, useSearchParams } from "react-router-dom";
+import { Download, CheckSquare, Inbox, Layers, Square, Tag, Trash2, X } from "lucide-react";
+import { api } from "../api/client";
+import { Spinner } from "../components/StatusChip";
+import ManageMenu from "../components/ManageMenu";
+import type { EvidenceFact, LeadSummary } from "../types";
+import { recommendationBadge, recommendationLabel, scoreColor } from "../lib/format";
+
+type RecFilter = "" | "contact_now" | "nurture" | "skip";
+type BoundFilter = "" | "true" | "false";
+
+// Scroll + visited persistence.
+//
+// <main> is the app's scroller (App.tsx pins the shell to h-screen). We still
+// check the document element as a fallback: reading the max and writing to both
+// is correct whichever one actually scrolls, and writing to a non-scrolling
+// element is a harmless no-op. That keeps restoration working if a screen ever
+// introduces its own scroll container.
+//
+// History: while the shell used `min-h-screen` (a MINIMUM), it grew with its
+// content, <main> never got a bounded height, its overflow-y-auto did nothing,
+// and the WINDOW scrolled — so `main.scrollTop` read 0 forever and every restore
+// attempt silently did nothing.
+function scrollEls(): HTMLElement[] {
+  const els: HTMLElement[] = [];
+  const main = document.querySelector("main");
+  if (main) els.push(main as HTMLElement);
+  const doc = (document.scrollingElement as HTMLElement) || document.documentElement;
+  if (doc && doc !== main) els.push(doc);
+  return els;
+}
+
+function currentScrollTop(): number {
+  return scrollEls().reduce((max, el) => Math.max(max, el.scrollTop), 0);
+}
+
+// Kept in a module-level variable (not consumed on read): this is an SPA — the
+// /leads -> /leads/:email round trip unmounts Leads but never reloads the page.
+// It is also StrictMode-safe (dev mounts/unmounts/remounts): a consume-then-
+// restore let the throwaway first mount eat the value and left the real one at
+// the top. Re-applying the same offset is idempotent.
+let savedScrollTop = 0;
+
+const VISITED_KEY = "leads-visited";
+// The row the user opened LAST — a distinct "you were here" accent, so coming
+// back answers "kis email par click kiya tha" at a glance.
+const LAST_OPENED_KEY = "leads-last-opened";
+
+function saveLeadsScroll() {
+  savedScrollTop = currentScrollTop();
+}
+
+function loadVisited(): Set<string> {
+  try {
+    const raw = localStorage.getItem(VISITED_KEY);
+    return new Set(raw ? (JSON.parse(raw) as string[]) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function loadLastOpened(): string {
+  try {
+    return localStorage.getItem(LAST_OPENED_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+export default function Leads() {
+  const [params, setParams] = useSearchParams();
+  const location = useLocation();
+  const navigate = useNavigate();
+
+  // The URL is the source of truth for filters (so Dashboard stat cards can
+  // deep-link straight into a filtered view). Mutators rewrite the URL.
+  const rec = (params.get("recommendation") as RecFilter) ?? "";
+  const bound: BoundFilter =
+    params.get("bound") === "true"
+      ? "true"
+      : params.get("bound") === "false"
+        ? "false"
+        : "";
+  const minScore = params.get("min_score") ?? "";
+  const src = (params.get("source") ?? "").trim();
+  const q = (params.get("q") ?? "").trim().toLowerCase();
+  const folder = (params.get("folder") ?? "").trim();
+  const tag = (params.get("tag") ?? "").trim();
+  const date = (params.get("date") ?? "").trim();
+  // A date/tag search is GLOBAL (har folder me dhundhta hai) — no single place
+  // is active in the rail while it runs, so the view honestly shows the cross-
+  // place recall, not the Unfiled inbox.
+  const inGlobalSearch = !folder && (!!date || !!tag);
+
+  function setRec(v: RecFilter) {
+    const p = new URLSearchParams(params);
+    if (v) p.set("recommendation", v);
+    else p.delete("recommendation");
+    setParams(p, { replace: true });
+  }
+  function setBound(v: BoundFilter) {
+    const p = new URLSearchParams(params);
+    if (v) p.set("bound", v);
+    else p.delete("bound");
+    setParams(p, { replace: true });
+  }
+  function setMinScore(v: string) {
+    const p = new URLSearchParams(params);
+    if (v) p.set("min_score", v);
+    else p.delete("min_score");
+    setParams(p, { replace: true });
+  }
+  function setSource(v: string) {
+    const p = new URLSearchParams(params);
+    if (v) p.set("source", v);
+    else p.delete("source");
+    setParams(p, { replace: true });
+  }
+  function setFolder(v: string) {
+    const p = new URLSearchParams(params);
+    if (v) p.set("folder", v);
+    else p.delete("folder");
+    setParams(p, { replace: true });
+  }
+  function setTag(v: string) {
+    const p = new URLSearchParams(params);
+    if (v) p.set("tag", v);
+    else p.delete("tag");
+    setParams(p, { replace: true });
+  }
+  function setDate(v: string) {
+    const p = new URLSearchParams(params);
+    if (v) p.set("date", v);
+    else p.delete("date");
+    setParams(p, { replace: true });
+  }
+
+  // Set a PLACE (folder) + optional tag ATOMICALLY in one URL write — chip
+  // clicks must never leave a stale folder while a tag is applied (two separate
+  // setters would race on the same base params). Date is cleared because a
+  // place switch resets the cross-place recall too.
+  function setPlace(folderValue: string, tagValue: string) {
+    const p = new URLSearchParams(params);
+    if (folderValue) p.set("folder", folderValue);
+    else p.delete("folder");
+    if (tagValue) p.set("tag", tagValue);
+    else p.delete("tag");
+    p.delete("date");
+    setParams(p, { replace: true });
+  }
+  const [manageOpen, setManageOpen] = useState(false);
+
+  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
+    queryKey: ["leads", rec, bound, minScore, src, folder, tag, date],
+    queryFn: () =>
+      api.listLeads({
+        recommendation: rec || undefined,
+        bound: bound === "" ? undefined : bound === "true",
+        min_score: minScore === "" ? undefined : Number(minScore),
+        source: src || undefined,
+        folder: folder || undefined,
+        tag: tag || undefined,
+        date: date || undefined,
+        limit: 1000,
+      }),
+  });
+
+  // Folders catalog (Phase B.2) — persisted, empty-allowed clickable groups.
+  // The filter + manage panel read from here so a folder exists BEFORE any
+  // lead is in it ("pehle folder banao, phir leads move karo").
+  const foldersQ = useQuery({
+    queryKey: ["folders"],
+    queryFn: () => api.listFolders(),
+  });
+  // Global extraction-date options (every dossier, folders included) — the
+  // "kis tareekh ko kya nikla" dropdown reads from here, not the current page,
+  // so a folderized lead's date stays selectable.
+  const datesQ = useQuery({
+    queryKey: ["dates"],
+    queryFn: () => api.listDates(),
+  });
+  // Global tag counts (every dossier, folders included) — feeds the tag chips
+  // + Manage menu. A dedicated All-scoped read, so a tag on a FOLDERED lead
+  // still shows (the current view sees only one place). Shares the ["leads"]
+  // prefix, so organize/delete auto-refreshes it with the lead list.
+  const tagsQ = useQuery({
+    queryKey: ["leads", { scope: "org-tags" }],
+    queryFn: () => api.listLeads({ folder: "*", limit: 1000 }),
+  });
+  const globalTagCounts = useMemo(() => {
+    const m = new Map<string, number>();
+    (tagsQ.data ?? []).forEach((l) => l.tags.forEach((t) => m.set(t, (m.get(t) ?? 0) + 1)));
+    return m;
+  }, [tagsQ.data]);
+  const globalTags = useMemo(() => [...globalTagCounts.keys()].sort(), [globalTagCounts]);
+
+  const [expandedEmail, setExpandedEmail] = useState<string | null>(null);
+  const detailQ = useQuery({
+    queryKey: ["lead", expandedEmail],
+    queryFn: () => (expandedEmail ? api.getLead(expandedEmail) : null),
+    enabled: !!expandedEmail,
+  });
+
+  // --- Data management (user-controlled): users can dismiss junk/dead leads. ---
+  const qc = useQueryClient();
+  const [busyEmail, setBusyEmail] = useState<string | null>(null);
+  const [junkNote, setJunkNote] = useState("");
+  const del = useMutation({
+    mutationFn: (email: string) => api.deleteLead(email),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["leads"] });
+      qc.invalidateQueries({ queryKey: ["folders"] });
+    },
+  });
+  const clearJunk = useMutation({
+    mutationFn: () => api.clearJunk(),
+    onSuccess: (res) => {
+      qc.invalidateQueries({ queryKey: ["leads"] });
+      qc.invalidateQueries({ queryKey: ["folders"] });
+      setJunkNote(
+        res.removed > 0
+          ? `Clear junk: ${res.removed} dead/junk lead(s) removed.`
+          : "Clear junk: koi junk lead nahi mili (sab actionable hain).",
+      );
+    },
+  });
+
+  async function handleDelete(email: string) {
+    if (!window.confirm(`Delete ${email}?\n\nYe lead remove ho jayegi (dossier + discovery cache se).`)) {
+      return;
+    }
+    setBusyEmail(email);
+    try {
+      await del.mutateAsync(email);
+    } finally {
+      setBusyEmail(null);
+    }
+  }
+
+  async function handleClearJunk() {
+    if (!window.confirm("Saari junk leads delete karein?\n\nIska matlab: hidden skip/dead-domain dossiers (jinke paas dead domain, non-construction, ya score < 3.0 hain) remove ho jayengi.")) {
+      return;
+    }
+    setJunkNote("");
+    await clearJunk.mutateAsync();
+  }
+
+  // --- Organization (Phase B): folders + tags per lead, bulk assign, manage. ---
+  const organize = useMutation({
+    mutationFn: (v: { email: string; folder: string; tags: string[] }) =>
+      api.organizeLead(v.email, { folder: v.folder, tags: v.tags }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["leads"] });
+      qc.invalidateQueries({ queryKey: ["folders"] }); // folder counts changed
+    },
+  });
+
+  const [editEmail, setEditEmail] = useState<string | null>(null);
+  const [editFolder, setEditFolder] = useState("");
+  const [editTags, setEditTags] = useState("");
+  function startEdit(email: string) {
+    const lead = leads.find((l) => l.email === email);
+    setEditEmail(email);
+    setEditFolder(lead?.folder ?? "");
+    setEditTags((lead?.tags ?? []).join(", "));
+  }
+  async function saveEdit() {
+    if (!editEmail) return;
+    const tags = editTags.split(",").map((s) => s.trim()).filter(Boolean);
+    await organize.mutateAsync({ email: editEmail, folder: editFolder.trim(), tags });
+    setEditEmail(null);
+  }
+
+  const [bulkFolder, setBulkFolder] = useState("");
+  const [bulkTagsIn, setBulkTagsIn] = useState("");
+  const [bulkBusy, setBulkBusy] = useState(false);
+  async function applyBulk() {
+    if (selected.size === 0) return;
+    const addTags = bulkTagsIn.split(",").map((s) => s.trim()).filter(Boolean);
+    const folderToSet = bulkFolder.trim();
+    setBulkBusy(true);
+    try {
+      await Promise.allSettled(
+        [...selected].map((email) => {
+          const lead = leads.find((l) => l.email === email);
+          const merged = [...new Set([...(lead?.tags ?? []), ...addTags])];
+          return organize.mutateAsync({
+            email,
+            folder: folderToSet || (lead?.folder ?? ""),
+            tags: merged,
+          });
+        }),
+      );
+      setBulkFolder("");
+      setBulkTagsIn("");
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
+  // Folder/tag rename + delete + new-folder creation live in the ⚙ Manage
+  // dropdown (each label row has its own ✏️/🗑 buttons); browsing lives in the
+  // chip bar above the table.
+
+  const leads = useMemo(() => {
+    // ORDER is the backend's job: contact_now -> nurture -> skip, then score
+    // (high first), then newest — returned already sorted by list_leads. A
+    // client-side re-sort here is exactly what used to scramble the order
+    // ("data ki tarteeb achi ni hai"), so the frontend only FILTERS and
+    // preserves the server order as-is.
+    const base = data ?? [];
+    if (!q) return base;
+    return base.filter(
+      (l) =>
+        l.company.toLowerCase().includes(q) ||
+        l.email.toLowerCase().includes(q) ||
+        (l.person || "").toLowerCase().includes(q),
+    );
+  }, [data, q]);
+
+  // Distinct source runs + folder/tag options (with counts), for the filters —
+  // same derived-options pattern as sourceOptions.
+  const sourceOptions = useMemo(() => {
+    const set = new Set<string>();
+    (data ?? []).forEach((l) => l.source && set.add(l.source));
+    return [...set].sort();
+  }, [data]);
+  // Folder + tag names for the assign inputs' datalists (the catalog feeds the
+  // bulk bar + row editor suggestions; the sidebar renders the rail itself).
+  const catalog = foldersQ.data;
+  const folderList = useMemo(
+    () => (catalog?.folders ?? []).slice().sort((a, b) => a.name.localeCompare(b.name)),
+    [catalog],
+  );
+  const tagCounts = useMemo(() => {
+    const m = new Map<string, number>();
+    (data ?? []).forEach((l) => l.tags.forEach((t) => m.set(t, (m.get(t) ?? 0) + 1)));
+    return m;
+  }, [data]);
+  const uniqueTags = useMemo(() => [...tagCounts.keys()].sort(), [tagCounts]);
+  // Distinct extraction dates — GLOBAL (every dossier, folders included). Page
+  // data is the fallback so the dropdown is never empty while the catalog is
+  // still loading.
+  const uniqueDates = useMemo(() => {
+    const fromApi = datesQ.data ?? [];
+    if (fromApi.length > 0) return fromApi;
+    return [...new Set((data ?? []).map((l) => l.created_at).filter(Boolean))].sort(
+      (a, b) => b.localeCompare(a),
+    );
+  }, [datesQ.data, data]);
+
+  // --- Selection state ---
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+
+  function toggleSelect(email: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(email)) next.delete(email);
+      else next.add(email);
+      return next;
+    });
+  }
+
+  function toggleSelectAll() {
+    if (selected.size === leads.length) {
+      setSelected(new Set());
+    } else {
+      setSelected(new Set(leads.map((l) => l.email)));
+    }
+  }
+
+  // --- Visited marker + last-opened accent + scroll restoration ---
+  const [visited, setVisited] = useState<Set<string>>(loadVisited);
+  const [lastOpened, setLastOpened] = useState<string>(loadLastOpened);
+
+  function markVisited(email: string) {
+    setLastOpened(email);
+    try {
+      localStorage.setItem(LAST_OPENED_KEY, email);
+    } catch {
+      /* best-effort */
+    }
+    setVisited((prev) => {
+      if (prev.has(email)) return prev;
+      const next = new Set(prev);
+      next.add(email);
+      try {
+        localStorage.setItem(VISITED_KEY, JSON.stringify([...next]));
+      } catch {
+        /* best-effort */
+      }
+      return next;
+    });
+  }
+
+  // Returning from a lead detail: put the list back exactly where the user
+  // clicked. It RETRIES across frames because the browser clamps scrollTop to
+  // the current content height — on mount the table is often still shorter than
+  // the target (refetch, wrapped rows), so a single assignment lands short.
+  useLayoutEffect(() => {
+    if (isLoading || savedScrollTop <= 0) return;
+    const target = savedScrollTop;
+    let frames = 0;
+    let raf = 0;
+    const apply = () => {
+      scrollEls().forEach((el) => {
+        el.scrollTop = target;
+      });
+      // Stop as soon as it holds; keep trying while the list is still growing.
+      if (Math.abs(currentScrollTop() - target) > 2 && frames++ < 60) {
+        raf = requestAnimationFrame(apply);
+      }
+    };
+    apply();
+    return () => cancelAnimationFrame(raf);
+  }, [isLoading]);
+
+  const exportSelected = useCallback(() => {
+    const selectedLeads = leads.filter((l) => selected.has(l.email));
+    downloadLeadsCsv(selectedLeads, `leads-selected-${selectedLeads.length}.csv`);
+  }, [leads, selected]);
+
+  const exportAll = useCallback(() => {
+    downloadLeadsCsv(leads, `leads-${rec || "all"}.csv`);
+  }, [leads, rec]);
+
+  return (
+    <div className="px-8 py-7 max-w-7xl">
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div>
+          <h1 className="text-[26px] font-semibold text-white">
+            {q ? `Results for "${params.get("q")}"` : "Companies"}
+          </h1>
+          <p className="text-slate-500 text-[13.5px] mt-1">
+            Researched companies with a bound decision-maker and a buying-window score.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          {selected.size > 0 && (
+            <button
+              onClick={exportSelected}
+              className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-[13px] font-medium text-white hover:bg-indigo-500"
+            >
+              <Download className="w-4 h-4" />
+              Export Selected ({selected.size})
+            </button>
+          )}
+          <button
+            onClick={exportAll}
+            className="inline-flex items-center gap-2 rounded-lg border border-white/5 px-4 py-2 text-[13px] text-slate-300 hover:bg-white/[0.04]"
+          >
+            <Download className="w-4 h-4" /> Export All
+          </button>
+          <button
+            onClick={handleClearJunk}
+            disabled={clearJunk.isPending}
+            className="inline-flex items-center gap-2 rounded-lg border border-rose-400/20 bg-rose-500/10 px-4 py-2 text-[13px] text-rose-300 hover:bg-rose-500/20 disabled:opacity-50"
+          >
+            {clearJunk.isPending ? <Spinner className="h-4 w-4" /> : <Trash2 className="w-4 h-4" />}
+            Clear junk
+          </button>
+        </div>
+      </div>
+
+      {/* Places chip bar — the folder/tag surface as ONE row above the table
+          (Inbox · All · 📁 per folder · # per tag), so no left rail steals data
+          width. Create/rename/delete live in the ⚙ Manage dropdown on the
+          right — a clean single-row filter, not a sidebar. */}
+      <div className="mt-5 flex flex-wrap items-center gap-1.5">
+        <PlaceChip
+          active={folder === "" && !tag && !date}
+          icon={<Inbox className="w-3.5 h-3.5" />}
+          onClick={() => setPlace("", "")}
+          title="Unfiled inbox — sirf wo leads jo kisi folder me nahi hain"
+        >
+          Inbox <span className="font-semibold">{catalog?.unfiled ?? 0}</span>
+        </PlaceChip>
+        <PlaceChip
+          active={folder === "*"}
+          icon={<Layers className="w-3.5 h-3.5" />}
+          onClick={() => setPlace("*", "")}
+          title="All — har place ka data (inbox + saare folders)"
+        >
+          All <span className="font-semibold">{catalog?.total ?? 0}</span>
+        </PlaceChip>
+        {folderList.length > 0 && <span className="mx-1 h-4 w-px bg-white/10" />}
+        {folderList.map((f) => (
+          <PlaceChip
+            key={f.name}
+            active={folder === f.name}
+            icon={<span className="text-amber-300">📁</span>}
+            onClick={() => setPlace(f.name, "")}
+            title={`${f.name} folder ke saare leads`}
+          >
+            {f.name} <span className="font-semibold">{f.count}</span>
+          </PlaceChip>
+        ))}
+        {globalTags.length > 0 && <span className="mx-1 h-4 w-px bg-white/10" />}
+        {globalTags.map((t) => (
+          <PlaceChip
+            key={t}
+            active={tag === t && !folder && !date}
+            icon={<Tag className="w-3.5 h-3.5" />}
+            onClick={() => setPlace("", t)}
+            title={`${t} tag wali saari leads (har folder me)`}
+          >
+            {t} <span className="font-semibold">{globalTagCounts.get(t) ?? 0}</span>
+          </PlaceChip>
+        ))}
+        <div className="relative ml-auto">
+          <button
+            onClick={() => setManageOpen((o) => !o)}
+            title="Naya folder, rename, delete — saari organization"
+            className="inline-flex items-center gap-1.5 rounded-full border border-white/5 bg-white/[0.03] px-3 py-1.5 text-[12.5px] text-slate-300 hover:bg-white/[0.06] hover:text-slate-100"
+          >
+            ⚙ Manage folders &amp; tags
+          </button>
+          <ManageMenu
+            open={manageOpen}
+            onClose={() => setManageOpen(false)}
+            catalog={catalog}
+            tagCounts={globalTagCounts}
+            activeFolder={folder}
+            onSelectFolder={(v) => setPlace(v, "")}
+          />
+        </div>
+      </div>
+          {junkNote && (
+            <p className="mt-3 text-[12.5px] text-emerald-300 bg-emerald-500/10 rounded-lg px-3 py-2">
+              {junkNote}
+            </p>
+          )}
+
+      {/* Bulk organize bar — appears when rows are selected */}
+      {selected.size > 0 && (
+        <div className="mt-3 flex flex-wrap items-center gap-2 rounded-xl border border-indigo-500/20 bg-indigo-500/10 px-3 py-2.5">
+          <span className="text-[12.5px] font-medium text-indigo-200">
+            Bulk organize ({selected.size} selected)
+          </span>
+          <input
+            value={bulkFolder}
+            onChange={(e) => setBulkFolder(e.target.value)}
+            list="folder-options"
+            placeholder="Set folder…"
+            className={`${selectCls} w-40`}
+          />
+          <input
+            value={bulkTagsIn}
+            onChange={(e) => setBulkTagsIn(e.target.value)}
+            list="tag-options"
+            placeholder="Add tags (comma)…"
+            className={`${selectCls} w-48`}
+          />
+          <button
+            onClick={applyBulk}
+            disabled={bulkBusy || (!bulkFolder.trim() && !bulkTagsIn.trim())}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-2 text-[12.5px] font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+          >
+            {bulkBusy ? <Spinner className="h-3.5 w-3.5" /> : <Tag className="w-3.5 h-3.5" />}
+            Apply
+          </button>
+        </div>
+      )}
+
+      {inGlobalSearch ? (
+        <p className="text-[12.5px] text-indigo-300/90">
+          🔎 {date ? `Date "${fmtDate(date)}"` : "Tag"} search — har folder me dhundho
+          (foldered leads bhi isme aate hain). Zero karne ke liye Clear dabao.
+        </p>
+      ) : null}
+      {folder === "*" ? (
+        <p className="text-[12.5px] text-slate-400">
+          🗂 All — har place ka data (Unfiled inbox + saare folders). Folder view par
+          wapas jaane ke liye upar 📁 folder chips me se apna folder chuno.
+        </p>
+      ) : null}
+
+      {/* Filters */}
+      <div className="mt-4 mb-4 flex flex-wrap items-end gap-3">
+        <Filter>
+          <span className={labelCls}>Recommendation</span>
+          <select value={rec} onChange={(e) => setRec(e.target.value as RecFilter)} className={selectCls}>
+            <option value="">Actionable</option>
+            <option value="contact_now">Contact Now</option>
+            <option value="nurture">Nurture</option>
+            <option value="skip">Skip</option>
+          </select>
+        </Filter>
+        <Filter>
+          <span className={labelCls}>Decision-maker</span>
+          <select value={bound} onChange={(e) => setBound(e.target.value as BoundFilter)} className={selectCls}>
+            <option value="">All</option>
+            <option value="true">Bound</option>
+            <option value="false">Unbound</option>
+          </select>
+        </Filter>
+        <Filter>
+          <span className={labelCls}>Min score</span>
+          <input
+            type="number"
+            min={0}
+            max={10}
+            value={minScore}
+            onChange={(e) => setMinScore(e.target.value)}
+            placeholder="Any"
+            className={`${selectCls} w-24`}
+          />
+        </Filter>
+        <Filter>
+          <span className={labelCls}>Run / source</span>
+          <select value={src} onChange={(e) => setSource(e.target.value)} className={selectCls}>
+            <option value="">All runs</option>
+            {sourceOptions.map((s) => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
+          </select>
+        </Filter>
+        <Filter>
+          <span className={labelCls}>Tag</span>
+          <select value={tag} onChange={(e) => setTag(e.target.value)} className={selectCls}>
+            <option value="">All</option>
+            {uniqueTags.map((t) => (
+              <option key={t} value={t}>
+                {t} ({tagCounts.get(t)})
+              </option>
+            ))}
+          </select>
+        </Filter>
+        <Filter>
+          <span className={labelCls}>Extracted</span>
+          <select value={date} onChange={(e) => setDate(e.target.value)} className={selectCls}>
+            <option value="">All dates</option>
+            {uniqueDates.map((d) => (
+              <option key={d} value={d}>
+                {fmtDate(d)}
+              </option>
+            ))}
+          </select>
+        </Filter>
+        <button
+          onClick={() => refetch()}
+          className="rounded-lg border border-white/5 px-3 py-2 text-[13px] text-slate-300 hover:bg-white/[0.04] inline-flex items-center gap-1"
+        >
+          {isFetching ? <Spinner className="h-4 w-4" /> : "↻"} Refresh
+        </button>
+        {(folder || tag || date) && (
+          <button
+            onClick={() => {
+              const p = new URLSearchParams(params);
+              p.delete("folder");
+              p.delete("tag");
+              p.delete("date");
+              setParams(p, { replace: true });
+            }}
+            className="inline-flex items-center gap-1 rounded-lg border border-white/5 px-3 py-2 text-[13px] text-slate-400 hover:text-slate-200 hover:bg-white/[0.04]"
+          >
+            <X className="w-3.5 h-3.5" /> Clear
+          </button>
+        )}
+      </div>
+
+      {/* Auto-complete sources for folder/tag inputs */}
+      <datalist id="folder-options">
+        {folderList.map((f) => (
+          <option key={f.name} value={f.name} />
+        ))}
+      </datalist>
+      <datalist id="tag-options">
+        {uniqueTags.map((t) => (
+          <option key={t} value={t} />
+        ))}
+      </datalist>
+
+      {isError && (
+        <p className="text-[13px] text-rose-300 bg-rose-500/10 rounded-lg px-3 py-2">
+          Failed to load leads: {(error as Error).message}
+        </p>
+      )}
+
+      {isLoading ? (
+        <div className="flex items-center gap-2 text-slate-500 text-sm py-16 justify-center">
+          <Spinner /> Loading leads…
+        </div>
+      ) : leads.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-white/10 py-16 text-center text-slate-500 max-w-2xl mx-auto">
+          {!folder && !inGlobalSearch ? (
+            <>
+              Unfiled inbox khali hai — yahan sirf wohi companies dikhti hain
+              jo kisi folder me nahi gayin.{" "}
+              <button
+                onClick={() => navigate("/research")}
+                className="text-indigo-400 hover:underline"
+              >
+                Research
+              </button>{" "}
+              par naya search chalao, ya <span className="text-amber-300">upar
+              📁 folder chip</span> par click kar ke filed data dekho.
+            </>
+          ) : folder === "*" ? (
+            <>
+              Abhi koi lead research nahi hui.{" "}
+              <button
+                onClick={() => navigate("/research")}
+                className="text-indigo-400 hover:underline"
+              >
+                Research
+              </button>{" "}
+              screen par naya search chalao.
+            </>
+          ) : (
+            <>
+              Is place / filter me koi lead match nahi huwa — koi aur folder{" "}
+              <button
+                onClick={() => setFolder("")}
+                className="text-indigo-400 hover:underline"
+              >
+                Unfiled
+              </button>{" "}
+              par click kro, ya{" "}
+              <button
+                onClick={() => navigate("/research")}
+                className="text-indigo-400 hover:underline"
+              >
+                Research
+              </button>{" "}
+              par naya search chalao.
+            </>
+          )}
+        </div>
+      ) : (
+        <div className="overflow-x-auto rounded-xl border border-white/5">
+          <table className="w-full text-[13.5px]">
+            <thead>
+              <tr className="bg-white/[0.02] text-left text-[12px] uppercase tracking-wide text-slate-500">
+                <th className="px-4 py-3 font-medium w-10">
+                  <button onClick={toggleSelectAll} className="flex items-center justify-center">
+                    {selected.size === leads.length && leads.length > 0 ? (
+                      <CheckSquare className="w-4 h-4 text-indigo-400" />
+                    ) : (
+                      <Square className="w-4 h-4" />
+                    )}
+                  </button>
+                </th>
+                <th className="px-4 py-3 font-medium">Company</th>
+                <th className="px-4 py-3 font-medium">Person</th>
+                <th className="px-4 py-3 font-medium">LinkedIn</th>
+                <th className="px-4 py-3 font-medium">Labels</th>
+                <th className="px-4 py-3 font-medium">Extracted</th>
+                <th className="px-4 py-3 font-medium">Score</th>
+                <th className="px-4 py-3 font-medium">Recommendation</th>
+                <th className="px-4 py-3 font-medium">Reason</th>
+                <th className="px-4 py-3 font-medium w-20" />
+              </tr>
+            </thead>
+            <tbody>
+              {leads.map((l) => {
+                const expanded = expandedEmail === l.email;
+                const isChecked = selected.has(l.email);
+                const isVisited = visited.has(l.email);
+                const isLast = lastOpened === l.email;
+                return (
+                  <tr
+                    key={l.email}
+                    onClick={() => {
+                      markVisited(l.email);
+                      saveLeadsScroll();
+                      // Carry the list's OWN url (filters included) so the detail
+                      // screen's back link returns to this folder/tag/date view
+                      // instead of the bare Inbox.
+                      navigate(`/leads/${encodeURIComponent(l.email)}`, {
+                        state: { from: location.pathname + location.search },
+                      });
+                    }}
+                    /* Visited rows get a real marker (tint + ✓ badge), not just
+                       dimming — a faded row reads as broken data instead of
+                       "already seen". The LAST opened row also gets an indigo
+                       left accent: "you were here" when you come back. */
+                    className={`cursor-pointer align-top border-t border-white/5 hover:bg-white/[0.03] ${
+                      isChecked
+                        ? "bg-indigo-500/[0.06]"
+                        : isLast
+                          ? "bg-indigo-500/[0.09]"
+                          : isVisited
+                            ? "bg-emerald-500/[0.05]"
+                            : ""
+                    }`}
+                  >
+                    <td className="px-4 py-3">
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          toggleSelect(l.email);
+                        }}
+                        className="flex items-center justify-center"
+                      >
+                        {isChecked ? (
+                          <CheckSquare className="w-4 h-4 text-indigo-400" />
+                        ) : (
+                          <Square className="w-4 h-4 text-slate-500" />
+                        )}
+                      </button>
+                    </td>
+                    <td
+                      className={`px-4 py-3 max-w-[240px] border-l-2 ${
+                        isLast ? "border-indigo-400" : "border-transparent"
+                      }`}
+                    >
+                      <div className="flex items-center gap-1.5 font-medium text-white">
+                        {isLast ? (
+                          <span
+                            className="inline-flex h-4 shrink-0 items-center rounded bg-indigo-500/30 px-1 text-[9px] font-semibold uppercase tracking-wide text-indigo-200"
+                            title="Ye wohi lead hai jise aap ne last khola tha"
+                          >
+                            last
+                          </span>
+                        ) : (
+                          isVisited && (
+                            <span
+                              className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-emerald-500/25 text-[10px] text-emerald-300"
+                              title="Aap is lead ka detail dekh chuke hain"
+                            >
+                              ✓
+                            </span>
+                          )
+                        )}
+                        <span className="truncate">{l.company || "—"}</span>
+                      </div>
+                      <div className="truncate text-[12px] text-slate-500">{l.email}</div>
+                      {l.source && (
+                        <span className="mt-1 inline-flex max-w-full items-center truncate rounded-md border border-indigo-500/20 bg-indigo-500/10 px-1.5 py-0.5 text-[10.5px] text-indigo-300">
+                          🔍 {l.source}
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="text-slate-200">{l.person || "—"}</div>
+                      <div className="text-[12px] text-slate-400">{l.role || "role unknown"}</div>
+                    </td>
+                    <td className="px-4 py-3 max-w-[150px]">
+                      {l.linkedin ? (
+                        <a
+                          href={/^https?:\/\//i.test(l.linkedin) ? l.linkedin : `https://${l.linkedin}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          onClick={(e) => e.stopPropagation()}
+                          title={l.linkedin}
+                          /* truncate, NOT break-all: a long /in/ URL used to wrap
+                             one word-fragment per line and stretch the row. */
+                          className="block truncate text-[12px] text-indigo-400 hover:underline"
+                        >
+                          {l.linkedin}
+                        </a>
+                      ) : null}
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="flex flex-wrap gap-1 max-w-[200px]">
+                        {l.folder && (
+                          <button
+                            onClick={(ev) => {
+                              ev.stopPropagation();
+                              setFolder(l.folder);
+                            }}
+                            title={`${l.folder} folder me is type ka data dekhein`}
+                            className="inline-flex items-center rounded-md border border-amber-400/30 bg-amber-500/10 px-1.5 py-0.5 text-[10.5px] text-amber-300 hover:bg-amber-500/20"
+                          >
+                            📁 {l.folder}
+                          </button>
+                        )}
+                        {l.tags.slice(0, 3).map((t) => (
+                          <span
+                            key={t}
+                            className="inline-flex items-center rounded-md border border-indigo-500/25 bg-indigo-500/10 px-1.5 py-0.5 text-[10.5px] text-indigo-300"
+                          >
+                            {t}
+                          </span>
+                        ))}
+                        {l.tags.length > 3 && (
+                          <span className="inline-flex items-center rounded-md border border-white/10 px-1.5 py-0.5 text-[10.5px] text-slate-500">
+                            +{l.tags.length - 3}
+                          </span>
+                        )}
+                        {!l.folder && l.tags.length === 0 && (
+                          <span className="text-[12px] text-slate-600">—</span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="px-4 py-3">
+                      {l.created_at ? (
+                        <span className="inline-flex items-center rounded-md border border-white/10 px-1.5 py-0.5 text-[10.5px] text-slate-400 whitespace-nowrap">
+                          📅 {fmtDate(l.created_at)}
+                        </span>
+                      ) : (
+                        <span className="text-[12px] text-slate-600">—</span>
+                      )}
+                    </td>
+                    <td className={`px-4 py-3 font-semibold ${scoreColor(l.score)}`}>{l.score.toFixed(1)}</td>
+                    <td className="px-4 py-3">
+                      <Badge value={l.recommendation} />
+                    </td>
+                    <td className="px-4 py-3 text-slate-300 w-[280px] max-w-[280px]">
+                      {/* Collapsed by default: ONE line, so every row is the
+                          same height and the table stays scannable. The full
+                          reason + proof links open on click — the reason used to
+                          render in full and blow rows up to ~500px. */}
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setExpandedEmail(expanded ? null : l.email);
+                        }}
+                        className="w-full text-left"
+                        title={expanded ? "Chhupao" : l.reason || ""}
+                      >
+                        {!expanded && (
+                          <span className="block text-[12.5px] line-clamp-1">
+                            {l.reason || "—"}
+                          </span>
+                        )}
+                        {l.reason && (
+                          <span className="mt-0.5 inline-block text-[11px] text-indigo-400 hover:underline">
+                            {expanded ? "▲ chhupao" : "▼ poora reason"}
+                          </span>
+                        )}
+                      </button>
+                      {expanded && (
+                        <div className="mt-2 border-t border-white/5 pt-2">
+                          <p className="text-[12.5px] text-slate-200">{l.reason || "—"}</p>
+                          <div className="mt-2 border-t border-white/5 pt-2">
+                            {detailQ.isLoading ? (
+                              <Spinner className="h-3 w-3" />
+                            ) : (
+                              <ProofLinks
+                                evidence={detailQ.data?.intent?.evidence ?? []}
+                                fallback={detailQ.data?.intent?.reason ?? l.reason}
+                              />
+                            )}
+                          </div>
+                        </div>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 text-right whitespace-nowrap">
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          startEdit(l.email);
+                        }}
+                        aria-label={`Organize ${l.email}`}
+                        title="Set folder / tags"
+                        className="inline-flex items-center justify-center rounded-lg border border-white/5 p-1.5 text-slate-500 hover:text-amber-300 hover:border-amber-400/30"
+                      >
+                        <Tag className="w-4 h-4" />
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDelete(l.email);
+                        }}
+                        disabled={busyEmail === l.email}
+                        aria-label={`Delete ${l.email}`}
+                        title="Delete (data management)"
+                        className="ml-1 inline-flex items-center justify-center rounded-lg border border-white/5 p-1.5 text-slate-500 hover:text-rose-300 hover:border-rose-400/30 disabled:opacity-50"
+                      >
+                        {busyEmail === l.email ? (
+                          <Spinner className="h-4 w-4" />
+                        ) : (
+                          <Trash2 className="w-4 h-4" />
+                        )}
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Organize one lead — modal editor */}
+      {editEmail && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6"
+          onClick={() => setEditEmail(null)}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl border border-white/10 bg-[#11151E] p-5 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <h2 className="text-[15px] font-semibold text-white">Organize lead</h2>
+              <button onClick={() => setEditEmail(null)} className="text-slate-500 hover:text-slate-200">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <p className="mt-1 text-[12.5px] text-slate-500 break-all">{editEmail}</p>
+            <label className={`${labelCls} block mt-4 mb-1`}>Folder</label>
+            <input
+              value={editFolder}
+              onChange={(e) => setEditFolder(e.target.value)}
+              list="folder-options"
+              placeholder="e.g. Hot, Texas, No folder…"
+              className={selectCls}
+            />
+            <label className={`${labelCls} block mt-3 mb-1`}>Tags (comma separated)</label>
+            <input
+              value={editTags}
+              onChange={(e) => setEditTags(e.target.value)}
+              list="tag-options"
+              placeholder="Hot, Texas, Follow-up"
+              className={selectCls}
+            />
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                onClick={() => setEditEmail(null)}
+                className="rounded-lg border border-white/5 px-4 py-2 text-[13px] text-slate-300 hover:bg-white/[0.04]"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={saveEdit}
+                disabled={organize.isPending}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-4 py-2 text-[13px] font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+              >
+                {organize.isPending ? <Spinner className="h-3.5 w-3.5" /> : <Tag className="w-3.5 h-3.5" />}
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ProofLinks({
+  evidence,
+  fallback,
+}: {
+  evidence: EvidenceFact[];
+  fallback?: string;
+}) {
+  const links = evidence.filter((e) => e.source_url);
+  if (links.length === 0) {
+    return (
+      <p className="text-[12px] text-slate-600">
+        {fallback ? "No source link recorded." : "No proof links."}
+      </p>
+    );
+  }
+  return (
+    <ul className="flex flex-col gap-1.5">
+      {links.map((e, i) => (
+        <li key={i}>
+          <a
+            href={e.source_url}
+            target="_blank"
+            rel="noreferrer"
+            onClick={(ev) => ev.stopPropagation()}
+            className="text-[12px] text-indigo-400 hover:underline break-all"
+          >
+            {e.source_url}
+          </a>
+          {e.claim && <p className="text-[11px] text-slate-500 mt-0.5">{e.claim}</p>}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function Badge({ value }: { value: string }) {
+  const b = recommendationBadge(value);
+  return (
+    <span className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] ${b.cls}`}>
+      <span className={`h-1.5 w-1.5 rounded-full ${b.dot}`} />
+      {recommendationLabel(value)}
+    </span>
+  );
+}
+
+/** Frontend-only CSV: email, name, company, linkedin. */
+function downloadLeadsCsv(leads: LeadSummary[], filename: string) {
+  const escape = (v: string) => {
+    if (v.includes(",") || v.includes('"') || v.includes("\n")) {
+      return `"${v.replace(/"/g, '""')}"`;
+    }
+    return v;
+  };
+  const header = "email,name,company,linkedin";
+  const rows = leads.map(
+    (l) =>
+      [l.email, l.person, l.company, l.linkedin].map(escape).join(","),
+  );
+  // BOM so Excel opens UTF-8 correctly
+  const csv = "﻿" + header + "\r\n" + rows.join("\r\n") + "\r\n";
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function Filter({ children }: { children: React.ReactNode }) {
+  return <div className="flex flex-col gap-1">{children}</div>;
+}
+
+function PlaceChip({
+  active,
+  icon,
+  onClick,
+  title,
+  children,
+}: {
+  active: boolean;
+  icon: React.ReactNode;
+  onClick: () => void;
+  title?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      title={title}
+      className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-[12.5px] transition-colors ${
+        active
+          ? "border-indigo-500/50 bg-indigo-500/20 text-indigo-100"
+          : "border-white/5 bg-white/[0.03] text-slate-300 hover:bg-white/[0.06] hover:text-slate-100"
+      }`}
+    >
+      <span className={active ? "text-indigo-200" : "text-slate-400"}>{icon}</span>
+      {children}
+    </button>
+  );
+}
+
+/** "YYYY-MM-DD" -> "Sep 1, 2026" (built from parts to avoid UTC shifts). */
+function fmtDate(iso: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso || "");
+  if (!m) return iso;
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
+
+const selectCls =
+  "bg-white/[0.04] border border-white/5 rounded-lg px-3 py-2 text-[13px] text-slate-300 outline-none focus:ring-2 focus:ring-indigo-500/40";
+
+const labelCls = "text-[12px] font-medium text-slate-500 uppercase tracking-wide";

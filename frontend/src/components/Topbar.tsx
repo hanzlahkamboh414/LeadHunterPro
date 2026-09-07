@@ -1,0 +1,50 @@
+import { FormEvent, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { Search, Bell, ChevronDown } from "lucide-react";
+
+export default function Topbar() {
+  const [q, setQ] = useState("");
+  const navigate = useNavigate();
+
+  function onSubmit(e: FormEvent) {
+    e.preventDefault();
+    const term = q.trim();
+    navigate(term ? `/leads?q=${encodeURIComponent(term)}` : "/leads");
+  }
+
+  return (
+    // shrink-0: the shell is a fixed height now, so the bar must keep its own
+    // height instead of being squeezed by the scrolling <main> beside it.
+    <header className="shrink-0 flex items-center gap-4 px-8 py-4 border-b border-white/5">
+      <form onSubmit={onSubmit} className="flex-1 max-w-xl relative">
+        <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+        <input
+          type="text"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Search companies, contacts, or research..."
+          className="w-full bg-white/[0.04] border border-white/5 rounded-lg pl-10 pr-4 py-2.5 text-[13px] text-slate-300 placeholder:text-slate-500 outline-none focus:ring-2 focus:ring-indigo-500/40"
+        />
+      </form>
+
+      <button
+        type="button"
+        className="relative w-9 h-9 rounded-lg flex items-center justify-center text-slate-400 hover:bg-white/[0.04]"
+        title="Notifications"
+      >
+        <Bell className="w-[18px] h-[18px]" strokeWidth={1.75} />
+      </button>
+
+      <div className="flex items-center gap-2.5 pl-1 pr-2 py-1 rounded-lg hover:bg-white/[0.04]">
+        <div className="w-8 h-8 rounded-full bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center text-[12px] font-semibold text-white">
+          HZ
+        </div>
+        <div className="text-left leading-tight hidden sm:block">
+          <div className="text-[13px] text-white font-medium">Hanzlah</div>
+          <div className="text-[11px] text-slate-500">Business Development</div>
+        </div>
+        <ChevronDown className="w-3.5 h-3.5 text-slate-500" />
+      </div>
+    </header>
+  );
+}

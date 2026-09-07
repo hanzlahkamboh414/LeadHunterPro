@@ -126,15 +126,26 @@ class TestRoleRelevance:
         for role in (
             "Owner",
             "Project Manager",
-            "Estimator",
-            "Chief Estimator",
-            "Procurement Manager",
             "Operations Manager",
+            "President",
+            "Vice President",
         ):
             assert role_is_plausibly_relevant(role) is True, role
 
     def test_irrelevant_roles_are_rejected(self):
-        for role in ("Marketing Coordinator", "Graphic Designer", "Receptionist"):
+        """Estimators, procurement and purchasing DO estimation in-house —
+        they are the competitor, not the buyer — so they never qualify as a
+        decision-maker (founder rule)."""
+        for role in (
+            "Marketing Coordinator",
+            "Graphic Designer",
+            "Receptionist",
+            "Estimator",
+            "Chief Estimator",
+            "Estimating Manager",
+            "Procurement Manager",
+            "Purchasing Manager",
+        ):
             assert role_is_plausibly_relevant(role) is False, role
 
     def test_empty_role_is_never_relevant(self):

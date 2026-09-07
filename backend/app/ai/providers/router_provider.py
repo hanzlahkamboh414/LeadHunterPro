@@ -52,6 +52,12 @@ class RouterProvider(BaseAIProvider):
         self._client = openai.OpenAI(
             api_key=key,
             base_url=settings.AI_BASE_URL,
+            # Hard per-request cap (default 60s). The SDK's own default is 600s,
+            # which lets a slow router/model silently stall every lead for ~10
+            # min per call — the measured per-lead bottleneck. With a bounded
+            # timeout a congested provider fails a stage fast instead of
+            # blocking the whole run (stage try/except handles the failure).
+            timeout=settings.AI_TIMEOUT_S,
         )
         self._model = settings.AI_MODEL
         logger.debug(

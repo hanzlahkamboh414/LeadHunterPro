@@ -86,6 +86,22 @@ class Settings(BaseSettings):
     # Optional: falls back to AI_API_KEY when unset.
     AI_API_KEY_2: str = Field(default="", repr=False)  # secret
 
+    # Hard per-request cap for the AI transport. Without it the OpenAI SDK's
+    # default is 600s (10 min): a slow router window or a congested model host
+    # makes EVERY LLM call block ~10 min, and each lead makes 3 calls (company,
+    # person, intent) — the measured cause of 7-19 min per lead. A bounded
+    # timeout turns that into a fast per-stage failure (stage try/except
+    # already records it and continues) so a 100-lead run can never crawl.
+    AI_TIMEOUT_S: float = 60
+
+    # Per-run lead research concurrency. Each lead makes 3+ LLM calls plus
+    # searches and website crawls; processing leads serially means a 100-lead
+    # run is the sum of every lead's latency. A small bounded thread pool
+    # overlaps the network-bound research stages so a 100-lead run finishes
+    # ~3x faster wall-clock without hammering the router or the SQLite store
+    # (writes are serialized under a lock inside run_research). 1 = serial.
+    LEADS_CONCURRENCY: int = 3
+
     # Search Provider Configuration
     SEARXNG_URL: str = ""
     # Seconds SearXNG gets before the orchestrator treats it as hung. SearXNG

@@ -24,6 +24,7 @@ passes, allows a graceful stop.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -666,14 +667,32 @@ def run_research(
     """
     from app.lead_research.agent import AILeadResearchAgent
     from app.lead_research.service import is_dead_domain_dossier
+    from app.core.config import settings
 
     agent = AILeadResearchAgent()
-    results: list[dict] = []
-    skipped = 0
     total = len(leads)
-    for i, lead in enumerate(leads, 1):
+
+    # SQLite write serialization. Research (network/LLM) runs concurrently, but
+    # store.save / set_meta and the pending-cache mutations must not collide on
+    # the same .db file — one write lock for the whole batch, held only for the
+    # short persistence window (never around research, so the parallelism is
+    # not squandered).
+    write_lock = threading.Lock()
+
+    def _work(idx: int) -> tuple[int, dict] | None:
+        """Research ONE lead (run on a pool thread).
+
+        Mirrors the original serial body exactly. Returns ``(idx, entry)`` for
+        entries that belong in the results list (cached / success / error) and
+        ``None`` for ones the serial loop omitted (cancelled, or a dead-domain
+        skip). The caller keeps original order by position.
+        """
+        i = idx + 1
+        lead = leads[idx]
+        # Pause/cancel is honoured per lead, exactly as in the serial loop: a
+        # cancelled run aborts in-flight work and never adds those leads.
         if not _wait_if_paused(paused, cancel):
-            break
+            return None
         email, domain = lead["email"], lead["domain"]
         t0 = time.monotonic()
 
@@ -681,9 +700,9 @@ def run_research(
         if store is not None:
             existing = store.get(email)
             if existing is not None:
-                skipped += 1
-                if pending_store is not None:
-                    pending_store.remove([email])
+                with write_lock:
+                    if pending_store is not None:
+                        pending_store.remove([email])
                 entry = {
                     "email": email,
                     "domain": domain,
@@ -702,7 +721,6 @@ def run_research(
                     # skip karo, naye pakro").
                     "working": False,
                 }
-                results.append(entry)
                 if emit:
                     emit(
                         "research", i, total,
@@ -710,7 +728,7 @@ def run_research(
                         email=email,
                         data=entry,
                     )
-                continue
+                return idx, entry
 
         try:
             d = agent.research(email, domain, trade=trade, location=location)
@@ -721,8 +739,9 @@ def run_research(
                 # so the same address can never re-appear as a recurring "Skip"
                 # run after run — the user's "same emails every search" defect.
                 # Log the skip honestly (CLAUDE.md §6) instead of silent drop.
-                if pending_store is not None:
-                    pending_store.mark_dead([email])
+                with write_lock:
+                    if pending_store is not None:
+                        pending_store.mark_dead([email])
                 if emit:
                     emit(
                         "research", i, total,
@@ -736,22 +755,24 @@ def run_research(
                             "working": False,
                         },
                     )
-                continue
+                return None
             if store is not None:
-                store.save(d)
-                if folder or search_name:
-                    # AUTO-FILE AT SAVE TIME (Phase C): the run named a folder
-                    # and/or search — apply them to this lead RIGHT NOW so it
-                    # never sits unfiled in the inbox. Tags = search_name (this
-                    # run's label), so a later search's leads never mix with
-                    # this one. Pure user metadata — dossier_json untouched.
-                    store.set_meta(
-                        email,
-                        folder=folder,
-                        tags=[search_name] if search_name else [],
-                    )
-                if pending_store is not None:
-                    pending_store.remove([email])
+                with write_lock:
+                    store.save(d)
+                    if folder or search_name:
+                        # AUTO-FILE AT SAVE TIME (Phase C): the run named a
+                        # folder and/or search — apply them to this lead RIGHT
+                        # NOW so it never sits unfiled in the inbox. Tags =
+                        # search_name (this run's label), so a later search's
+                        # leads never mix with this one. Pure user metadata —
+                        # dossier_json untouched.
+                        store.set_meta(
+                            email,
+                            folder=folder,
+                            tags=[search_name] if search_name else [],
+                        )
+                    if pending_store is not None:
+                        pending_store.remove([email])
             elapsed = time.monotonic() - t0
             working = _is_visible(d)
             entry = {
@@ -770,7 +791,6 @@ def run_research(
                 # list. Only these count toward the user's target quantity.
                 "working": working,
             }
-            results.append(entry)
             if emit:
                 emit(
                     "research", i, total,
@@ -780,19 +800,41 @@ def run_research(
                     email=email,
                     data=entry,
                 )
+            return idx, entry
         except Exception as exc:  # noqa: BLE001 - one lead never kills the batch
             # Cooldown mark: the lead stays in pending (it is not a dead
             # domain), so WITHOUT this timestamp the next run would serve and
             # re-fail it — the same full research cost on every Execute. Record
             # the attempt so take() skips it until the cooldown expires, then
             # the row is a genuine retry (re-enrichment cooldown).
-            if pending_store is not None:
-                pending_store.mark_attempt([email])
+            with write_lock:
+                if pending_store is not None:
+                    pending_store.mark_attempt([email])
             entry = {"email": email, "domain": domain, "error": str(exc)}
-            results.append(entry)
             if emit:
                 emit("research", i, total, f"lead {i}/{total}: {email} -> ERROR: {exc}",
                      email=email, data=entry)
+            return idx, entry
+
+    # Bounded thread pool over the (network/LLM-bound) research stages. Results
+    # come back in submission order, so the list keeps the original lead order
+    # regardless of which thread finished first; omitted entries (None) were
+    # cancelled or dead-domain skips.
+    concurrency = max(1, settings.LEADS_CONCURRENCY)
+    results: list[dict] = []
+    if concurrency == 1 or total <= 1:
+        # Serial path — identical behaviour, avoids pool overhead on tiny runs.
+        for idx in range(total):
+            res = _work(idx)
+            if res is not None:
+                results.append(res[1])
+    else:
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            for res in pool.map(_work, range(total)):
+                if res is not None:
+                    results.append(res[1])
+
+    skipped = sum(1 for e in results if e.get("cached"))
     if skipped:
         logger.info(
             "run_research: %d/%d leads skipped (already in store)", skipped, total,

@@ -51,6 +51,11 @@ _FAKE_MODEL = "test-model-not-real"
 # the proven default fails a test instead of quietly changing AI behaviour.
 _PROVEN_DEFAULT_MODEL = "agnes-2.5-flash"
 
+# The hard per-request AI timeout default. Changes to it are deliberate (they
+# trade bounded latency against a slower/hung provider's completion), so a
+# silent drift must fail this test rather than quietly re-blocking leads.
+_PROVEN_DEFAULT_TIMEOUT = 60
+
 # Vendor-specific providers that were deleted in favour of the generic one.
 # None of these names may ever resolve again.
 _REMOVED_PROVIDER_NAMES = ("openai", "anthropic", "gemini", "local", "nara")
@@ -98,8 +103,27 @@ def test_settings_are_read_correctly(monkeypatch, patched_openai) -> None:
     patched_openai.assert_called_once_with(
         api_key=settings.AI_API_KEY,
         base_url=settings.AI_BASE_URL,
+        timeout=settings.AI_TIMEOUT_S,
     )
     assert provider._model == settings.AI_MODEL
+
+
+def test_timeout_is_wired_from_settings(monkeypatch, patched_openai) -> None:
+    """AI_TIMEOUT_S is forwarded to the OpenAI client as the hard per-request
+    cap, so a slow router/model window fails a stage in bounded time instead of
+    blocking the SDK's 600s default."""
+    monkeypatch.setattr(settings, "AI_TIMEOUT_S", 42)
+    RouterProvider()
+    _, kwargs = patched_openai.call_args
+    assert kwargs["timeout"] == 42
+
+
+def test_declared_default_timeout_is_the_bounded_value() -> None:
+    """config.py's AI_TIMEOUT_S default must stay a bounded cap (the SDK's
+    default is 600s, which made a congested router block every lead ~10 min)."""
+    declared = Settings.model_fields["AI_TIMEOUT_S"].default
+    assert declared == _PROVEN_DEFAULT_TIMEOUT
+    assert declared < 600
 
 
 def test_base_url_is_used(monkeypatch, patched_openai) -> None:

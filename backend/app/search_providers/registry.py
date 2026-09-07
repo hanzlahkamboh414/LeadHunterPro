@@ -7,6 +7,7 @@ centralized way to enable/disable providers and load them from config.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from app.search_providers.base import BaseSearchProvider
@@ -20,6 +21,12 @@ class SearchProviderRegistry:
     Manages registration, retrieval, and ordering of providers.
     Providers are sorted by priority (lower number = higher priority, tried first).
 
+    Also holds the per-process circuit-breaker state: a provider that times out
+    or hard-fails is marked ``down`` for a short TTL so later queries skip it
+    instantly and go straight to the next provider. State lives here (not on
+    the manager) so every SearchProviderManager in the process shares it — a
+    hung SearXNG costs ONE short timeout per process, not per query.
+
     Usage:
         registry = SearchProviderRegistry()
         registry.register(SearXNGProvider(base_url="https://searxng.example.com"))
@@ -27,9 +34,13 @@ class SearchProviderRegistry:
         providers = registry.get_ordered()
     """
 
+    # How long a provider that hung/failed stays skipped before being re-tried.
+    DOWN_TTL_S: float = 300.0
+
     def __init__(self) -> None:
         """Initialize the registry."""
         self._providers: dict[str, BaseSearchProvider] = {}
+        self._down_until: dict[str, float] = {}
 
     def register(self, provider: BaseSearchProvider) -> None:
         """Register a search provider.
@@ -41,12 +52,42 @@ class SearchProviderRegistry:
         if name in self._providers:
             logger.warning("Search provider '%s' already registered, overwriting", name)
         self._providers[name] = provider
+        # A re-registered provider starts clean (e.g. config hot-reload).
+        self._down_until.pop(name, None)
         logger.info(
             "Registered search provider: %s (priority=%d, enabled=%s)",
             name,
             provider.priority,
             provider.enabled,
         )
+
+    def mark_down(self, provider_name: str, ttl: float | None = None) -> None:
+        """Record a provider as down so future queries skip it for ``ttl``s."""
+        self._down_until[provider_name] = (
+            time.monotonic() + (ttl if ttl is not None else self.DOWN_TTL_S)
+        )
+        logger.warning(
+            "Search provider %r marked down for %.0fs (timeout/failure)",
+            provider_name,
+            self._down_until[provider_name] - time.monotonic(),
+        )
+
+    def is_down(self, provider_name: str) -> bool:
+        """True while a provider is inside its down-window (skip it)."""
+        expires = self._down_until.get(provider_name)
+        if expires is None:
+            return False
+        if time.monotonic() >= expires:
+            # TTL elapsed — allow a re-try and forget the stale marker.
+            del self._down_until[provider_name]
+            return False
+        return True
+
+    def clear(self) -> None:
+        """Remove all providers from the registry."""
+        self._providers.clear()
+        self._down_until.clear()
+        logger.info("Cleared all search providers from registry")
 
     def unregister(self, provider_name: str) -> bool:
         """Remove a provider from the registry.

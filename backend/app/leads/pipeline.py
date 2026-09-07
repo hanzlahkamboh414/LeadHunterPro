@@ -67,11 +67,19 @@ class ResearchQuery:
     ``location``       where (Texas, Florida, UK... — any region)
     ``target_emails``  how many emails/leads to aim for (10/20/30...)
     ``discover_only``  stop after discovery, skip the AI research phase
+    ``search_name``    OPTIONAL label for THIS run (e.g. "Houston GC Q3"), stored
+                       as a tag on every lead it produces so a later search's
+                       leads never mix with this one.
+    ``folder``         OPTIONAL folder to auto-file every lead this run produces
+                       into — set at research-save time so the leads land filed
+                       the moment they exist (no unfiled mixing window).
     """
     trade: str = ""
     location: str = ""
     target_emails: int = 20
     discover_only: bool = False
+    search_name: str = ""
+    folder: str = ""
 
     def validate(self) -> None:
         if not self.trade.strip():
@@ -82,10 +90,15 @@ class ResearchQuery:
             raise ValueError("target_emails (HOW MANY) must be >= 1")
 
     def describe(self) -> str:
-        return (
+        label = (
             f"WHAT={self.trade!r} WHERE={self.location!r} "
             f"HOW_MANY={self.target_emails} emails"
         )
+        if self.search_name:
+            label += f" NAME={self.search_name!r}"
+        if self.folder:
+            label += f" FOLDER={self.folder!r}"
+        return label
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -93,6 +106,8 @@ class ResearchQuery:
             "location": self.location,
             "target_emails": self.target_emails,
             "discover_only": self.discover_only,
+            "search_name": self.search_name,
+            "folder": self.folder,
         }
 
     @staticmethod
@@ -102,6 +117,8 @@ class ResearchQuery:
             location=d.get("location", ""),
             target_emails=int(d.get("target_emails", 20)),
             discover_only=bool(d.get("discover_only", False)),
+            search_name=d.get("search_name", ""),
+            folder=d.get("folder", ""),
         )
 
 
@@ -177,6 +194,29 @@ def _discovery_status(meta: dict[str, Any]) -> SourceStatus:
     ):
         return SourceStatus.SUCCESS
     return SourceStatus.EMPTY
+
+
+def _source_stats_for_log(meta: dict[str, Any]) -> dict[str, Any]:
+    """Extract a lean, JSON-serialisable per-source snapshot from orchestrator meta.
+
+    The full ``meta["source_stats"]`` may carry non-serialisable objects
+    (``SourceStatus`` enums, nested metadata with dorks lists, etc.).  This
+    keeps only the auditable facts — status, result count, error, and the
+    specific reason — so ``json.dumps`` in the job runner never crashes
+    (CLAUDE.md §6: every execution must be diagnosable from the logs).
+    """
+    stats: dict[str, Any] = {}
+    for name, s in (meta.get("source_stats") or {}).items():
+        status = s.get("status")
+        status_str = status.value if hasattr(status, "value") else str(status)
+        entry: dict[str, Any] = {"status": status_str, "results": s.get("results", 0)}
+        if s.get("error"):
+            entry["error"] = s["error"]
+        reason = (s.get("metadata") or {}).get("reason")
+        if reason:
+            entry["reason"] = reason
+        stats[name] = entry
+    return stats
 
 
 def run_discovery(
@@ -519,6 +559,7 @@ def discover_until_target(
             "new_leads": len(fresh),
             "total_leads": len(leads),
             "elapsed_s": round(time.monotonic() - t0, 1),
+            "source_stats": _source_stats_for_log(meta),
         }
         if exhausted:
             entry["exhausted"] = True
@@ -588,6 +629,8 @@ def run_research(
     *,
     trade: str = "",
     location: str = "",
+    search_name: str = "",
+    folder: str = "",
 ) -> list[dict]:
     """Run the full AI research pipeline for each lead.
 
@@ -595,6 +638,13 @@ def run_research(
     threaded into each lead's company research so the AI anchors on the
     construction-bid provenance (a plan-holder/bid-list lead) instead of
     drifting to generic/IT results.
+
+    ``search_name``/``folder`` (optional) auto-file every NEWLY-researched
+    lead as it is saved: the folder is set, and ``search_name`` is stored as a
+    tag. Because the file happens AT SAVE TIME (right after ``store.save``),
+    a run that names a folder never leaves its leads sitting unfiled in the
+    inbox — the user's "is sa leads mix ni hogi" guarantee. Already-cached
+    leads are skipped, so their existing meta is never clobbered.
 
 
     Returns a list of per-lead result dicts (the contract the API/frontend
@@ -689,6 +739,17 @@ def run_research(
                 continue
             if store is not None:
                 store.save(d)
+                if folder or search_name:
+                    # AUTO-FILE AT SAVE TIME (Phase C): the run named a folder
+                    # and/or search — apply them to this lead RIGHT NOW so it
+                    # never sits unfiled in the inbox. Tags = search_name (this
+                    # run's label), so a later search's leads never mix with
+                    # this one. Pure user metadata — dossier_json untouched.
+                    store.set_meta(
+                        email,
+                        folder=folder,
+                        tags=[search_name] if search_name else [],
+                    )
                 if pending_store is not None:
                     pending_store.remove([email])
             elapsed = time.monotonic() - t0
@@ -842,6 +903,7 @@ def run_full(
             leads, emit=emit, cancel=cancel, store=store, paused=paused,
             pending_store=pending_store,
             trade=query.trade, location=query.location,
+            search_name=query.search_name, folder=query.folder,
         )
         working = sum(1 for e in results if e.get("working"))
     else:

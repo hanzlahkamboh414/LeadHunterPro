@@ -1,5 +1,5 @@
 import { FormEvent, useState } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { Rocket, KeyRound } from "lucide-react";
 import { api, ApiError, getStoredApiKey, setStoredApiKey } from "../api/client";
@@ -11,21 +11,42 @@ export default function Execute() {
   const [trade, setTrade] = useState("");
   const [location, setLocation] = useState("");
   const [targetEmails, setTargetEmails] = useState(10);
+  const [searchName, setSearchName] = useState("");
+  const [saveFolder, setSaveFolder] = useState("");
   const [apiKey, setApiKey] = useState(getStoredApiKey());
   const [showKey, setShowKey] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
 
   const create = useMutation({
     mutationFn: () =>
-      api.createJob({ trade, location, target_emails: targetEmails }),
+      api.createJob({
+        trade,
+        location,
+        target_emails: targetEmails,
+        search_name: searchName.trim() || undefined,
+        folder: saveFolder.trim() || undefined,
+      }),
     onSuccess: (job) => setJobId(job.id),
   });
 
-  // Poll the job while it is queued/running, stop once terminal.
+  // Existing folders (datalist options) so the user can pick an EXISTING folder
+  // or type a brand-new one — leads land filed, never mixed.
+  const folders = useQuery({
+    queryKey: ["folders"],
+    queryFn: () => api.listFolders(),
+    enabled: true,
+  });
+  const folderOptions = folders.data?.folders.map((f) => f.name) ?? [];
+
+  // Poll the job while it is queued/running, stop once terminal. retry:true
+  // keeps polling through a backend restart so a temporarily unreachable server
+  // can't strand the view in a stale "running" state.
   const job = useQuery({
     queryKey: ["job", jobId],
     queryFn: () => api.getJob(jobId!),
     enabled: !!jobId,
+    retry: true,
+    retryDelay: 2000,
     refetchInterval: (q) => {
       const s = q.state.data?.state;
       return s === "running" || s === "queued" ? 1500 : false;
@@ -34,7 +55,13 @@ export default function Execute() {
 
   const cancel = useMutation({ mutationFn: () => api.cancelJob(jobId!) });
   const pause = useMutation({ mutationFn: () => api.pauseJob(jobId!) });
-  const resume = useMutation({ mutationFn: () => api.resumeJob(jobId!) });
+  const qc = useQueryClient();
+  // Continue (failed/interrupted) flips the job back to running — refetch
+  // immediately so the live poll re-engages from the new running state.
+  const resume = useMutation({
+    mutationFn: () => api.resumeJob(jobId!),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["job", jobId] }),
+  });
 
   const active = job.data?.state === "running" || job.data?.state === "queued";
   const paused = job.data?.state === "paused";
@@ -146,6 +173,37 @@ export default function Execute() {
             />
           </Field>
 
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1">
+            <Field label="Search name (optional — tag this run)">
+              <input
+                value={searchName}
+                onChange={(e) => setSearchName(e.target.value)}
+                placeholder='e.g. "Houston GC Q3" — every lead gets this tag'
+                className={inputCls}
+              />
+              <p className="text-[11.5px] text-slate-600 mt-1.5">
+                Label so a later search's leads never mix with this one.
+              </p>
+            </Field>
+            <Field label="Save to folder (optional)">
+              <input
+                value={saveFolder}
+                onChange={(e) => setSaveFolder(e.target.value)}
+                placeholder='e.g. "Q3 Outreach" or pick existing'
+                list="execute-folder-options"
+                className={inputCls}
+              />
+              <datalist id="execute-folder-options">
+                {folderOptions.map((f) => (
+                  <option key={f} value={f} />
+                ))}
+              </datalist>
+              <p className="text-[11.5px] text-slate-600 mt-1.5">
+                Every result is auto-filed here as it's found — stays out of the inbox.
+              </p>
+            </Field>
+          </div>
+
           {create.isError && (
             <p className="text-[13px] text-rose-300">
               Failed to start job: {(create.error as ApiError).message}
@@ -175,6 +233,17 @@ export default function Execute() {
           </div>
         </form>
       </div>
+
+      {/* Backend restart / server blip: keep watching, this run is NOT lost. */}
+      {job.isError && (
+        <div className="mt-5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3">
+          <p className="text-[13px] text-amber-300">
+            ⏳ Backend unreachable — reconnecting… your run{" "}
+            {job.data?.results?.length ? "keeps its results so far and " : ""}
+            resumes automatically once the server is back.
+          </p>
+        </div>
+      )}
 
       {job.data && (
         <JobLiveView
@@ -234,6 +303,14 @@ function JobLiveView({
             {job.query.trade} · {job.query.location} · target {job.query.target_emails} ·{" "}
             {elapsed(job.elapsed_s)} elapsed
           </p>
+          {(job.query.search_name || job.query.folder) && (
+            <p className="text-[12.5px] text-indigo-300/90 mt-1">
+              {job.query.folder && <>→ auto-filing into <span className="font-medium">“{job.query.folder}”</span></>}
+              {job.query.folder && job.query.search_name && " · "}
+              {job.query.search_name && <>tagged <span className="font-medium">“{job.query.search_name}”</span></>}
+              {" "}— stays out of the unfiled inbox.
+            </p>
+          )}
         </div>
         <div className="flex items-center gap-2">
           {running && (
@@ -272,7 +349,26 @@ function JobLiveView({
               </button>
             </>
           )}
-          {done && job.results.length > 0 && (
+          {job.state === "failed" && (
+            <>
+              <button
+                onClick={onResume}
+                disabled={resumePending}
+                className="rounded-lg bg-indigo-600 px-3 py-1.5 text-[13px] font-semibold text-white hover:bg-indigo-500 disabled:opacity-50"
+              >
+                {resumePending ? "Continuing…" : "▶ Continue Search"}
+              </button>
+              {job.results.length > 0 && (
+                <button
+                  onClick={() => navigate("/leads")}
+                  className="rounded-lg border border-white/10 px-3 py-1.5 text-[13px] text-slate-300 hover:bg-white/5"
+                >
+                  View {job.results.length} lead{job.results.length === 1 ? "" : "s"} so far →
+                </button>
+              )}
+            </>
+          )}
+          {done && job.state !== "failed" && job.results.length > 0 && (
             <button
               onClick={() => navigate("/leads")}
               className="rounded-lg bg-indigo-600 px-3 py-1.5 text-[13px] font-semibold text-white hover:bg-indigo-500"

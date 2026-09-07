@@ -37,6 +37,16 @@ class TestSearXNGProvider:
         """Provider has correct priority."""
         assert provider.priority == 10
 
+    def test_timeout_defaults_to_fast_cap(self):
+        """Default SearXNG timeout is short (6s) and mirrors onto timeout_s so
+        the manager's hard gate matches — a hung instance stalls a query at
+        most once before being blacklisted."""
+        p = SearXNGProvider(base_url="https://searxng.example.com")
+        assert p._timeout == 6
+        assert p.timeout_s == 6.0
+        p2 = SearXNGProvider(base_url="https://searxng.example.com", timeout=3)
+        assert p2.timeout_s == 3.0
+
     def test_health_check(self, provider):
         """Health check returns enabled status."""
         import asyncio

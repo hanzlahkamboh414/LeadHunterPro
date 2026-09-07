@@ -232,13 +232,32 @@ class RegistryIndexedSearch:
 
 
 def _run_provider(provider: Any, query: str, num: int) -> list[dict[str, Any]]:
-    """Run one (possibly async) provider, returning url/snippet/title dicts."""
+    """Run one (possibly async) provider, returning url/snippet/title dicts.
+
+    Applies the SAME hard per-query cap + circuit-breaker as
+    :class:`SearchProviderManager`: a hung provider (e.g. SearXNG waiting on
+    dead engines) is aborted after ``timeout_s`` and marked down on the shared
+    registry, so the NEXT query skips it instantly instead of paying the wait
+    again.
+    """
     import asyncio
+
+    from app.search_providers.registry import get_registry
+
+    timeout_s = getattr(provider, "timeout_s", 10.0)
 
     async def _do():
         try:
-            resp = await provider.search(SearchQuery(keywords=query, num_results=num))
+            resp = await asyncio.wait_for(
+                asyncio.ensure_future(
+                    provider.search(SearchQuery(keywords=query, num_results=num))
+                ),
+                timeout=timeout_s,
+            )
             return resp
+        except asyncio.TimeoutError:
+            get_registry().mark_down(provider.provider_name)
+            return None
         finally:
             # Each query runs in its own event loop (asyncio.run below). A
             # provider that lazily caches an aiohttp session would otherwise

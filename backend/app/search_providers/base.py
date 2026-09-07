@@ -36,6 +36,10 @@ class BaseSearchProvider(ABC):
     description: str = ""
     enabled: bool = True
     priority: int = 100
+    # Hard per-query cap applied by SearchProviderManager (asyncio.wait_for).
+    # A provider stuck waiting on its engines must give up fast — the manager
+    # then falls back to the next provider and marks this one down for a TTL.
+    timeout_s: float = 10.0
 
     @abstractmethod
     async def search(self, query: SearchQuery) -> SearchResponse:

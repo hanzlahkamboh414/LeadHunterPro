@@ -37,6 +37,10 @@ export interface JobQuery {
   location: string;
   target_emails: number;
   discover_only?: boolean;
+  /** OPTIONAL label for this run, stored as a tag on every lead it produces. */
+  search_name?: string;
+  /** OPTIONAL folder to auto-file every lead this run produces into. */
+  folder?: string;
 }
 
 export interface Job {
@@ -185,4 +189,61 @@ export interface AdminDashboard {
   jobs: Record<string, number>;
   risks: Record<string, number>;
   recent_jobs: AdminJobSummary[];
+}
+
+/** Admin — API key status. Only a masked tail is ever returned (never full). */
+export interface AdminKey {
+  name: string;
+  configured: boolean;
+  masked: string;
+}
+
+export interface AdminKeys {
+  keys: AdminKey[];
+  provider: string;
+  base_url: string;
+  model: string;
+  searxng_url: string;
+  env: string;
+  overlay_path: string;
+  applies_after_restart: boolean;
+}
+
+/** Admin — deleted-lead audit trail ("kon kon c email delete ki"). */
+export interface AdminDeletedRow {
+  email: string;
+  deleted_at: string;
+  reason: string;
+}
+
+export interface AdminDeleted {
+  total: number;
+  deleted: AdminDeletedRow[];
+}
+
+/** Admin — the discovery cache (pending_leads) viewer. */
+export interface AdminPendingRow {
+  email: string;
+  location: string;
+  dead: boolean;
+  attempted_at: string;
+  attempt_count: number;
+}
+
+export interface AdminCachePending {
+  total: number;
+  active: number;
+  dead: number;
+  rows: AdminPendingRow[];
+}
+
+/** Admin — the provider-neutral search-result cache status. */
+export interface AdminSearchCache {
+  path: string;
+  search_rows: number;
+  extract_rows: number;
+  search_ttl_days: number;
+  extract_ttl_days: number;
+  hit_rate: number;
+  top_queries: Array<{ query: string; max_results: number; fetched_at: string }>;
 }

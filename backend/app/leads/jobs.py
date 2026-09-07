@@ -173,6 +173,9 @@ class JobManager:
         # One threading.Event per job: set => running, cleared => paused. The
         # worker blocks in ``_wait_if_paused`` while its event is cleared.
         self._pause_events: dict[str, threading.Event] = {}
+        # Live worker threads — for on-the-fly dead-worker detection when the
+        # process is alive but a worker died (root cause of "running stuck").
+        self._workers: dict[str, threading.Thread] = {}
 
     def recover_orphans(self) -> int:
         """Mark jobs stuck in a live state as failed (root-cause fix).
@@ -230,6 +233,7 @@ class JobManager:
         self._pause_events[job.id] = ev
         t = threading.Thread(target=self._run, args=(job.id,), daemon=True)
         t.start()
+        self._workers[job.id] = t
         logger.info("Job %s submitted: %s", job.id, query.describe())
         return job
 
@@ -302,14 +306,57 @@ class JobManager:
                 self._pause_events[job_id] = ev
                 t = threading.Thread(target=self._run, args=(job_id,), daemon=True)
                 t.start()
+                self._workers[job_id] = t
                 logger.info("Job %s continued after interruption (fresh worker)", job_id)
                 return True
             return False
 
+    # -- dead-worker sweep (on-the-fly orphan detection) ----
+
+    def sweep_dead_workers(self) -> int:
+        """Mark live-state jobs whose worker thread has died as failed.
+
+        Covers the case where the process is still running but a worker
+        thread exited (exception, killed externally, TaskStop) — the DB
+        still says "running" and ``recover_orphans`` won't run until the
+        next process boot. Called lazily from ``get()``/``list_jobs()`` so
+        every read returns honest state.
+
+        Only sweeps jobs this process OWNS (tracked in ``_workers``). Cross-
+        process jobs are swept by ``recover_orphans`` at boot time.
+        """
+        count = 0
+        with self._lock:
+            for jid in list(self._workers):
+                thread = self._workers.get(jid)
+                if thread is None or thread.is_alive():
+                    continue
+                job = self._store.get(jid)
+                if job is None or job.state not in (JobState.queued, JobState.running, JobState.paused):
+                    continue
+                # Worker is dead but DB says live → mark failed now.
+                self._workers.pop(jid, None)
+                job.state = JobState.failed
+                job.error = (
+                    "worker thread interrupted (server busy/restart); "
+                    "click Continue to resume"
+                )
+                job.elapsed_s += _elapsed_now(job.updated_at)
+                job.updated_at = _now()
+                self._store.save(job)
+                count += 1
+                logger.warning(
+                    "sweep: job %s worker dead (state=%s) → marked failed",
+                    jid, job.state.value,
+                )
+        return count
+
     def get(self, job_id: str) -> Job | None:
+        self.sweep_dead_workers()
         return self._store.get(job_id)
 
     def list_jobs(self) -> list[Job]:
+        self.sweep_dead_workers()
         return self._store.list_all()
 
     # -- worker ----
@@ -372,6 +419,10 @@ class JobManager:
                 job.elapsed_s += (datetime.now(timezone.utc) - t0).total_seconds()
                 job.updated_at = _now()
                 self._store.save(job)
+        finally:
+            # Always clean up — completed, failed, or cancelled, the worker
+            # thread is no longer live. sweep_dead_workers uses this ref.
+            self._workers.pop(job_id, None)
 
     def _append_event(self, job_id: str, event: JobEvent) -> None:
         with self._lock:

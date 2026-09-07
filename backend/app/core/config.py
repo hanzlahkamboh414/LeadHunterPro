@@ -88,6 +88,11 @@ class Settings(BaseSettings):
 
     # Search Provider Configuration
     SEARXNG_URL: str = ""
+    # Seconds SearXNG gets before the orchestrator treats it as hung. SearXNG
+    # aggregates many engines (often including DuckDuckGo, which is dead/slow),
+    # so a misbehaving instance can stall a query for 20s+. A short cap plus the
+    # manager's circuit-breaker (mark-down + TTL) keeps the pipeline moving.
+    SEARXNG_TIMEOUT: int = 6
     BRAVE_SEARCH_API_KEY: str = Field(default="", repr=False)  # secret
     TAVILY_SEARCH_API_KEY: str = Field(default="", repr=False)  # secret
 

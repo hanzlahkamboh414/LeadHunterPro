@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 from app.discovery.sources.status import SourceStatus
@@ -349,6 +350,39 @@ def test_discovery_stops_honestly_on_exhaustion(monkeypatch):
     assert any("exhausted" in str(m) for _, m in events)
 
 
+def test_pass_log_includes_source_stats(monkeypatch):
+    """Each discovery pass records a JSON-safe per-source snapshot in the
+    pass_log, so a zero-result job is diagnosable from history (§6) instead
+    of only the generic fallback_reason — the Houston zero-result gap."""
+    def _with_stats(trade, location, limit, skip_pdfs=None):
+        return SourceStatus.EMPTY, [], {
+            "reason": "search_failed",
+            "source_stats": {
+                "directory_crawl": {"status": SourceStatus.EMPTY, "results": 0, "metadata": {}},
+                "plan_holder": {
+                    "status": SourceStatus.UNAVAILABLE, "results": 0,
+                    "metadata": {"reason": "search_failed",
+                                "search_errors": ["tavily: HTTP 432 usage limit"]},
+                },
+                "search": {"status": SourceStatus.EMPTY, "results": 0, "metadata": {}},
+            },
+        }
+
+    monkeypatch.setattr("app.leads.pipeline.run_discovery", _with_stats)
+    query = ResearchQuery(trade="gc", location="TX", target_emails=20)
+    leads, pass_log = discover_until_target(query, max_passes=1)
+    entry = pass_log[0]
+    stats = entry["source_stats"]
+    # SourceStatus enums are normalised to plain strings (JSON-safe).
+    assert stats["plan_holder"]["status"] == "unavailable"
+    assert stats["plan_holder"]["reason"] == "search_failed"
+    assert stats["directory_crawl"]["status"] == "empty"
+    assert stats["search"]["status"] == "empty"
+    # The pass_log entry is json.dumps-able, exactly as the job runner stores it.
+    json.dumps(entry)
+    assert leads == []
+
+
 # ---------------------------------------------------------------------------
 # run_research
 # ---------------------------------------------------------------------------
@@ -601,6 +635,91 @@ def test_run_research_removes_researched_from_pending(monkeypatch):
     # The researched email was cleared from pending.
     assert removed == ["a@x.com"]
     assert len(saved) == 1  # persisted to dossiers
+
+
+def test_research_query_roundtrip_preserves_name_and_folder():
+    """The job's persisted query dict round-trips search_name+folder, so a job
+    resumed after a restart re-files into the SAME folder/tag it started with."""
+    q = ResearchQuery(
+        trade="gc", location="Houston TX", target_emails=3,
+        search_name="Houston GC Q3", folder="Q3 Outreach",
+    )
+    restored = ResearchQuery.from_dict(q.to_dict())
+    assert restored.search_name == "Houston GC Q3"
+    assert restored.folder == "Q3 Outreach"
+    assert restored.trade == "gc"
+    # Defaults stay empty — the old query shape round-trips unchanged.
+    bare = ResearchQuery(trade="gc", location="TX", target_emails=1)
+    assert ResearchQuery.from_dict(bare.to_dict()).search_name == ""
+    assert ResearchQuery.from_dict(bare.to_dict()).folder == ""
+
+
+def test_run_research_auto_files_named_search_into_folder(monkeypatch):
+    """A run with a folder + search name files each NEWLY-researched lead AT
+    SAVE TIME (set_meta right after save) — the Phase C "leads mix ni hogi"
+    guarantee. Cached leads are skipped, so their meta is never clobbered."""
+    monkeypatch.setattr("app.lead_research.agent.AILeadResearchAgent", _FakeAgent)
+
+    saved, meta_calls = [], []
+
+    class _FakeStore:
+        def __init__(self, preexisting: set[str]):
+            self._preexisting = preexisting
+        def get(self, email):
+            # The cached branch reads real dossier fields (person.name, etc.).
+            if email not in self._preexisting:
+                return None
+            return SimpleNamespace(
+                company=SimpleNamespace(name="Pre"),
+                person=SimpleNamespace(name="Old", bound=False),
+                potential_score=5.0,
+                recommendation="nurture",
+                intent=None,
+                timing=None,
+                sources_checked=[],
+            )
+        def save(self, dossier):
+            saved.append(dossier)
+        def set_meta(self, email, *, folder, tags):
+            meta_calls.append((email, folder, tags))
+
+    leads = [
+        {"email": "a@x.com", "domain": "x.com"},   # new -> auto-filed
+        {"email": "done@y.com", "domain": "y.com"},  # cached -> NOT re-filed
+    ]
+    results = run_research(
+        leads,
+        store=_FakeStore(preexisting={"done@y.com"}),
+        search_name="Houston GC Q3",
+        folder="Q3 Outreach",
+    )
+    assert len(results) == 2
+    # Only the NEWLY-researched lead was saved + auto-filed, exactly once.
+    assert [s.company.name for s in saved] == ["Acme"]
+    assert meta_calls == [("a@x.com", "Q3 Outreach", ["Houston GC Q3"])]
+
+
+def test_run_research_no_file_when_no_folder_or_name(monkeypatch):
+    """Without folder/search_name, save behaves exactly as before — no set_meta."""
+    monkeypatch.setattr("app.lead_research.agent.AILeadResearchAgent", _FakeAgent)
+
+    saved, meta_calls = [], []
+
+    class _FakeStore:
+        def get(self, email):
+            return None
+        def save(self, dossier):
+            saved.append(dossier)
+        def set_meta(self, email, *, folder, tags):
+            meta_calls.append((email, folder, tags))
+
+    results = run_research(
+        leads=[{"email": "a@x.com", "domain": "x.com"}],
+        store=_FakeStore(),
+    )
+    assert len(results) == 1
+    assert len(saved) == 1
+    assert meta_calls == []
 
 
 class _DeadDomainAgent:

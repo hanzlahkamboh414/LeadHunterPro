@@ -40,7 +40,7 @@ class SearXNGProvider(BaseSearchProvider):
         self,
         base_url: str,
         *,
-        timeout: int = 10,
+        timeout: int = 6,
         max_results: int = 20,
         safe_search: bool = True,
     ) -> None:
@@ -48,12 +48,14 @@ class SearXNGProvider(BaseSearchProvider):
 
         Args:
             base_url: Full URL to the SearXNG instance (e.g. 'https://searx.org').
-            timeout: Request timeout in seconds.
+            timeout: Request timeout in seconds (SEARXNG_TIMEOUT; a per-query
+                hard cap so a slow instance cannot stall a whole run).
             max_results: Maximum number of results to request.
             safe_search: Whether to enable safe search filtering.
         """
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
+        self.timeout_s = float(timeout)  # manager hard-gate matches the aiohttp cap
         self._max_results = max_results
         self._safe_search = 1 if safe_search else 0
         self._session: Any = None  # Set on first use via _get_session

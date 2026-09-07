@@ -5,6 +5,11 @@
 // configured in the UI (persisted to localStorage) it is sent as X-API-Key.
 
 import type {
+  AdminCachePending,
+  AdminDashboard,
+  AdminDeleted,
+  AdminKeys,
+  AdminSearchCache,
   FolderCreateOut,
   FoldersOut,
   Job,
@@ -12,7 +17,6 @@ import type {
   JobSummary,
   LeadDetail,
   LeadSummary,
-  AdminDashboard,
 } from "../types";
 
 const BASE = import.meta.env.VITE_API_BASE || "/api/v1";
@@ -73,6 +77,10 @@ export interface CreateJobInput {
   location: string;
   target_emails: number;
   discover_only?: boolean;
+  /** OPTIONAL label for this run, stored as a tag on every lead it produces. */
+  search_name?: string;
+  /** OPTIONAL folder to auto-file every lead this run produces into. */
+  folder?: string;
 }
 
 export interface LeadsFilter {
@@ -95,6 +103,40 @@ export interface OrganizeInput {
 export const api = {
   adminDashboard(): Promise<AdminDashboard> {
     return request<AdminDashboard>("/admin/dashboard");
+  },
+
+  // Admin — API key management (masked status only; the FULL value is never
+  // returned, so the UI can only show configured/masked + set/clear).
+  adminKeys(): Promise<AdminKeys> {
+    return request<AdminKeys>("/admin/keys");
+  },
+
+  updateAdminKey(name: string, value: string): Promise<AdminKeys> {
+    return request<AdminKeys>("/admin/keys", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, value }),
+    });
+  },
+
+  /** Admin — which emails were deleted + when + why. */
+  adminDeleted(limit = 200): Promise<AdminDeleted> {
+    return request<AdminDeleted>(`/admin/deleted?limit=${limit}`);
+  },
+
+  /** Admin — the discovery cache (pending_leads) viewer. */
+  adminPendingCache(limit = 100): Promise<AdminCachePending> {
+    return request<AdminCachePending>(`/admin/cache/pending?limit=${limit}`);
+  },
+
+  /** Admin — provider-neutral search-cache status. */
+  adminSearchCache(): Promise<AdminSearchCache> {
+    return request<AdminSearchCache>("/admin/cache/search");
+  },
+
+  /** Admin — purge TTL-expired search-cache entries. */
+  purgeSearchCache(): Promise<{ removed: number }> {
+    return request("/admin/cache/purge-search", { method: "POST" });
   },
 
   // Jobs ---------------------------------------------------------------

@@ -6,6 +6,7 @@ falling back to the next provider when one fails or returns no results.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any
@@ -70,11 +71,19 @@ class SearchProviderManager:
         )
 
         for provider in providers:
+            # Circuit-breaker: a provider inside its down-window (recently timed
+            # out / hard-failed) is skipped instantly — no slow retries.
+            if self._registry.is_down(provider.provider_name):
+                logger.debug("Skipping down provider: %s", provider.provider_name)
+                continue
+
             provider_start = time.monotonic()
-            logger.debug("Trying provider: %s", provider.provider_name)
 
             try:
-                response = await provider.search(query)
+                response = await asyncio.wait_for(
+                    asyncio.ensure_future(provider.search(query)),
+                    timeout=getattr(provider, "timeout_s", 10.0),
+                )
                 provider_elapsed = (time.monotonic() - provider_start) * 1000
 
                 provider_stats[provider.provider_name] = {
@@ -98,25 +107,51 @@ class SearchProviderManager:
                     if len(all_results) >= min_results:
                         break
                 elif response.status == "error":
+                    # A provider that answers with status=error (e.g. SearXNG
+                    # swallowing its own aiohttp timeout, an auth/rate-limit
+                    # rejection) will keep failing — blacklist it for a TTL so
+                    # later queries skip straight to the next provider.
                     errors[provider.provider_name] = response.error
+                    self._registry.mark_down(provider.provider_name)
                     logger.warning(
-                        "Provider %s failed: %s",
+                        "Provider %s failed — marked down: %s",
                         provider.provider_name,
                         response.error,
                     )
 
+            except asyncio.TimeoutError:
+                # Hung provider (e.g. SearXNG waiting on dead engines) — give up
+                # fast, fall through to the next provider, and blacklist it for
+                # a TTL so the NEXT query does not pay the same wait again.
+                provider_elapsed = (time.monotonic() - provider_start) * 1000
+                name = provider.provider_name
+                errors[name] = f"{name} timed out after {getattr(provider, 'timeout_s', 10.0):.1f}s"
+                provider_stats[name] = {
+                    "status": "error",
+                    "results": 0,
+                    "latency_ms": round(provider_elapsed, 1),
+                    "error": errors[name],
+                }
+                self._registry.mark_down(name)
+                logger.warning(
+                    "Provider %s hung (>%.1fs) — marked down, falling back",
+                    name, getattr(provider, "timeout_s", 10.0),
+                )
+
             except Exception as exc:
                 provider_elapsed = (time.monotonic() - provider_start) * 1000
-                errors[provider.provider_name] = str(exc)
-                provider_stats[provider.provider_name] = {
+                name = provider.provider_name
+                errors[name] = str(exc)
+                provider_stats[name] = {
                     "status": "error",
                     "results": 0,
                     "latency_ms": round(provider_elapsed, 1),
                     "error": str(exc),
                 }
+                self._registry.mark_down(name)
                 logger.exception(
-                    "Provider %s exception",
-                    provider.provider_name,
+                    "Provider %s exception — marked down",
+                    name,
                 )
 
         total_latency = (time.monotonic() - start) * 1000

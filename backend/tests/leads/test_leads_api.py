@@ -141,6 +141,31 @@ def test_create_job_and_poll_progress(tmp_path, monkeypatch):
     assert done["results"][0]["recommendation"] == "contact_now"
 
 
+def test_create_job_carries_search_name_and_folder(tmp_path, monkeypatch):
+    """The Execute form's optional name+folder ride on the job's query, so the
+    pipeline can auto-file leads of THIS run — the Phase C "mix ni hogi" hook."""
+    seen = {}
+
+    def fake(query, emit=None, cancel=None, store=None, paused=None):
+        seen["query"] = query
+        return {}
+
+    client = _setup(tmp_path, monkeypatch, run_full=fake)
+    r = client.post("/api/v1/leads/jobs", json={
+        "trade": "general contractor", "location": "Houston TX",
+        "target_emails": 2, "search_name": "Houston GC Q3",
+        "folder": "Q3 Outreach",
+    })
+    assert r.status_code == 201
+    # The job's own query dict carries the fields (frontend echo contract).
+    assert r.json()["query"]["search_name"] == "Houston GC Q3"
+    assert r.json()["query"]["folder"] == "Q3 Outreach"
+    # And the worker received them on the ResearchQuery it runs.
+    _wait_state(client, r.json()["id"], "completed")
+    assert seen["query"].search_name == "Houston GC Q3"
+    assert seen["query"].folder == "Q3 Outreach"
+
+
 def test_validation_rejects_bad_query(tmp_path, monkeypatch):
     client = _setup(tmp_path, monkeypatch)
     r = client.post("/api/v1/leads/jobs", json={"trade": "", "location": "", "target_emails": 0})

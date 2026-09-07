@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 
 from app.leads.jobs import JobManager, JobStore
@@ -268,3 +269,73 @@ def test_list_jobs_returns_submitted(tmp_path, monkeypatch):
     manager = JobManager(db_path=str(tmp_path / "jobs.db"))
     manager.submit(ResearchQuery(trade="gc", location="TX", target_emails=2))
     assert len(manager.list_jobs()) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Dead-worker sweep: "front abi b running show ho rhi ha" fix
+# ---------------------------------------------------------------------------
+
+def test_sweep_marks_dead_worker_job_failed_on_read(tmp_path):
+    """A job whose worker thread died (process still alive) is honestly marked
+    failed the moment it is read — the DB row must never say 'running' forever."""
+    store = JobStore(db_path=str(tmp_path / "jobs.db"))
+    store.save(Job(
+        id="dead1",
+        query={"trade": "gc", "location": "TX", "target_emails": 2},
+        state=JobState.running,
+        created_at="2026-09-07T02:00:00",
+        updated_at="2026-09-07T02:00:10",
+    ))
+    manager = JobManager(store=store)
+
+    # Simulate a worker that already exited (started + finished => not alive).
+    dead = threading.Thread(target=lambda: None)
+    dead.start()
+    dead.join()
+    assert not dead.is_alive()
+    manager._workers["dead1"] = dead  # this process "owns" the dead worker
+
+    got = manager.get("dead1")
+    assert got.state is JobState.failed
+    assert "Continue" in got.error
+    assert "dead1" not in manager._workers  # ref cleaned up
+    # Idempotent: a second read does not change anything.
+    assert manager.get("dead1").state is JobState.failed
+
+
+def test_sweep_leaves_live_worker_jobs_untouched(tmp_path, monkeypatch):
+    """A genuinely-running job (worker thread alive) is never swept."""
+    def _hold(query, emit=None, cancel=None, store=None, paused=None):
+        while True:
+            time.sleep(0.005)
+
+    monkeypatch.setattr("app.leads.jobs.run_full", _hold)
+    manager = JobManager(db_path=str(tmp_path / "jobs.db"))
+    job = manager.submit(ResearchQuery(trade="gc", location="TX", target_emails=1))
+    _wait_running(manager, job.id)
+
+    assert manager._workers[job.id].is_alive()
+    assert manager.get(job.id).state is JobState.running
+    assert manager.sweep_dead_workers() == 0
+
+
+def test_sweep_recovers_via_list_jobs_too(tmp_path):
+    """History uses list_jobs; an unread dead-worker job must surface as failed."""
+    store = JobStore(db_path=str(tmp_path / "jobs.db"))
+    store.save(Job(
+        id="dead2",
+        query={"trade": "gc", "location": "TX", "target_emails": 2},
+        state=JobState.queued,
+        created_at="2026-09-07T02:05:00",
+        updated_at="2026-09-07T02:05:00",
+    ))
+    manager = JobManager(store=store)
+    dead = threading.Thread(target=lambda: None)
+    dead.start()
+    dead.join()
+    manager._workers["dead2"] = dead
+
+    jobs = manager.list_jobs()
+    got = next(j for j in jobs if j.id == "dead2")
+    assert got.state is JobState.failed
+    assert "Continue" in got.error

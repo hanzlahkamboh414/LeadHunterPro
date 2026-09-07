@@ -192,6 +192,8 @@ def create_job(body: JobCreate) -> JobOut:
         location=body.location,
         target_emails=body.target_emails,
         discover_only=body.discover_only,
+        search_name=body.search_name,
+        folder=body.folder,
     )
     try:
         query.validate()
@@ -395,7 +397,7 @@ def clear_junk() -> dict[str, Any]:
     removed: list[str] = []
     for d in _store.list_all():
         if regate_recommendation(d) == "skip":
-            if _store.delete(d.email):
+            if _store.delete(d.email, reason="junk"):
                 removed.append(d.email)
     if removed:
         from app.lead_research.service import PendingLeadsStore

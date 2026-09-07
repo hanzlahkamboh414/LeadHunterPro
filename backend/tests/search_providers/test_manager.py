@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
+
 import pytest
 
 from app.search_providers.manager import SearchProviderManager
@@ -20,6 +23,8 @@ class FakeProvider:
         results: list | None = None,
         error: str | None = None,
         exception: Exception | None = None,
+        sleep: float = 0.0,
+        timeout_s: float = 10.0,
     ) -> None:
         self.provider_name = name
         self.description = f"Fake provider: {name}"
@@ -28,10 +33,14 @@ class FakeProvider:
         self._results = results or []
         self._error = error
         self._exception = exception
+        self._sleep = sleep  # >0 simulates a hung/slow provider
+        self.timeout_s = timeout_s  # manager hard-gate cap
         self.call_count = 0
 
     async def search(self, query):  # type: ignore[override]
         self.call_count += 1
+        if self._sleep:
+            await asyncio.sleep(self._sleep)
         if self._exception:
             raise self._exception
         if self._error:
@@ -248,3 +257,102 @@ class TestSearchProviderManager:
         assert disabled.call_count == 0
         assert enabled.call_count == 1
         assert response.status == "success"
+
+    # -----------------------------------------------------------------------
+    # Hung-provider fast failover ("search engine bahut slow hai" root cause):
+    # a SearXNG that stalls for 20s+ must give up inside its timeout and the
+    # next query must skip it entirely (circuit-breaker), not pay it again.
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_hanging_provider_times_out_and_falls_back(self):
+        """A hung provider (sleeps past its cap) is aborted fast; the next
+        provider answers and the hung one is marked down."""
+        registry = SearchProviderRegistry()
+        hung = FakeProvider("slow", priority=10, sleep=5.0, timeout_s=0.05)
+        good = FakeProvider(
+            "fast",
+            priority=20,
+            results=[SearchResult(title="B", url="https://b.com")],
+        )
+        registry.register(hung)
+        registry.register(good)
+        manager = SearchProviderManager(registry)
+
+        t0 = time.monotonic()
+        response = await manager.search(SearchQuery(keywords="test"))
+        elapsed = time.monotonic() - t0
+
+        # Answered from the second provider, WELL before the hung one finished.
+        assert response.status == "success"
+        assert response.results[0].url == "https://b.com"
+        assert elapsed < 2.0, f"hung provider was not capped: {elapsed:.2f}s"
+        assert hung.call_count == 1  # attempted once, then aborted
+        assert "timed out" in response.error
+        assert registry.is_down("slow") is True
+
+    @pytest.mark.asyncio
+    async def test_down_provider_skipped_on_next_query(self):
+        """Once a provider is marked down, the NEXT query skips it instantly —
+        the run stops paying the hung provider on every lead."""
+        registry = SearchProviderRegistry()
+        hung = FakeProvider("slow", priority=10, sleep=5.0, timeout_s=0.05)
+        good = FakeProvider(
+            "fast",
+            priority=20,
+            results=[SearchResult(title="B", url="https://b.com")],
+        )
+        registry.register(hung)
+        registry.register(good)
+        manager = SearchProviderManager(registry)
+
+        _ = await manager.search(SearchQuery(keywords="one"))
+        assert hung.call_count == 1
+        assert registry.is_down("slow")
+
+        _ = await manager.search(SearchQuery(keywords="two"))
+        # Hung provider never called a second time — skipped instantly.
+        assert hung.call_count == 1
+        assert good.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_error_response_provider_is_blacklisted(self):
+        """A provider that answers status='error' (e.g. SearXNG swallowing its
+        own timeout) is blacklisted so later queries do not re-try it."""
+        registry = SearchProviderRegistry()
+        bad = FakeProvider("bad", priority=10, error="SearXNG error: timed out")
+        good = FakeProvider(
+            "good",
+            priority=20,
+            results=[SearchResult(title="X", url="https://x.com")],
+        )
+        registry.register(bad)
+        registry.register(good)
+        manager = SearchProviderManager(registry)
+
+        _ = await manager.search(SearchQuery(keywords="one"))
+        assert bad.call_count == 1
+        assert registry.is_down("bad")
+
+        _ = await manager.search(SearchQuery(keywords="two"))
+        assert bad.call_count == 1  # skipped
+        assert good.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_down_provider_retried_after_ttl(self):
+        """After the down-window elapses, the provider is re-tried once —
+        a recovered provider comes back into rotation (infra stays replaceable)."""
+        registry = SearchProviderRegistry()
+        provider = FakeProvider("q", sleep=5.0, timeout_s=0.05)
+        registry.register(provider)
+        manager = SearchProviderManager(registry)
+
+        _ = await manager.search(SearchQuery(keywords="one"))
+        assert registry.is_down("q")
+
+        registry.mark_down("q", ttl=0.01)
+        await asyncio.sleep(0.02)
+        assert registry.is_down("q") is False  # TTL elapsed → re-try allowed
+
+        _ = await manager.search(SearchQuery(keywords="two"))
+        assert provider.call_count == 2  # tried again (hung again → re-marked)

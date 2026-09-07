@@ -12,6 +12,8 @@ class JobCreate(BaseModel):
     location: str = Field(..., description="WHERE, e.g. 'Texas' (any region)")
     target_emails: int = Field(20, ge=1, description="HOW MANY emails/leads to aim for")
     discover_only: bool = Field(False, description="Stop after discovery, skip AI research")
+    search_name: str = Field("", description="OPTIONAL label for this run, stored as a tag on every lead it produces")
+    folder: str = Field("", description="OPTIONAL folder to auto-file every lead this run produces into")
 
 
 class JobEventOut(BaseModel):

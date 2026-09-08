@@ -234,8 +234,56 @@ def regate_recommendation(dossier: LeadDossier) -> str:
     """
     from app.engines.lead.lead_models import role_is_plausibly_relevant
 
+    from app.company_profile import get_profile
+
     ind = (dossier.company.industry or "").lower()
     if ind and not _is_construction(ind):
+        return "skip"
+    # Off-vertical hard skip (root-cause fix for the "fiber construction" leak):
+    # the binary construction check passes any 'fiber/telecom/utility/road/
+    # pipeline/materials' contractor that calls itself construction. The company
+    # profile is the ONE definition of OUR vertical (building trades), and a
+    # dossier whose industry explicitly matches an excluded vernacular is not a
+    # lead — re-gated here so old dossiers are never served stale (same policy
+    # as the _is_construction skip above). Conservative: unknown industries pass.
+    if ind and get_profile().is_off_vertical(dossier.company.industry):
+        return "skip"
+    # Non-client hard skip (root-cause fix for the "irrelevant data" flood): a
+    # company that is an A/E/C consultant, trade association, software/IT firm,
+    # transit/mobility provider, plan service, etc. is NOT a buyer even when it
+    # touches construction. The profile's term list is the ONE definition, and
+    # re-gating stored dossiers here (same display-time policy, zero credits)
+    # is what keeps old off-service contacts from showing on the frontend —
+    # the user's "data jo hamari services se match nahi karta" complaint.
+    if ind and get_profile().is_non_client(dossier.company.industry):
+        return "skip"
+
+    # --- Identity backstop (root-cause hardening for the 2026-09-08 purge) ---
+    # All three industry gates above can only read the STORED industry label,
+    # and the AI occasionally mislabels a non-client — a marine/heavy-civil
+    # contractor, an A/E/C consultancy, a supplier, a bridge builder — as
+    # "General Contractor". That mislabel sails past every industry gate, which
+    # is exactly why 24 such dossiers were hand-purged from the live store.
+    # This reads the IDENTITY strings (company name, refined company, email
+    # domain — short, low-collision) against BOTH the excluded and non-client
+    # lists, and the headline FACT against the phrase-precise non-client list
+    # ONLY (never the excluded list: a sentence like "supply chain coordination"
+    # must not martyre a legit GC). An explicit match hard-skips, same policy.
+    _profile = get_profile()
+    _identity = " ".join([
+        dossier.company.name or "",
+        dossier.refined_company or "",
+        dossier.domain or "",
+    ]).lower()
+    if _identity and (
+        any(v in _identity for v in _profile.excluded_vernaculars)
+        or any(t in _identity for t in _profile.non_client_terms)
+    ):
+        return "skip"
+    if dossier.company.facts and any(
+        t in (dossier.company.facts[0].claim or "").lower()
+        for t in _profile.non_client_terms
+    ):
         return "skip"
 
     relevant = bool((dossier.person.role or "").strip()) and role_is_plausibly_relevant(

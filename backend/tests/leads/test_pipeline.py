@@ -1124,3 +1124,100 @@ def test_discovery_fresh_filter_drops_cooled_email(monkeypatch, tmp_path):
     # The cooled lead is never handed to research; nothing else to serve.
     assert leads == []
     assert pending.count() == 1
+
+
+# ---------------------------------------------------------------------------
+# Fix A — search/crawl lane skips already-seen company domains BEFORE the
+# website email-probe (the web-lane equivalent of plan-holder skip_pdfs).
+# ---------------------------------------------------------------------------
+
+def test_discovery_filters_seen_domains_before_probe(monkeypatch):
+    """Fix A: a company record whose website domain this run ALREADY saw is
+    dropped BEFORE company_records_to_leads (no re-probe, no re-crawl), while
+    a genuinely new domain still reaches conversion. The set is MUTATED so
+    later passes/rounds advance instead of re-serving the pool."""
+    import app.leads.pipeline as pipeline
+    seen_domains = {"acme.com"}
+
+    def _discover(trade, location, limit, skip_pdfs=None):
+        return SourceStatus.SUCCESS, [
+            # acme.com already seen this run -> must be dropped pre-probe.
+            {"company_name": "Acme", "website": "https://www.acme.com",
+             "source_url": "https://acme.com"},
+            # brand-new domain -> must reach company_records_to_leads.
+            {"company_name": "Beta", "website": "https://beta.co",
+             "source_url": "https://beta.co"},
+        ], {"pdfs_found": 0, "pdf_urls": []}
+
+    monkeypatch.setattr("app.leads.pipeline.run_discovery", _discover)
+
+    reached = []
+
+    def _spy(records, **kw):
+        # Capture which records actually reached conversion (the probe stage).
+        reached.append([r.get("website") for r in records])
+        return ([{"email": "b@beta.co", "domain": "beta.co", "company": "Beta",
+                  "person": "", "source_url": "https://beta.co"}],
+                {"plan_emails": 0, "probed": 1, "with_email": 1, "dup_plan": 0,
+                 "no_email": 0})
+
+    monkeypatch.setattr(pipeline, "company_records_to_leads", _spy)
+
+    query = ResearchQuery(trade="gc", location="TX", target_emails=1)
+    leads, _ = discover_until_target(query, max_passes=1, seen_domains=seen_domains)
+
+    # acme.com (already seen) never reached conversion; only beta.co did.
+    assert reached == [["https://beta.co"]]
+    assert len(leads) == 1 and leads[0]["domain"] == "beta.co"
+    # The new domain was remembered (mutated in place) for the next pass/round.
+    assert "beta.co" in seen_domains
+    assert "acme.com" in seen_domains
+
+
+def test_run_full_stops_on_no_progress_plateau(monkeypatch, tmp_path):
+    """Fix C: the 'endless loop' is really a plateau — discovery keeps returning
+    NEW domains, but research scores every one as skip (non-client), so the
+    working count never moves. run_full stops after TWO such rounds with an
+    honest reason instead of burning all 6 rounds on the same dead end."""
+    from app.lead_research.service import LeadResearchStore
+
+    db = str(tmp_path / "leads.db")
+    store = LeadResearchStore(db_path=db)
+    calls = {"n": 0}
+
+    def _stale(trade, location, limit, skip_pdfs=None):
+        calls["n"] += 1
+        # Each pass yields a genuinely NEW domain, so Fix A's seen-domain filter
+        # never drops it — isolating the plateau guard. Research still skips it.
+        return SourceStatus.SUCCESS, [
+            _record("NoClient", f"x{calls['n']}@nc{calls['n']}.com",
+                    f"nc{calls['n']}.com"),
+        ], {"pdf_urls": [f"https://ph/{calls['n']}.pdf"]}
+
+    monkeypatch.setattr("app.leads.pipeline.run_discovery", _stale)
+
+    from app.lead_research.models import CompanyProfile, LeadDossier, PersonFindings
+
+    class _SkipAgent:
+        def research(self, email, domain, *a, **k):
+            return LeadDossier(
+                email=email, domain=domain,
+                company=CompanyProfile(name="NoClient", industry="Software",
+                                       location="TX"),
+                person=PersonFindings(name="", role="", bound=False,
+                                      role_relevance=False),
+                potential_score=0.0, recommendation="skip",
+                fit="Not our client — software, not a bidding contractor.",
+            )
+
+    monkeypatch.setattr("app.lead_research.agent.AILeadResearchAgent", _SkipAgent)
+
+    query = ResearchQuery(trade="gc", location="TX", target_emails=100)
+    outcome = run_full(query, store=store)
+
+    assert outcome["working_leads"] == 0
+    assert outcome["shortfall"] == 100
+    assert outcome["shortfall_reason"] == "no_progress_plateau"
+    # Stopped after 2 plateau rounds (each round's discovery runs its passes),
+    # NOT all 6 rounds' worth of re-discovery.
+    assert calls["n"] <= 2 * 10  # 2 rounds x <=10 passes/round

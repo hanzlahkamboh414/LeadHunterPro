@@ -299,12 +299,16 @@ def test_backward_compatibility_ai_ask_ignored():
 # --- Re-gate: stored dossiers are re-derived against CURRENT rules ----
 
 def _dossier(email="x@acme.com", *, industry="general contractor", role="Owner",
-             stored_rec="contact_now", score=8.0, bound=True, name="Acme Builders"):
+             stored_rec="contact_now", score=8.0, bound=True, name="Acme Builders",
+             domain="acme.com", fact="", refined_company=""):
     """Build a LeadDossier with an OLD/AI-era stored recommendation."""
+    facts = [AIEvidence(claim=fact, source_url="https://x", source_type="web",
+                        confidence="high")] if fact else []
     return LeadDossier(
         email=email,
-        domain="acme.com",
-        company=_company(name=name, industry=industry, location="Texas"),
+        domain=domain,
+        refined_company=refined_company,
+        company=_company(name=name, industry=industry, location="Texas", facts=facts),
         person=PersonFindings(name="Jane", role=role, role_relevance=True, bound=bound),
         intent=_intent(),
         timing=_timing(),
@@ -352,3 +356,111 @@ def test_regate_non_construction_hard_skips():
 def test_regate_empty_role_never_contact_now():
     d = _dossier(role="", stored_rec="contact_now", bound=True)
     assert regate_recommendation(d) == "nurture"
+
+
+def test_regate_off_vertical_hard_skips():
+    """Fiber/telecom/utility industry passes binary _is_construction but
+    is_off_vertical -> hard skip (never burns deep-research credits)."""
+    d = _dossier(role="Owner", industry="Fiber Installation", stored_rec="contact_now")
+    assert regate_recommendation(d) == "skip"
+
+
+def test_regate_construction_not_off_vertical_passes():
+    """General contractor industry is NOT off-vertical -> normal scoring."""
+    d = _dossier(role="Owner", industry="general contractor", stored_rec="contact_now")
+    assert regate_recommendation(d) == "contact_now"
+
+
+def test_regate_non_client_hard_skips():
+    """An A/E/C consultancy that somehow stored contact_now is NOT a buyer —
+    is_non_client -> hard skip, so old irrelevant dossiers vanish from the
+    frontend without re-researching (the 24-dossier live-store audit)."""
+    d = _dossier(role="Owner", industry="Engineering Consultancy",
+                 stored_rec="contact_now", score=8.0, bound=True)
+    assert regate_recommendation(d) == "skip"
+
+    # A trade ASSOCIATION is also not a client (plan service / builders exchange).
+    a = _dossier(role="Owner", industry="Builders Exchange / Plan Service",
+                 stored_rec="contact_now")
+    assert regate_recommendation(a) == "skip"
+
+
+def test_regate_phrase_precise_keeps_engineering_contractor():
+    """'General Engineering Contractor' is NOT flagged: single 'engineering'
+    never matches — only the explicit non-client PHRASES ('engineering firm',
+    'engineering services', ...) do. The funnel is never starved on a guess."""
+    d = _dossier(role="Owner", industry="General Engineering Contractor",
+                 stored_rec="contact_now")
+    assert regate_recommendation(d) == "contact_now"
+
+
+# --- Identity backstop: name / domain / fact catch the mislabeled-industry
+# --- class (the 2026-09-08 purge: AI stored "General Contractor" for a marine
+# --- / heavy-civil / suppliers / AEC-consultant, so every industry gate missed).
+
+def test_regate_name_off_vertical_hard_skips():
+    """A company whose NAME names the off-vertical (Signature BRIDGE) hard-skips
+    even when the AI mislabeled the industry as 'General Contractor'."""
+    d = _dossier(name="Signature Bridge Construction",
+                 industry="General Contractor", role="Owner", bound=True)
+    assert regate_recommendation(d) == "skip"
+
+
+def test_regate_name_materials_supplier_hard_skips():
+    """'InRoads Paving, Milling and Materials' — identity carries 'materials'."""
+    d = _dossier(name="InRoads Paving, Milling and Materials",
+                 industry="Specialty Subcontractor", role="Owner", bound=True)
+    assert regate_recommendation(d) == "skip"
+
+
+def test_regate_domain_off_vertical_hard_skips():
+    """Email domain is a legit identity string: a marine / utility domain that
+    the AI left with a vague industry is caught here."""
+    d = _dossier(name="NASSCO East", domain="utlmarinebuilders.com",
+                 industry="Specialty Subcontractor", role="Owner", bound=True)
+    assert regate_recommendation(d) == "skip"
+
+
+def test_regate_fact_non_client_hard_skips():
+    """When the AI-stored industry says 'General Contractor' but the headline
+    fact names a non-client class, the fact-term check hard-skips (ABGI)."""
+    d = _dossier(name="ABGI", industry="General Contractor", role="Owner",
+                 bound=True,
+                 fact="ABGI is a program-management company focused on "
+                      "physical brand assets for established retailers")
+    assert regate_recommendation(d) == "skip"
+
+
+def test_regate_marine_industry_hard_skips():
+    """New config terms: an industry that names marine/heavy-civil/infrastructure
+    construction is off the building-trades vertical (SYB, Dutra, Power Eng)."""
+    for ind in (
+        "General Contractor — Heavy Civil Construction",
+        "Marine & Heavy Civil Construction Contractor",
+        "General Contractor — Energy & Alternative Fuel Infrastructure",
+    ):
+        d = _dossier(name="X Builders", industry=ind, role="Owner", bound=True)
+        assert regate_recommendation(d) == "skip", ind
+
+
+def test_regate_clean_gc_never_overridden_by_fact_words():
+    """Conservattive: a legit GC whose fact mentions SUPPLY CHAIN / distribution
+    coordination (excluded-list words) is NOT skipped — the excluded list is
+    applied to identity strings, never to the fact sentence."""
+    d = _dossier(name="Fairway Construction", industry="general contractor",
+                 role="Owner", bound=True,
+                 fact="Fairway Construction is a commercial general contractor "
+                      "providing construction management and supply chain "
+                      "coordination to building owners")
+    assert regate_recommendation(d) == "contact_now"
+
+
+def test_regate_clean_gc_geotechnical_trade_not_suppressed():
+    """A geotechnical SPECIALTY CONTRACTOR that bids (Schnabel, Nicholson) is
+    legitimately in the funnel — the term lists carry no 'geotechnical', so the
+    backstop never rejects an earthwork/shoring trade on a word guess."""
+    d = _dossier(name="Schnabel", industry="Specialty Subcontractor",
+                 role="Owner", bound=True, domain="schnabel.com",
+                 fact="Schnabel is a geostructural design-build contractor "
+                      "specializing in earth retention and deep foundations")
+    assert regate_recommendation(d) == "contact_now"

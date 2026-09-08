@@ -149,6 +149,46 @@ def test_research_happy_path():
     assert profile.facts[1].confidence == "unverified"
 
 
+def test_research_parses_client_verdict():
+    """The Stage-1 client-fit verdict (is_our_client + client_reason) is parsed
+    from the SAME research call — no extra AI round-trip."""
+    resp = _good_ai_response()
+    resp["is_our_client"] = "no"
+    resp["client_reason"] = "Engineering consultancy, not a bidding contractor."
+    researcher = CompanyResearcher(
+        ai_ask=make_fake_ai(resp),
+        search=make_fake_search(),
+        fetch_page=make_fake_fetch(),
+        refine_domain=make_fake_refine("acme.com"),
+    )
+    profile = researcher.research("john@acme.com", "acme.com")
+    assert profile.is_our_client == "no"
+    assert profile.client_reason == "Engineering consultancy, not a bidding contractor."
+
+
+def test_research_normalizes_unknown_verdict():
+    """A verdict the model returns that is not a clean yes/no/unsure collapses to
+    "unsure" (default-keep, never a silent skip); a missing verdict stays empty."""
+    resp = _good_ai_response()
+    resp["is_our_client"] = "MAYBE"  # not a clean token
+    researcher = CompanyResearcher(
+        ai_ask=make_fake_ai(resp),
+        search=make_fake_search(),
+        fetch_page=make_fake_fetch(),
+        refine_domain=make_fake_refine("acme.com"),
+    )
+    assert researcher.research("john@acme.com", "acme.com").is_our_client == "unsure"
+
+    # Absent verdict → empty (an old-style response never fabricates a verdict).
+    researcher2 = CompanyResearcher(
+        ai_ask=make_fake_ai(_good_ai_response()),
+        search=make_fake_search(),
+        fetch_page=make_fake_fetch(),
+        refine_domain=make_fake_refine("acme.com"),
+    )
+    assert researcher2.research("john@acme.com", "acme.com").is_our_client == ""
+
+
 def test_research_ai_returns_empty_json():
     """AI returns empty JSON {} → treated as no data, partial profile with error fact."""
     researcher = CompanyResearcher(
@@ -162,9 +202,6 @@ def test_research_ai_returns_empty_json():
     # Empty dict {} is valid JSON but means no useful data → unparseable error
     assert len(profile.facts) == 1
     assert "unparseable" in profile.facts[0].claim.lower()
-
-
-def test_research_ai_returns_garbage():
     """AI returns non-JSON → partial profile, no crash."""
     researcher = CompanyResearcher(
         ai_ask=lambda prompt: "this is not json",

@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 
 from app.discovery.sources.plan_holder_source import PlanHolderSource
 from app.discovery.sources.status import SourceStatus
+from app.company_profile import get_profile
 
 EmitFn = Callable[[str, int, int, str, str, dict | None], None]
 CancelFn = Callable[[], bool]
@@ -423,6 +424,7 @@ def discover_until_target(
     target_override: int | None = None,
     attempted: set[tuple[str, str]] | None = None,
     seen_pdf_urls: set[str] | None = None,
+    seen_domains: set[str] | None = None,
     cooldown_seconds: int = 0,
 ) -> tuple[list[dict], list[dict]]:
     """Run discovery passes until a target of emails is gathered.
@@ -436,6 +438,15 @@ def discover_until_target(
     loop stops honestly (``exhausted``) instead of burning credits on
     tautological repeats. ``paused`` blocks between passes until resumed or
     cancelled.
+
+    ``seen_domains`` (MUTATED IN PLACE, like ``attempted``/``seen_pdf_urls``)
+    is the same "advance, don't re-serve" guarantee applied to the SEARCH and
+    CRAWL lanes. After a pass returns company records, any record whose company
+    domain was already seen THIS RUN is dropped BEFORE the expensive website
+    email-probe (``company_records_to_leads``) — so a drained search/crawl pool
+    stops being re-crawled pass after pass. Without this, the search lane
+    re-crawls largely the same companies each pass/round and only dedups AFTER
+    the crawl (the "wahi data baar-baar" grind).
 
     DISCOVERY CACHE (credit saver): when ``pending_store`` (a PendingLeadsStore)
     is provided, previously-discovered surplus leads for this location are
@@ -455,6 +466,7 @@ def discover_until_target(
     leads: list[dict] = []
     seen = attempted if attempted is not None else set()
     pdfs_seen = seen_pdf_urls if seen_pdf_urls is not None else set()
+    seen_domains = seen_domains if seen_domains is not None else set()
     pass_log: list[dict] = []
     from_cache = 0
     stale_purged = 0
@@ -472,6 +484,24 @@ def discover_until_target(
         if pending_store is not None and cooldown_seconds
         else set()
     )
+
+    # Learned-source prune: a discovery source host that has surfaced
+    # MIN_TRIALS researched leads and NEVER once produced a real lead is
+    # auto-dropped at ingestion — the self-correcting generalization of the
+    # hand-seeded non-client-source list (CLAUDE.md §7/§8: the loop replaces the
+    # hardcode). Backed by the SAME DB the agent records outcomes into, so the
+    # signal is exactly what research proved. Unavailable (stub store, no DB
+    # path) → None → no prune, discovery unchanged.
+    _fit_learning = None
+    _fit_db = getattr(dossier_store, "_db_path", None) if dossier_store is not None else None
+    if _fit_db is not None:
+        try:
+            from app.lead_research.fit_learning import FitLearningStore
+
+            _fit_learning = FitLearningStore(_fit_db)
+        except Exception:
+            logger.debug("fit-learning source prune unavailable", exc_info=True)
+            _fit_learning = None
 
     # Phase A — serve the discovery cache first (free, no search).
     if pending_store is not None:
@@ -518,6 +548,46 @@ def discover_until_target(
         )
         pass_urls = meta.get("pdf_urls") or []
         pdfs_seen.update(pass_urls)
+        # SEARCH/CRAWL-LANE DEDUP (Fix A): drop company records whose domain
+        # this run has ALREADY seen BEFORE the expensive website email-probe.
+        # The search and directory-crawl lanes re-surface the same companies
+        # pass after pass; filtering by domain here (instead of after the
+        # probe) is what stops the "wahi companies baar-baar crawl" grind —
+        # the web-lane equivalent of ``skip_pdfs`` for the plan-holder lane.
+        # Plan-holder records carry real emails directly, so their domains are
+        # recorded too — a plan email's company is never re-probed by a later
+        # search pass. Every domain seen this run is remembered (MUTATED), so
+        # later rounds and passes advance instead of re-serving the pool.
+        unseen_records: list[dict] = []
+        seen_domain_count = 0
+        for rec in records:
+            # Only WEBSITE-bearing records (the search/crawl lanes) are domain-
+            # deduped: they are the ones PROBED for an email, so re-serving the
+            # same company website pass after pass is the wasteful re-crawl.
+            # Plan-holder records carry emails directly and are deduped at the
+            # EMAIL level (extract_email_leads + the dup_plan check), so they
+            # must NOT be collapsed by domain — one company can have many real
+            # contacts (john@acme.com, jane@acme.com) all worth researching.
+            website = (rec.get("website") or "").strip()
+            if not website:
+                unseen_records.append(rec)
+                continue
+            dom = _domain_from_website(website)
+            if dom:
+                if dom in seen_domains:
+                    seen_domain_count += 1
+                    continue
+                seen_domains.add(dom)
+            unseen_records.append(rec)
+        if seen_domain_count and emit:
+            emit(
+                "discovery", pass_idx + 1, max_passes,
+                f"pass {pass_idx + 1}: skipped {seen_domain_count} already-seen "
+                f"company domain(s) before crawl (no re-probe)",
+                data={"seen_domains_skipped": seen_domain_count,
+                      "trade": trade, "location": loc},
+            )
+
         # Multi-source conversion: plan-holder records contribute real emails
         # directly; website-only records (search/crawl lanes) are probed for a
         # public address — bounded per pass and honestly counted in disco_stats
@@ -525,14 +595,42 @@ def discover_until_target(
         # filter ALSO drops already-researched emails at discovery TIME, so a
         # re-run of the same query surfaces genuinely NEW dossiers instead of
         # the researched flood that "kaisi research hai" complained about.
-        new_leads, disco_stats = company_records_to_leads(records)
-        fresh = [
+        new_leads, disco_stats = company_records_to_leads(unseen_records)
+        raw_fresh = [
             l for l in new_leads
             if (l["email"], l["domain"]) not in seen
             and (dossier_store is None or dossier_store.get(l["email"]) is None)
             and (dead_pool is None or l["email"] not in dead_pool)
             and l["email"] not in cooling_pool
         ]
+
+        # INGESTION GATE (root cause of the "data jo services se match nahi
+        # karta" flood): a freshly-discovered lead whose company string, domain,
+        # or source host is a known non-client (A/E/C consultant, software/IT,
+        # transit/mobility authority, ...) is dropped BEFORE it is stoked into
+        # the discovery cache or served to research — so a DCTA transit-vendor
+        # row never spends a research credit, and the orphan transport junk
+        # never appears in Contacts. Boundary is the ONE profile definition
+        # (CLAUDE.md §11); every drop is logged + counted (CLAUDE.md §6).
+        non_client_drops = 0
+        fresh: list[dict] = []
+        for l in raw_fresh:
+            src = l.get("source_url", "")
+            if get_profile().lead_is_non_client(
+                company=l.get("company", ""),
+                domain=l.get("domain", ""),
+                source_url=src,
+            ) or (_fit_learning is not None and _fit_learning.should_skip_source(src)):
+                non_client_drops += 1
+                logger.info(
+                    "Discovery drop (not our client): %s%s%s from %s",
+                    l["email"],
+                    f" ({l.get('company')})" if l.get("company") else "",
+                    f" @ {l.get('domain')}" if l.get("domain") else "",
+                    (src or "")[:90],
+                )
+                continue
+            fresh.append(l)
 
         # Stock the discovery cache with ALL fresh leads, so any surplus is
         # reusable on a later run without paying for the same search again.
@@ -558,6 +656,7 @@ def discover_until_target(
             "dup_plan": disco_stats.get("dup_plan", 0),
             "no_email": disco_stats.get("no_email", 0),
             "new_leads": len(fresh),
+            "non_client_drops": non_client_drops,
             "total_leads": len(leads),
             "elapsed_s": round(time.monotonic() - t0, 1),
             "source_stats": _source_stats_for_log(meta),
@@ -669,7 +768,18 @@ def run_research(
     from app.lead_research.service import is_dead_domain_dossier
     from app.core.config import settings
 
+    # Deterministic query-yield loop: when a real dossier store exists (the
+    # job runner / API path), the learn loop persists to the SAME db — its
+    # yield table rides in the dossiers file. Construction stays BARE so a
+    # test stub that replaces AILeadResearchAgent with a no-arg fake keeps
+    # working; the loop is enabled post-construction only when the agent is
+    # the real class AND the store carries a db path (real LeadResearchStore).
     agent = AILeadResearchAgent()
+    _yield_db = getattr(store, "_db_path", None) if store is not None else None
+    if _yield_db is not None and hasattr(agent, "enable_query_yield"):
+        agent.enable_query_yield(_yield_db)
+    if _yield_db is not None and hasattr(agent, "enable_fit_learning"):
+        agent.enable_fit_learning(_yield_db)
     total = len(leads)
 
     # SQLite write serialization. Research (network/LLM) runs concurrently, but
@@ -731,7 +841,10 @@ def run_research(
                 return idx, entry
 
         try:
-            d = agent.research(email, domain, trade=trade, location=location)
+            d = agent.research(
+                email, domain, trade=trade, location=location,
+                source_url=lead.get("source_url", ""),
+            )
             if is_dead_domain_dossier(d):
                 # Dead-domain leads are NOT leads — the address cannot receive
                 # email. Never persist them, never count them in totals. The
@@ -889,17 +1002,21 @@ def run_full(
         from app.core.config import settings
         cooldown_seconds = settings.LEAD_REENRICHMENT_COOLDOWN_SECONDS
 
-    # Shared across rounds: emails already handed to research and PDFs already
-    # parsed, so each round ADVANCES instead of re-serving the same pool.
+    # Shared across rounds: emails already handed to research, PDFs already
+    # parsed, AND company domains already seen — so each round ADVANCES
+    # instead of re-serving the same pool (Fix A: the search/crawl lanes stop
+    # re-crawling the same companies pass after pass).
     attempted: set[tuple[str, str]] = set()
     seen_pdf_urls: set[str] = set()
+    seen_domains: set[str] = set()
 
     def discover_for(remaining: int, max_passes: int) -> tuple[list[dict], list[dict]]:
         return discover_until_target(
             query, max_passes=max_passes, emit=emit, cancel=cancel, paused=paused,
             pending_store=pending_store, dossier_store=store,
             target_override=remaining, attempted=attempted,
-            seen_pdf_urls=seen_pdf_urls, cooldown_seconds=cooldown_seconds,
+            seen_pdf_urls=seen_pdf_urls, seen_domains=seen_domains,
+            cooldown_seconds=cooldown_seconds,
         )
 
     def base_passes() -> int:
@@ -928,6 +1045,14 @@ def run_full(
     results: list[dict] = []
     working = 0
     shortfall_reason = ""
+    # Fix C — no-progress guard. The user's "endless loop / same data over and
+    # over" symptom is really a PLATEAU: when the discovery pool is drained or
+    # keeps returning non-client leads, a top-up round adds ZERO new working
+    # leads (everything comes back cached / dead / scored-skip). Grinding the
+    # remaining rounds re-discovers the same pool for nothing. Track consecutive
+    # no-progress rounds and stop honestly after TWO of them — each round that
+    # DOES add working leads resets the counter.
+    no_progress_rounds = 0
     for _round in range(_MAX_WORKING_ROUNDS):
         if working >= query.target_emails:
             break
@@ -941,6 +1066,7 @@ def run_full(
             # researched and live discovery surfaced nothing unseen. Honest stop.
             shortfall_reason = (dlog[-1].get("reason") if dlog else "") or "no_more_leads"
             break
+        prev_working = working
         results += run_research(
             leads, emit=emit, cancel=cancel, store=store, paused=paused,
             pending_store=pending_store,
@@ -948,6 +1074,15 @@ def run_full(
             search_name=query.search_name, folder=query.folder,
         )
         working = sum(1 for e in results if e.get("working"))
+        if working <= prev_working:
+            # This round added no new visible leads — the pool is plateauing
+            # (drained, dead, or only non-clients left). Two in a row = stop.
+            no_progress_rounds += 1
+            if no_progress_rounds >= 2:
+                shortfall_reason = "no_progress_plateau"
+                break
+        else:
+            no_progress_rounds = 0
     else:
         shortfall_reason = "max_topup_rounds_reached"
 

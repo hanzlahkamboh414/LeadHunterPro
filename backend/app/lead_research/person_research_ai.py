@@ -27,6 +27,7 @@ from app.lead_research.provenance import (
     linkedin_block,
     linkedin_lane_enabled,
 )
+from app.lead_research.relevance import filter_social_noise
 
 logger = logging.getLogger(__name__)
 
@@ -305,12 +306,16 @@ class PersonResearcherAI:
         company_name: str = "",
         company_industry: str = "",
         company_facts: list[Any] | None = None,
+        *,
+        query_planner: Any | None = None,
     ) -> PersonFindings:
         """Research person attribution for this email.
 
         Tries deterministic first; falls back to AI if not attributed.
         ``company_facts`` are the verified Stage 1 facts, passed to the AI so it
         can bind an email to a person named in those facts.
+        ``query_planner`` feeds the deterministic query-yield learn loop; the
+        deterministic path issues no search and thus contributes nothing.
         """
         # Step 1: try deterministic
         det_fn = self._get_deterministic()
@@ -357,6 +362,7 @@ class PersonResearcherAI:
         return self._ai_research(
             email, refined_domain, company_name, company_industry,
             company_facts=company_facts,
+            query_planner=query_planner,
         )
 
     def _ai_research(
@@ -366,10 +372,15 @@ class PersonResearcherAI:
         company_name: str,
         company_industry: str,
         company_facts: list[Any] | None = None,
+        *,
+        query_planner: Any | None = None,
     ) -> PersonFindings:
         """AI-based person attribution when deterministic fails."""
         search_fn = self._get_search()
-        search_results = self._gather_search(search_fn, email, refined_domain, company_name)
+        search_results = self._gather_search(
+            search_fn, email, refined_domain, company_name,
+            query_planner=query_planner,
+        )
 
         fetch_fn = self._get_fetch_page()
         site_content = self._gather_site(fetch_fn, refined_domain)
@@ -529,6 +540,11 @@ class PersonResearcherAI:
         added = guard_evidence_location(
             [_dict_to_evidence(f) for f in data.get("facts", []) if isinstance(f, dict)]
         )
+        # Deterministic relevance filter (zero credits): a profile lane that
+        # reports connection/follower counts, education, certs, memberships or
+        # languages is noise, not business signal. The prompt above also stops
+        # inviting it; this is the backstop that guarantees none of it persists.
+        added = filter_social_noise(added)
         if not added:
             return evidence
         logger.info("LinkedIn profile enrichment added %d fact(s) for %s", len(added), email)
@@ -536,18 +552,31 @@ class PersonResearcherAI:
 
     # -- private helpers ----
 
-    def _gather_search(self, search_fn: SearchFn, email: str, domain: str, company_name: str = "") -> list[dict[str, str]]:
+    def _gather_search(
+        self,
+        search_fn: SearchFn,
+        email: str,
+        domain: str,
+        company_name: str = "",
+        *,
+        query_planner: Any | None = None,
+    ) -> list[dict[str, str]]:
         """Run multiple search queries (CONCURRENTLY) and merge unique results.
 
         Search breadth (Medium scope):
         1. Exact email lookup
-        2. Company team/about/contact
+        2. Company LinkedIn
         3. LinkedIn company + person
-        4. Industry association membership
+        4. Estimator-role signal
 
         Queries are independent network calls run in a thread pool (each
         adapter call owns its event loop, so threads are safe) — same win as
         company_research: sequential queries collapse into ~one round.
+
+        ``query_planner`` (a :class:`~app.lead_research.query_learning.
+        QueryYieldPlanner`) prunes templates the learn loop has proven to yield
+        zero verified citations, and records each surviving template's returned
+        URLs for the loop.
         """
         # Queries are only emitted when their anchor term is present: an empty
         # ``domain`` would otherwise produce a bare ``site:`` query (Tavily 400
@@ -564,19 +593,32 @@ class PersonResearcherAI:
         # provides is OFF-domain corroboration (467 of 614 person citations:
         # LinkedIn 207, RocketReach 18, Facebook 15, …), which is exactly what
         # the surviving queries target.
-        queries: list[str] = []
+        pairs: list[tuple[str, str]] = []
         if (email or "").strip():
-            queries.append(f'"{email}"')
+            pairs.append((f'"{email}"', "person:email"))
         if (domain or "").strip():
-            queries.append(f'"{domain}" site:linkedin.com')
+            pairs.append((f'"{domain}" site:linkedin.com', "person:linkedin_site"))
         if company_name:
             # LinkedIn person profiles — natural queries (no dork, Tavily-friendly)
-            queries.append(f'"{company_name}" linkedin.com/in')
+            pairs.append((f'"{company_name}" linkedin.com/in', "person:linkedin_profile"))
             if (email or "").strip():
                 local = email.split("@")[0].strip()
                 if local:
-                    queries.append(f'"{company_name}" "{local}" linkedin')
-            queries.append(f'"{company_name}" estimator OR estimating OR "cost engineer"')
+                    pairs.append((f'"{company_name}" "{local}" linkedin', "person:local_linkedin"))
+            pairs.append(
+                (f'"{company_name}" estimator OR estimating OR "cost engineer"', "person:estimator")
+            )
+
+        # Learn-loop prune: drop templates proven to yield no verified citation.
+        if query_planner is not None:
+            pairs = [(q, lbl) for (q, lbl) in pairs if not query_planner.should_skip(lbl)]
+
+        if not pairs:
+            logger.debug("All person search queries pruned by yield loop for %s", domain)
+            return []
+
+        q_strs = [q for q, _ in pairs]
+        labels = [lbl for _, lbl in pairs]
         seen_urls: set[str] = set()
         results: list[dict[str, str]] = []
 
@@ -586,8 +628,12 @@ class PersonResearcherAI:
         # plain-callable seams (test fakes, no aiohttp).
         many = getattr(search_fn, "search_many", None)
         if many is not None:
-            batches = many(list(queries))
-            for batch in batches:
+            # search_many returns one result-list per query, same order as input.
+            batches = many(q_strs)
+            for lbl, batch in zip(labels, batches):
+                urls = [r.get("url", "") for r in batch if r.get("url")]
+                if query_planner is not None:
+                    query_planner.note(lbl, urls)
                 for r in batch:
                     url = r.get("url", "")
                     if url and url not in seen_urls:
@@ -595,15 +641,18 @@ class PersonResearcherAI:
                         results.append(r)
             return results
 
-        def _one(q: str) -> list[dict[str, str]]:
+        def _one(q: str, lbl: str) -> list[dict[str, str]]:
             try:
-                return list(search_fn(q))
+                found = list(search_fn(q))
             except Exception as exc:
                 logger.debug("Search query %r failed: %s", q, exc)
-                return []
+                found = []
+            if query_planner is not None:
+                query_planner.note(lbl, [r.get("url", "") for r in found if r.get("url")])
+            return found
 
-        with ThreadPoolExecutor(max_workers=_search_workers(len(queries))) as ex:
-            futures = [ex.submit(_one, q) for q in queries]
+        with ThreadPoolExecutor(max_workers=_search_workers(len(q_strs))) as ex:
+            futures = [ex.submit(_one, q, lbl) for q, lbl in pairs]
             for fut in as_completed(futures):
                 for r in fut.result():
                     url = r.get("url", "")

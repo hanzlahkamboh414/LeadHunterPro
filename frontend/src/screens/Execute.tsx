@@ -10,7 +10,7 @@ import { elapsed, recommendationBadge, recommendationLabel } from "../lib/format
 export default function Execute() {
   const [trade, setTrade] = useState("");
   const [location, setLocation] = useState("");
-  const [targetEmails, setTargetEmails] = useState(10);
+  const [targetEmails, setTargetEmails] = useState(500);
   const [searchName, setSearchName] = useState("");
   const [saveFolder, setSaveFolder] = useState("");
   const [apiKey, setApiKey] = useState(getStoredApiKey());
@@ -166,7 +166,7 @@ export default function Execute() {
             <input
               type="number"
               min={1}
-              max={100}
+              max={500}
               value={targetEmails}
               onChange={(e) => setTargetEmails(Number(e.target.value))}
               className={`${inputCls} max-w-[180px]`}

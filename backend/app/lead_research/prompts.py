@@ -5,6 +5,8 @@ Every prompt enforces JSON output with source_url for facts.
 
 from __future__ import annotations
 
+from app.company_profile import get_profile
+
 
 def company_research_prompt(
     email: str,
@@ -39,6 +41,9 @@ def company_research_prompt(
     return f"""\
 You are a company research analyst for a construction preconstruction services company.
 
+WHO WE ARE (our ideal client + who is NOT our client):
+{get_profile().prompt_context()}
+
 TASK: Research the company that owns this email and return structured JSON.
 
 INPUT:
@@ -66,13 +71,25 @@ RULES:
    CONSTRUCTION companies. A company that is NOT construction (IT/software/healthcare/retail/etc.) is
    NEVER labelled as construction — set the industry to its true (non-construction) type. Do NOT stretch
    a label to fit construction.
-7. Return ONLY valid JSON matching this exact schema — no markdown, no commentary:
+7. CLIENT-FIT VERDICT (decide from WHO WE ARE above, then be honest): set "is_our_client" to
+   "yes" only when this company is an ACTIVE building-trades bidder that could buy estimation
+   services (a general contractor, subcontractor, or developer that bids on building projects).
+   Set "no" when it is clearly NOT a buyer even if construction-adjacent — an A/E/C consultant or
+   engineering/architecture/design firm, a trade association / builders' exchange / plan service,
+   a software/IT/technology company, a materials-only supplier/distributor/manufacturer, or a
+   fiber/telecom/utility/road/pipeline/transit contractor. Set "unsure" only when the evidence is
+   genuinely insufficient. "client_reason" MUST be one honest sentence naming WHY, grounded in what
+   you found (e.g. "Engineering consultancy, not a bidding contractor — does not buy estimation.").
+   This verdict costs no extra research; it is your judgement over the facts you already gathered.
+8. Return ONLY valid JSON matching this exact schema — no markdown, no commentary:
 
 {{
   "company_name": "string — official company name",
   "industry": "string — e.g. General Contractor, Specialty Subcontractor, Developer",
   "location": "string — city, state",
   "website": "string — best verified URL",
+  "is_our_client": "yes | no | unsure — is this an active building-trades bidder who could buy estimation services?",
+  "client_reason": "string — one honest sentence: why they are (or are not) our client",
   "facts": [
     {{
       "claim": "string — one factual statement",
@@ -100,7 +117,10 @@ def deep_research_prompt(
     estimation demand and urgency.
     """
     return f"""\
-You are a preconstruction sales analyst for The Best Estimator LLC (Texas).
+You are a preconstruction sales analyst for {get_profile().company_name} ({get_profile().location}).
+
+WHO WE ARE (our ideal client + who is NOT our client):
+{get_profile().prompt_context()}
 
 TASK: Deep-dive the growth and need signals for this company to judge whether
 they likely need estimation services, and how urgent. Return structured JSON facts.
@@ -242,11 +262,16 @@ Extract verifiable facts from THIS person's own public LinkedIn profile only.
 RULES:
 1. Every fact MUST cite {linkedin} as source_url — it is the exact page where the
    fact was observed. source_type MUST be "linkedin". source_note MUST be "LinkedIn profile".
-2. Report the person's current role/title, employer, location, skills, and any visible
-   activity / posts / hiring signals — FROM THIS PROFILE ONLY.
-3. Do NOT invent or infer. If nothing is readable, return {{"facts": []}}.
-4. Never report facts about a DIFFERENT person who happens to appear in the content.
-5. Return ONLY valid JSON matching this exact schema — no markdown, no commentary:
+2. Report ONLY business-relevant, verifiable facts about THIS person's current role:
+   job title, employer, industry, location, and any company-level signals visible on the
+   profile (website, phone, office address, services, specialization). FROM THIS PROFILE ONLY.
+3. Do NOT report personal-profile filler. NEVER report: connection or follower counts,
+   education history (schools, degrees, alumni), certifications, honour-society or
+   association memberships, or languages spoken.
+4. Do NOT invent or infer. If nothing readable or nothing business-relevant is present,
+   return {{"facts": []}}.
+5. Never report facts about a DIFFERENT person who happens to appear in the content.
+6. Return ONLY valid JSON matching this exact schema — no markdown, no commentary:
 
 {{
   "facts": [
@@ -272,7 +297,10 @@ def intent_timing_prompt(
 ) -> str:
     """Stage 3 — buying intent + timing analysis (reasoned judgment)."""
     return f"""\
-You are a preconstruction sales analyst for The Best Estimator LLC, a construction estimation company in Texas.
+You are a preconstruction sales analyst for {get_profile().company_name}, a construction estimation company in {get_profile().location}.
+
+WHO WE ARE (our ideal client + who is NOT our client):
+{get_profile().prompt_context()}
 
 TASK: Assess whether this company likely needs preconstruction/estimation services, and when. Return structured JSON.
 
@@ -283,10 +311,12 @@ INPUT:
 - Known facts:
 {facts_summary}
 
-CONTEXT about The Best Estimator LLC:
-- Sells preconstruction/estimation services to construction companies
-- Helps general contractors, subcontractors, developers with bid preparation, cost estimation, quantity takeoffs
-- Ideal client: active construction company that bids on projects but may lack in-house estimation capacity
+OUR BUSINESS:
+- Sells {get_profile().what_we_sell}
+- Ideal client: {get_profile().ideal_client}
+- NOT our clients: companies in the excluded vertical (fiber/telecom/utility/
+  road/pipeline/materials…) — never invent estimation need for them. If the
+  company is one of those, say needs_estimation = "no".
 
 RULES:
 1. Reasoning must be based on the facts provided — do not assume facts not in evidence.
@@ -346,7 +376,10 @@ def fit_scoring_prompt(
 ) -> str:
     """Stage 4 — fit assessment + potential lead score."""
     return f"""\
-You are a lead qualification analyst for The Best Estimator LLC (Texas construction estimation services).
+You are a lead qualification analyst for {get_profile().company_name} ({get_profile().location} construction estimation services).
+
+WHO WE ARE (our ideal client + who is NOT our client):
+{get_profile().prompt_context()}
 
 TASK: Assess fit and assign a potential-lead score (0.0-10.0). Return structured JSON.
 

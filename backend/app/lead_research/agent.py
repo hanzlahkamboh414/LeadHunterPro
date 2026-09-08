@@ -16,10 +16,13 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
+from app.company_profile import get_profile
 from app.lead_research.company_research import CompanyResearcher
+from app.lead_research.fit_learning import FitLearningStore
 from app.lead_research.intent_timing import IntentTimingAnalyzer
 from app.lead_research.models import LeadDossier
 from app.lead_research.person_research_ai import PersonResearcherAI
+from app.lead_research.query_learning import QueryYieldPlanner, QueryYieldStore
 from app.lead_research.scoring import LeadScorer
 
 logger = logging.getLogger(__name__)
@@ -89,6 +92,8 @@ class AILeadResearchAgent:
         intent_analyzer: IntentTimingAnalyzer | None = None,
         scorer: LeadScorer | None = None,
         domain_delivers_email: Callable[[str], bool] | None = None,
+        query_yield_store: QueryYieldStore | None = None,
+        fit_learning_store: FitLearningStore | None = None,
     ) -> None:
         self._company = company_researcher or CompanyResearcher()
         self._person = person_researcher or PersonResearcherAI()
@@ -97,9 +102,57 @@ class AILeadResearchAgent:
         # Dead-domain gate seam (defaults to the real MX check). Tests inject
         # a stub so no network is hit offline.
         self._domain_delivers_email = domain_delivers_email or _default_domain_delivers_email
+        # Query-yield learn loop backing store (None = loop disabled; the agent
+        # is shared across concurrent research threads, so only a fresh planner
+        # per research() call is created from this store — never mutable state).
+        self._query_yield_store = query_yield_store
+        # Fit-learning loop backing store (None = disabled). Read + written
+        # directly (its own writes are lock-serialized); records each completed
+        # run's fit outcome per industry / source host and auto-skips a class
+        # the pipeline has proven, by its own repeated verdicts, is not a buyer.
+        self._fit_learning = fit_learning_store
+
+    def enable_query_yield(self, db_path: str) -> None:
+        """Enable the deterministic query-yield loop against ``db_path``.
+
+        Post-construction seam so callers that build the agent BARE (the
+        pipeline runner, which some test suites replace with a no-arg stub)
+        can turn the loop on without changing their construction call.
+        """
+        from app.lead_research.query_learning import QueryYieldStore
+
+        self._query_yield_store = QueryYieldStore(db_path)
+
+    def enable_fit_learning(self, db_path: str) -> None:
+        """Enable the fit-learning loop against ``db_path`` (same DB as yield).
+
+        Post-construction seam, mirroring :meth:`enable_query_yield`: the
+        pipeline runner turns the loop on with the dossier store's own DB path,
+        so learning persists beside the dossiers it learned from.
+        """
+        self._fit_learning = FitLearningStore(db_path)
+
+    def _record_fit(self, dossier: LeadDossier, source_url: str, *, kept: bool) -> None:
+        """Record one completed run's fit outcome into the learning loop.
+
+        ``kept`` = did this run end as a REAL lead (contact_now / nurture)?
+        Industry comes from the researched label; source from the discovery URL
+        that surfaced the lead. An empty industry / source is silently ignored
+        by the store (silence is not evidence). No-op when the loop is disabled;
+        a store error never breaks research (the loop is additive — CLAUDE.md §4).
+        """
+        if self._fit_learning is None:
+            return
+        try:
+            self._fit_learning.record_industry(dossier.company.industry, kept=kept)
+            if source_url:
+                self._fit_learning.record_source(source_url, kept=kept)
+        except Exception:
+            logger.debug("fit-learning record failed for %s", dossier.email, exc_info=True)
 
     def research(
         self, email: str, domain: str, *, trade: str = "", location: str = "",
+        source_url: str = "",
     ) -> LeadDossier:
         """Run the full pipeline for one email+domain.
 
@@ -108,9 +161,18 @@ class AILeadResearchAgent:
         company research so the AI anchors on the construction-bid provenance
         instead of drifting to generic (e.g. IT) results.
 
+        ``source_url`` (optional) is the discovery URL that surfaced this lead.
+        It is not researched — it only keys the source side of the fit-learning
+        loop (a source host that never once produces a real lead is auto-pruned
+        at discovery). Absent for the single-lead CLI/service path.
+
         Returns a complete LeadDossier.
         """
         dossier = LeadDossier(email=email, domain=domain)
+        # Deterministic query-yield loop: a per-call accumulator (never stored
+        # on the shared agent — concurrency-safe). Research stages note which
+        # templates returned which URLs; commit() below writes yield once.
+        planner = QueryYieldPlanner(self._query_yield_store)
         sources_checked: list[str] = []
         source_errors: dict[str, str] = {}
 
@@ -157,6 +219,7 @@ class AILeadResearchAgent:
         try:
             company_result = self._company.research_with_domain(
                 email, domain, trade=trade, location=location,
+                query_planner=planner,
             )
             dossier.refined_domain = company_result.get("refined_domain", domain)
             dossier.refined_company = company_result.get("name", "")
@@ -168,12 +231,69 @@ class AILeadResearchAgent:
                 location=company_result.get("location", ""),
                 website=company_result.get("website", ""),
                 facts=[AIEvidence.from_dict(f) for f in company_result.get("facts", [])],
+                # Client-fit verdict from the SAME Stage-1 call (no extra credit):
+                # the AI's honest yes/no/unsure + one-line reason, consumed by the
+                # Stage 1c shortcut below.
+                is_our_client=company_result.get("is_our_client", ""),
+                client_reason=company_result.get("client_reason", ""),
             )
             sources_checked.append("company_research")
         except Exception as exc:
             logger.error("Stage 1 failed for %s: %s", email, exc)
             source_errors["company_research"] = str(exc)
             dossier.refined_domain = domain
+
+        # Stage 1c: not-a-client shortcut. THREE independent signals, all
+        # pointing at the same decision — this company is not a buyer, so stop
+        # before the expensive person / deep / intent / scoring lanes run
+        # (credits + UI noise). The reason is ALWAYS stored — never a hidden
+        # skip (CLAUDE.md §6/§12):
+        #   * deterministic — off-vertical (fiber/telecom/utility/road/pipeline/
+        #     materials) or a non-client class (A/E/C consultant, association,
+        #     software/IT, transit/mobility). The hand-written BACKSTOP list.
+        #   * AI verdict — the Stage-1 LLM judged is_our_client == "no", with a
+        #     grounded one-line client_reason (the fix for "AI ki reasoning weak").
+        #   * learned — this industry has completed MIN_TRIALS research runs and
+        #     never once produced a real lead (the self-correcting fit loop:
+        #     "khud improvement kare, kabi wahi ghalti na kare").
+        if dossier.company.name:
+            prof = get_profile()
+            det_reason = (
+                prof.is_off_vertical(dossier.company.industry)
+                or prof.is_non_client(dossier.company.industry)
+            )
+            ai_no = dossier.company.is_our_client == "no"
+            learned = (
+                self._fit_learning is not None
+                and self._fit_learning.should_skip_industry(dossier.company.industry)
+            )
+            if det_reason or ai_no or learned:
+                ind = dossier.company.industry or "(unknown industry)"
+                name = dossier.refined_company or dossier.company.name
+                if ai_no and dossier.company.client_reason:
+                    # The AI's own grounded justification is the most specific.
+                    dossier.fit = f"Not our client — {dossier.company.client_reason}"
+                elif learned and not det_reason:
+                    dossier.fit = (
+                        f"Not our client — {name} ({ind}). This class has never "
+                        f"produced a lead across repeated research; auto-skipped."
+                    )
+                else:
+                    dossier.fit = (
+                        f"Not our client — {name} ({ind}). "
+                        f"Estimating services are not for them."
+                    )
+                dossier.recommendation = "skip"
+                sources_checked.append("scoring")
+                # Reinforce the loop with this proven non-buyer, then finalize.
+                self._record_fit(dossier, source_url, kept=False)
+                dossier.sources_checked = sources_checked
+                dossier.source_errors = source_errors
+                logger.info(
+                    "Stage skip: %s industry=%r verdict=%r learned=%s → skip (not our client)",
+                    email, ind, dossier.company.is_our_client, learned,
+                )
+                return dossier
 
         # Stage 2: person research
         try:
@@ -183,6 +303,7 @@ class AILeadResearchAgent:
                 company_name=dossier.company.name,
                 company_industry=dossier.company.industry,
                 company_facts=dossier.company.facts,
+                query_planner=planner,
             )
             dossier.person = person_result
             sources_checked.append("person_research")
@@ -191,11 +312,14 @@ class AILeadResearchAgent:
             source_errors["person_research"] = str(exc)
 
         # Stage 1b: deep-dive (only for qualifying leads)
-        # If the company is construction-related and we have a name + reachable
-        # person, run the growth/need queries (hiring, expansion, bid-win).
+        # If the company is construction-related AND on-vertical (a fiber/
+        # telecom/utility/materials company never spends deep-research credits —
+        # it is not our client, root-cause fix for the fiber leak) AND we have a
+        # name + reachable person, run the growth/need queries.
         if (
             dossier.company.name
             and _is_construction(dossier.company.industry)
+            and not get_profile().is_off_vertical(dossier.company.industry)
             and dossier.person.bound
         ):
             # Recorded as checked whether or not it finds facts, so a run where
@@ -210,6 +334,7 @@ class AILeadResearchAgent:
                     # so the contractor-licence query hits the RIGHT state
                     # registry instead of a hardcoded one.
                     location=dossier.company.location,
+                    query_planner=planner,
                 )
                 if deep_facts:
                     dossier.company.facts.extend(deep_facts)
@@ -250,8 +375,32 @@ class AILeadResearchAgent:
             logger.error("Stage 4 failed for %s: %s", email, exc)
             source_errors["scoring"] = str(exc)
 
+        # Query-yield loop: write this run's template outcomes against the
+        # citations the completed dossier actually made. Run only after every
+        # stage so deep/person/intent URLs are all accounted for (a template is
+        # credited when one of its returned URLs is cited as evidence).
+        if planner.enabled:
+            _all_facts = list(dossier.company.facts) + list(dossier.person.evidence)
+            _all_facts += list(dossier.intent.evidence) + list(dossier.timing.events)
+            cited_urls = {f.source_url for f in _all_facts if f.source_url}
+            verified_urls = {
+                f.source_url for f in _all_facts
+                if f.source_url and f.confidence == "verified"
+            }
+            planner.commit(cited_urls, verified_urls)
+
         dossier.sources_checked = sources_checked
         dossier.source_errors = source_errors
+
+        # Fit-learning: record how this fully-researched run ended. A dossier
+        # that scored into contact_now / nurture is a REAL lead for its
+        # industry + source; a skip is a non-buyer. Over MIN_TRIALS runs this is
+        # what lets an always-skipping class be pruned at Stage 1c next time.
+        self._record_fit(
+            dossier,
+            source_url,
+            kept=dossier.recommendation in ("contact_now", "nurture"),
+        )
 
         logger.info(
             "Research complete: %s → score=%.1f rec=%s",

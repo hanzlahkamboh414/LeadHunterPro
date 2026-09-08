@@ -401,6 +401,7 @@ class CompanyResearcher:
 
     def research(
         self, email: str, domain: str, *, trade: str = "", location: str = "",
+        query_planner: Any | None = None,
     ) -> CompanyProfile:
         """Research the company behind ``email``/``domain``.
 
@@ -417,7 +418,9 @@ class CompanyResearcher:
 
         # Gather data
         search_fn = self._get_search()
-        search_results = self._gather_search(search_fn, email, refined_domain)
+        search_results = self._gather_search(
+            search_fn, email, refined_domain, query_planner=query_planner
+        )
 
         fetch_fn = self._get_fetch_page()
         site_content = self._gather_site(fetch_fn, refined_domain)
@@ -504,22 +507,35 @@ class CompanyResearcher:
         # claim verification.
         facts = guard_evidence_location(facts)
 
+        # Client-fit verdict from the SAME call (no extra credit): normalize the
+        # AI's yes/no/unsure so downstream gates can trust it. Anything the model
+        # returns that is not a clean yes/no collapses to "unsure" (default-keep,
+        # never a silent skip — CLAUDE.md §6).
+        raw_verdict = str(data.get("is_our_client", "")).strip().lower()
+        verdict = raw_verdict if raw_verdict in ("yes", "no", "unsure") else ("" if not raw_verdict else "unsure")
+
         return CompanyProfile(
             name=data.get("company_name", ""),
             industry=data.get("industry", ""),
             location=data.get("location", ""),
             website=data.get("website", f"https://{refined_domain}"),
             facts=facts,
+            is_our_client=verdict,
+            client_reason=str(data.get("client_reason", "")).strip(),
         )
 
     def research_with_domain(
         self, email: str, domain: str, *, trade: str = "", location: str = "",
+        query_planner: Any | None = None,
     ) -> dict[str, Any]:
         """Like ``research()`` but returns a dict including the refined domain."""
         refine = self._get_refine_domain()
         refined_domain = refine(domain)
 
-        profile = self.research(email, refined_domain, trade=trade, location=location)
+        profile = self.research(
+            email, refined_domain, trade=trade, location=location,
+            query_planner=query_planner,
+        )
 
         result = profile.to_dict()
         result["refined_domain"] = refined_domain
@@ -527,7 +543,8 @@ class CompanyResearcher:
         return result
 
     def research_deep(
-        self, domain: str, company_name: str, *, location: str = ""
+        self, domain: str, company_name: str, *, location: str = "",
+        query_planner: Any | None = None,
     ) -> list[AIEvidence]:
         """Stage 1b — deep-dive growth/need signals for a qualifying lead.
 
@@ -542,7 +559,9 @@ class CompanyResearcher:
         """
         search_fn = self._get_search()
         search_results = self._gather_search(
-            search_fn, "", domain, queries=self._deep_queries(domain, location)
+            search_fn, "", domain,
+            queries=self._deep_queries(domain, location),
+            query_planner=query_planner,
         )
 
         prompt = deep_research_prompt(
@@ -569,14 +588,15 @@ class CompanyResearcher:
 
     # -- private helpers ----
 
-    def _screening_queries(self, email: str, domain: str) -> list[str]:
+    def _screening_queries(self, email: str, domain: str) -> list[tuple[str, str]]:
         """Fast screening queries — identity + verification (used on every lead).
 
-        Queries are only emitted when their anchor term is present. An empty
-        ``domain`` would otherwise produce a bare ``site:`` query (e.g.
-        ``"" site:linkedin.com/company``), which Tavily rejects with HTTP 400
-        "Query cannot consist only of site: operators" — the empty quoted
-        string is stripped, leaving only the site: operator.
+        Returns ``(query, template_label)`` pairs. Queries are only emitted
+        when their anchor term is present. An empty ``domain`` would otherwise
+        produce a bare ``site:`` query (e.g. ``"" site:linkedin.com/company``),
+        which Tavily rejects with HTTP 400 "Query cannot consist only of site:
+        operators" — the empty quoted string is stripped, leaving only the
+        site: operator.
 
         Query set is MEASURED, not guessed. Across 506 live dossiers the
         citation yield per target was:
@@ -589,22 +609,28 @@ class CompanyResearcher:
         address) is also carried by the LinkedIn company page and the site
         crawl. Dropping it removes a paid call without removing a fact — the
         only kind of reduction that does not cost quality (CLAUDE.md §11).
+
+        Since then the SAME judgment runs live: each template label is fed to
+        the deterministic query-yield loop (query_learning), which auto-drops a
+        template whose dispatched runs never once produced a verified citation
+        (CLAUDE.md §7 — the hardcoded numbers become a continuous loop).
         """
-        queries: list[str] = []
+        queries: list[tuple[str, str]] = []
         if (email or "").strip():
-            queries.append(f'"{email}"')
+            queries.append((f'"{email}"', "screening:email"))
         if (domain or "").strip():
             queries.extend([
-                domain,
-                f'"{domain}" company',
-                f'"{domain}" site:linkedin.com/company',
+                (domain, "screening:domain"),
+                (f'"{domain}" company', "screening:company"),
+                (f'"{domain}" site:linkedin.com/company', "screening:linkedin_company"),
             ])
         return queries
 
-    def _deep_queries(self, domain: str, location: str = "") -> list[str]:
+    def _deep_queries(self, domain: str, location: str = "") -> list[tuple[str, str]]:
         """Deep-dive queries — growth/need signals (only for qualifying leads).
 
-        Two measured corrections over the previous 6-query set:
+        Returns ``(query, template_label)`` pairs. Two measured corrections
+        over the previous 6-query set:
 
         1. **The maps query is gone.** ``"google maps" OR "google business"``
            was cited by **0 of 506** dossiers — a guaranteed-waste credit on
@@ -622,7 +648,8 @@ class CompanyResearcher:
 
         The four surviving signal queries are the ones the evidence actually
         cites: bid/award (272 keyword hits in intent evidence), hiring (131),
-        estimator (103), expansion (101).
+        estimator (103), expansion (101). Each label feeds the query-yield loop
+        so a template that stops producing verified citations is auto-dropped.
         """
         state = _license_region(location)
         license_query = (
@@ -631,11 +658,11 @@ class CompanyResearcher:
             else f'"{domain}" contractor license'
         )
         return [
-            license_query,
-            f'"{domain}" news construction',
-            f'"{domain}" hiring estimator OR "cost estimator" OR "project manager"',
-            f'"{domain}" "new office" OR expansion OR "opening location"',
-            f'"{domain}" "awarded" OR "low bidder" OR "bid award" OR "contract award"',
+            (license_query, "deep:license"),
+            (f'"{domain}" news construction', "deep:news"),
+            (f'"{domain}" hiring estimator OR "cost estimator" OR "project manager"', "deep:hiring"),
+            (f'"{domain}" "new office" OR expansion OR "opening location"', "deep:expansion"),
+            (f'"{domain}" "awarded" OR "low bidder" OR "bid award" OR "contract award"', "deep:bidaward"),
         ]
 
     def _gather_search(
@@ -643,14 +670,23 @@ class CompanyResearcher:
         search_fn: SearchFn,
         email: str,
         domain: str,
-        queries: list[str] | None = None,
+        queries: list[tuple[str, str]] | None = None,
+        *,
+        query_planner: Any | None = None,
     ) -> list[dict[str, str]]:
         """Run multiple search queries (CONCURRENTLY) and merge unique results.
 
         Two-stage search breadth:
-        - Screening (5 queries): email, domain, company, LinkedIn, BBB
-        - Deep (6 queries, via ``research_deep``): maps, license, news,
-          hiring, expansion, bid-win
+        - Screening (4 tuples): email, domain, company, LinkedIn
+        - Deep (5 tuples, via ``research_deep``): license, news, hiring,
+          expansion, bid-win
+
+        ``queries`` are ``(query, template_label)`` pairs (label stable per
+        template, used by the query-yield learn loop). When ``query_planner``
+        is given (a :class:`~app.lead_research.query_learning.QueryYieldPlanner`)
+        a template the loop has proven zero-verified is pruned HERE, before any
+        search is issued — that is the whole credit-saving point: the pruned
+        query never runs, so it costs nothing.
 
         The queries are independent network calls, so they run in a thread
         pool instead of one-after-another. Each search adapter call spins its
@@ -660,7 +696,21 @@ class CompanyResearcher:
         dedup stays race-free.
         """
         if queries is None:
-            queries = self._screening_queries(email, domain)
+            pairs = self._screening_queries(email, domain)
+        else:
+            pairs = list(queries)
+
+        # Learn-loop prune: drop templates proven to yield no verified citation
+        # (> MIN_TRIALS runs, zero verified). No planner → keep everything.
+        if query_planner is not None:
+            pairs = [(q, lbl) for (q, lbl) in pairs if not query_planner.should_skip(lbl)]
+
+        if not pairs:
+            logger.debug("All search queries pruned by yield loop for %s", domain)
+            return []
+        q_strs = [q for q, _ in pairs]
+        labels = [lbl for _, lbl in pairs]
+
         seen_urls: set[str] = set()
         results: list[dict[str, str]] = []
 
@@ -670,8 +720,12 @@ class CompanyResearcher:
         # plain-callable seams (test fakes, no aiohttp).
         many = getattr(search_fn, "search_many", None)
         if many is not None:
-            batches = many(list(queries))
-            for batch in batches:
+            # search_many returns one result-list per query, same order as input.
+            batches = many(q_strs)
+            for lbl, batch in zip(labels, batches):
+                urls = [r.get("url", "") for r in batch if r.get("url")]
+                if query_planner is not None:
+                    query_planner.note(lbl, urls)
                 for r in batch:
                     url = r.get("url", "")
                     if url and url not in seen_urls:
@@ -679,15 +733,18 @@ class CompanyResearcher:
                         results.append(r)
             return results
 
-        def _one(q: str) -> list[dict[str, str]]:
+        def _one(q: str, lbl: str) -> list[dict[str, str]]:
             try:
-                return list(search_fn(q))
+                found = list(search_fn(q))
             except Exception as exc:
                 logger.debug("Search query %r failed: %s", q, exc)
-                return []
+                found = []
+            if query_planner is not None:
+                query_planner.note(lbl, [r.get("url", "") for r in found if r.get("url")])
+            return found
 
-        with ThreadPoolExecutor(max_workers=_search_workers(len(queries))) as ex:
-            futures = [ex.submit(_one, q) for q in queries]
+        with ThreadPoolExecutor(max_workers=_search_workers(len(q_strs))) as ex:
+            futures = [ex.submit(_one, q, lbl) for q, lbl in pairs]
             for fut in as_completed(futures):
                 for r in fut.result():
                     url = r.get("url", "")

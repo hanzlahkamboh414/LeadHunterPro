@@ -8,7 +8,10 @@ import ManageMenu from "../components/ManageMenu";
 import type { EvidenceFact, LeadSummary } from "../types";
 import { recommendationBadge, recommendationLabel, scoreColor } from "../lib/format";
 
-type RecFilter = "" | "contact_now" | "nurture" | "skip";
+// Working-only (CLAUDE.md §1 honest leads): skip/junk dossiers are NOT leads —
+// the user asked "frontend pr sirf working emails hi show ho". The backend
+// already hides skip by default; removing the option here makes that airtight.
+type RecFilter = "" | "contact_now" | "nurture";
 type BoundFilter = "" | "true" | "false";
 
 // Scroll + visited persistence.
@@ -300,6 +303,28 @@ export default function Leads() {
     }
   }
 
+  const [bulkDeleteBusy, setBulkDeleteBusy] = useState(false);
+  async function handleBulkDelete() {
+    const emails = [...selected];
+    if (emails.length === 0) return;
+    if (
+      !window.confirm(
+        `Delete ${emails.length} selected lead(s)?\n\nYe ${emails.length} leads remove ho jayengi (dossier + discovery cache se).`,
+      )
+    ) {
+      return;
+    }
+    setBulkDeleteBusy(true);
+    try {
+      await Promise.allSettled(emails.map((email) => api.deleteLead(email)));
+      setSelected(new Set());
+    } finally {
+      setBulkDeleteBusy(false);
+      qc.invalidateQueries({ queryKey: ["leads"] });
+      qc.invalidateQueries({ queryKey: ["folders"] });
+    }
+  }
+
   // Folder/tag rename + delete + new-folder creation live in the ⚙ Manage
   // dropdown (each label row has its own ✏️/🗑 buttons); browsing lives in the
   // chip bar above the table.
@@ -561,6 +586,14 @@ export default function Leads() {
             {bulkBusy ? <Spinner className="h-3.5 w-3.5" /> : <Tag className="w-3.5 h-3.5" />}
             Apply
           </button>
+          <button
+            onClick={handleBulkDelete}
+            disabled={bulkDeleteBusy}
+            className="ml-auto inline-flex items-center gap-1.5 rounded-lg bg-rose-600 px-3 py-2 text-[12.5px] font-medium text-white hover:bg-rose-500 disabled:opacity-50"
+          >
+            {bulkDeleteBusy ? <Spinner className="h-3.5 w-3.5" /> : <Trash2 className="w-3.5 h-3.5" />}
+            Delete selected ({selected.size})
+          </button>
         </div>
       )}
 
@@ -585,7 +618,6 @@ export default function Leads() {
             <option value="">Actionable</option>
             <option value="contact_now">Contact Now</option>
             <option value="nurture">Nurture</option>
-            <option value="skip">Skip</option>
           </select>
         </Filter>
         <Filter>
@@ -1049,20 +1081,30 @@ function ProofLinks({
       </p>
     );
   }
+  // Dedupe by URL: many facts from the same page (e.g. one LinkedIn profile)
+  // show the link ONCE with their claims stacked beneath, so the proof block
+  // doesn't repeat the same URL for every fact.
+  const byUrl = new Map<string, string[]>();
+  for (const e of links) {
+    if (!byUrl.has(e.source_url)) byUrl.set(e.source_url, []);
+    byUrl.get(e.source_url)!.push(e.claim);
+  }
   return (
     <ul className="flex flex-col gap-1.5">
-      {links.map((e, i) => (
+      {Array.from(byUrl.entries()).map(([url, claims], i) => (
         <li key={i}>
           <a
-            href={e.source_url}
+            href={url}
             target="_blank"
             rel="noreferrer"
             onClick={(ev) => ev.stopPropagation()}
             className="text-[12px] text-indigo-400 hover:underline break-all"
           >
-            {e.source_url}
+            {url}
           </a>
-          {e.claim && <p className="text-[11px] text-slate-500 mt-0.5">{e.claim}</p>}
+          {claims.filter(Boolean).map((c, j) => (
+            <p key={j} className="text-[11px] text-slate-500 mt-0.5">{c}</p>
+          ))}
         </li>
       ))}
     </ul>

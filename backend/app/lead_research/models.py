@@ -62,6 +62,12 @@ class CompanyProfile:
     location: str = ""
     website: str = ""
     facts: list[AIEvidence] = field(default_factory=list)
+    # Client-fit verdict from the Stage-1 research LLM (no extra call): does the
+    # AI, given our ideal-client + non-client definition, judge this company a
+    # buyer of estimation services? "yes" | "no" | "unsure" (empty = not asked,
+    # e.g. an old dossier). ``client_reason`` is the AI's one-line justification.
+    is_our_client: str = ""
+    client_reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -70,6 +76,8 @@ class CompanyProfile:
             "location": self.location,
             "website": self.website,
             "facts": [f.to_dict() for f in self.facts],
+            "is_our_client": self.is_our_client,
+            "client_reason": self.client_reason,
         }
 
     @staticmethod
@@ -80,6 +88,8 @@ class CompanyProfile:
             location=d.get("location", ""),
             website=d.get("website", ""),
             facts=[AIEvidence.from_dict(f) for f in d.get("facts", [])],
+            is_our_client=d.get("is_our_client", ""),
+            client_reason=d.get("client_reason", ""),
         )
 
 

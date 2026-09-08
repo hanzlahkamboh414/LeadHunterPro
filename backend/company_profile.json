@@ -1,0 +1,43 @@
+{
+  "company_name": "The Best Estimator LLC",
+  "location": "Texas",
+  "what_we_sell": "preconstruction / construction estimation services: bid preparation, cost estimation, quantity takeoffs",
+  "ideal_client": "an active construction company (general contractor, subcontractor, or developer) that bids on buildings and projects but may lack in-house estimation capacity",
+  "target_trades": [
+    "general contractor", "construction", "subcontractor", "builder",
+    "building", "commercial", "residential", "roofing", "electrical",
+    "plumbing", "hvac", "mechanical", "masonry", "concrete", "framing",
+    "drywall", "painting", "flooring", "glazing", "landscaping",
+    "site work", "excavation", "demolition", "steel", "structural"
+  ],
+  "excluded_vernaculars": [
+    "fiber", "fibre", "optic", "telecom", "telecommunication", "internet",
+    "broadband", "utility", "utilities", "pipeline", "transmission line",
+    "substation", "power line", "electrical grid", "highway", "roadway",
+    "road construction", "bridge", "rail", "railway", "transit", "airport",
+    "oil and gas", "midstream", "gas pipeline", "liquid natural gas", "lng",
+    "wind farm", "solar farm", "material", "materials", "supply", "supplier",
+    "distributor", "distribution", "wholesale", "manufacturer", "fabricator",
+    "rental", "equipment dealer", "tools",
+    "marine", "maritime", "seawall", "dredge", "harbor", "port construction",
+    "heavy civil", "infrastructure building", "public works", "waterworks",
+    "water treatment", "wastewater", "dam", "levee", "flood control",
+    "energy infrastructure", "alternative fuel", "power plant",
+    "power station", "fueling station", "fuel depot"
+  ],
+  "non_client_terms": [
+    "consulting", "consultancy", "consultant",
+    "engineering firm", "design firm", "architecture firm",
+    "engineering services", "epcm", "a/e/c", "aec consulting",
+    "association", "builders exchange", "plan service", "chamber of commerce",
+    "software", "it services", "technology solutions", "computer", "digital",
+    "transit", "mobility", "fare", "autonomous", "shuttle", "parking",
+    "tolling", "environmental", "compliance", "recruiting", "staffing",
+    "insurance", "trucking", "logistics", "warehousing",
+    "conglomerate", "aerospace",
+    "brand management", "brand asset"
+  ],
+  "non_client_source_hosts": [
+    "dcta.net", "tjpa.org", "trideltatransit.com", "sfport.com"
+  ]
+}

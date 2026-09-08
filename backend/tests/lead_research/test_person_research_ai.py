@@ -311,6 +311,39 @@ def test_linkedin_profile_enrichment_skipped_when_walled(monkeypatch):
     assert not any(e.source_type == "linkedin" for e in result.evidence)
 
 
+def test_linkedin_profile_enrichment_drops_social_noise(monkeypatch):
+    """The enrich lane reports social-profile junk (connections/followers/
+    education/certs/languages) — the deterministic relevance filter drops it
+    before it can persist, keeping only business facts (Phase 2A)."""
+    monkeypatch.delenv("LINKEDIN_LANE_ENABLED", raising=False)
+    calls = {"n": 0}
+    profile_url = "https://www.linkedin.com/in/jane-doe-123"
+
+    def seq_ai(prompt: str) -> str:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return json.dumps(_good_ai_person_response())
+        return json.dumps({
+            "facts": [
+                {"claim": "VP Estimating at Acme (profile)", "source_url": profile_url, "source_type": "linkedin", "confidence": "verified", "source_note": "LinkedIn profile"},
+                {"claim": "Jane Doe has 500+ connections on LinkedIn", "source_url": profile_url, "source_type": "linkedin", "confidence": "verified", "source_note": "LinkedIn profile"},
+                {"claim": "Attended Louisiana State University", "source_url": profile_url, "source_type": "linkedin", "confidence": "verified", "source_note": "LinkedIn profile"},
+                {"claim": "Holds CITI certifications", "source_url": profile_url, "source_type": "linkedin", "confidence": "verified", "source_note": "LinkedIn profile"},
+            ]
+        })
+
+    researcher = PersonResearcherAI(
+        deterministic=lambda e, d, **kw: _make_det_result(AttributionVerdict.unattributed),
+        ai_ask=seq_ai,
+        search=make_fake_search([{"url": profile_url, "title": "Jane", "snippet": ""}]),
+        fetch_page=make_fake_fetch(),
+        linkedin_extract=lambda url: "Jane Doe — VP Estimating at Acme Construction, Dallas, TX.",
+    )
+    result = researcher.research("jane@acme.com", "acme.com", company_name="Acme")
+    li_facts = [e.claim for e in result.evidence if e.source_type == "linkedin"]
+    assert li_facts == ["VP Estimating at Acme (profile)"]
+
+
 def test_source_note_roundtrip_from_ai():
     """source_note from the AI response survives into the parsed person fact."""
     response = {

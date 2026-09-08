@@ -82,6 +82,17 @@ class LeadResearchStore:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Admin audit trail — which emails the user deleted and why (manual vs
+        # Junk sweep). Append-only, never purged by a re-research. Admin reads it
+        # (GET /admin/deleted); a re-delete updates the timestamp ("deleted
+        # again on <this date>"), so the log always reflects the latest state.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS deleted_leads (
+                email TEXT PRIMARY KEY,
+                deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                reason TEXT NOT NULL DEFAULT 'manual'
+            )
+        """)
         conn.commit()
         conn.close()
 
@@ -126,14 +137,40 @@ class LeadResearchStore:
         conn.close()
         return n
 
-    def delete(self, email: str) -> bool:
-        """Delete one dossier by email; return True if it existed."""
+    def delete(self, email: str, *, reason: str = "manual") -> bool:
+        """Delete one dossier by email; return True if it existed.
+
+        ``reason`` records WHY (``manual`` = per-lead Delete, ``junk`` = the
+        Junk sweep) into the ``deleted_leads`` audit trail the admin screen
+        reads ("kon kon c email delete ki"). Same transaction, so the log can
+        never show a deletion the dossier survived (or vice versa).
+        """
         eh = _email_hash(email)
         conn = sqlite3.connect(self._db_path)
         cur = conn.execute("DELETE FROM dossiers WHERE email_hash = ?", (eh,))
-        conn.commit()
+        if cur.rowcount > 0:
+            conn.execute(
+                "INSERT INTO deleted_leads (email, deleted_at, reason) "
+                "VALUES (?, CURRENT_TIMESTAMP, ?) "
+                "ON CONFLICT(email) DO UPDATE SET deleted_at = CURRENT_TIMESTAMP, reason = excluded.reason",
+                (email, reason or "manual"),
+            )
+            conn.commit()
         conn.close()
         return cur.rowcount > 0
+
+    def deleted_log(self, limit: int = 100) -> list[dict[str, str]]:
+        """The admin audit trail: emails deleted, when, and why (newest first)."""
+        conn = sqlite3.connect(self._db_path)
+        rows = conn.execute(
+            "SELECT email, deleted_at, reason FROM deleted_leads "
+            "ORDER BY deleted_at DESC LIMIT ?",
+            (int(limit),),
+        ).fetchall()
+        conn.close()
+        return [
+            {"email": r[0], "deleted_at": r[1], "reason": r[2]} for r in rows
+        ]
 
     # ------------------------------------------------------------------
     # User organization metadata (folders + tags) — Phase B.
@@ -510,6 +547,7 @@ class PendingLeadsStore:
         cached surplus slot again (the permanent half of the total fix).
         """
         from app.email.email_cleaner import is_free_mail_domain
+        from app.company_profile import get_profile
 
         conn = sqlite3.connect(self._db_path)
         added = 0
@@ -518,6 +556,22 @@ class PendingLeadsStore:
             if "@" not in email:
                 continue
             if is_free_mail_domain(email):
+                continue
+            # Vertical gate (root cause of the off-vertical cache flood): a lead
+            # whose company/domain/source is a known non-client never occupies a
+            # cached slot, so a later Execute can never serve or research it.
+            # Same ONE boundary as the pipeline's fresh filter (CLAUDE.md §11).
+            if get_profile().lead_is_non_client(
+                company=lead.get("company", ""),
+                domain=lead.get("domain", ""),
+                source_url=lead.get("source_url", ""),
+            ):
+                logger.info(
+                    "Pending drop (not our client): %s %s from %s",
+                    email,
+                    f"({lead.get('company')})" if lead.get("company") else "",
+                    (lead.get("source_url") or "")[:90],
+                )
                 continue
             eh = _email_hash(email)
             conn.execute("""
@@ -586,11 +640,23 @@ class PendingLeadsStore:
         args.append(count)
         rows = conn.execute(sql, args).fetchall()
         conn.close()
-        return [
-            {"email": r[0], "domain": r[1], "company": r[2],
-             "person": r[3], "source_url": r[4], "location": r[5]}
-            for r in rows
-        ]
+        # Same vertical gate as ``add``, applied at SERVE time too: rows cached
+        # BEFORE the boundary existed (the DCTA transit/mobility junk) must never
+        # be served again — they stay in the table (Phase C can purge to show
+        # the user exactly what was excluded) but no research credit touches them.
+        from app.company_profile import get_profile
+
+        served: list[dict] = []
+        for r in rows:
+            if get_profile().lead_is_non_client(
+                company=r[2], domain=r[1], source_url=r[4]
+            ):
+                continue
+            served.append(
+                {"email": r[0], "domain": r[1], "company": r[2],
+                 "person": r[3], "source_url": r[4], "location": r[5]}
+            )
+        return served
 
     def cooling_emails(self, cooldown_seconds: int = 0) -> set[str]:
         """Emails currently inside the re-enrichment cooldown window.
@@ -778,7 +844,20 @@ class LeadResearchService:
         agent: AILeadResearchAgent | None = None,
     ) -> None:
         self.store = store or LeadResearchStore()
-        self.agent = agent or AILeadResearchAgent()
+        if agent is None:
+            # Deterministic query-yield loop persists beside the dossier store
+            # (the runner's own DB), so the API/worker path learns per the same
+            # crediting store as run_research. Enabled post-construction (bare
+            # construction stays compatible with no-arg agent stubs in tests);
+            # a stub store without ``_db_path`` just disables the loop.
+            self.agent = AILeadResearchAgent()
+            _yield_db = getattr(self.store, "_db_path", None)
+            if _yield_db is not None and hasattr(self.agent, "enable_query_yield"):
+                self.agent.enable_query_yield(_yield_db)
+            if _yield_db is not None and hasattr(self.agent, "enable_fit_learning"):
+                self.agent.enable_fit_learning(_yield_db)
+        else:
+            self.agent = agent
 
     def research(self, email: str, domain: str) -> LeadDossier:
         """Research one email+domain and persist the result."""

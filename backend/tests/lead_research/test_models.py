@@ -50,6 +50,28 @@ def test_company_profile_roundtrip():
     assert cp2.facts[1].confidence == "unverified"
 
 
+def test_company_profile_client_verdict_roundtrip():
+    """The Stage-1 client-fit verdict survives to_dict/from_dict, and an old
+    dossier without the fields deserializes to empty (never crashes)."""
+    cp = CompanyProfile(
+        name="Beta Engineering",
+        industry="Engineering Consultancy",
+        is_our_client="no",
+        client_reason="A/E/C consultant, not a bidding contractor.",
+    )
+    d = cp.to_dict()
+    assert d["is_our_client"] == "no"
+    assert d["client_reason"] == "A/E/C consultant, not a bidding contractor."
+    cp2 = CompanyProfile.from_dict(d)
+    assert cp2.is_our_client == "no"
+    assert cp2.client_reason == "A/E/C consultant, not a bidding contractor."
+
+    # Old dossier (fields absent) → empty, no KeyError.
+    legacy = CompanyProfile.from_dict({"name": "Old Co", "industry": "GC"})
+    assert legacy.is_our_client == ""
+    assert legacy.client_reason == ""
+
+
 def test_person_findings_roundtrip():
     pf = PersonFindings(
         name="John Smith",

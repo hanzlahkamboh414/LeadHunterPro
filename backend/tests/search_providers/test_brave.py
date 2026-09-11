@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -16,6 +17,19 @@ from app.search_providers.models import SearchQuery
 
 class TestBraveSearchProvider:
     """Test Brave Search provider implementation."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_rate_limiter(self):
+        """Start every test with a clean rate-limiter clock.
+
+        The limiter is CLASS-level (it must survive admin key hot-swaps and
+        pace calls across event loops), so without this reset one test's
+        reservation makes the NEXT test sleep up to 1.1s for a slot it never
+        needed.
+        """
+        BraveSearchProvider._rate_next_slot = 0.0
+        yield
+        BraveSearchProvider._rate_next_slot = 0.0
 
     @pytest.fixture
     def provider_no_key(self):
@@ -44,8 +58,71 @@ class TestBraveSearchProvider:
         assert provider_with_key.provider_name == "brave"
 
     def test_provider_priority(self, provider_with_key):
-        """Provider has correct priority."""
-        assert provider_with_key.priority == 20
+        """Brave sorts BEFORE Tavily (priority 15 < 20) — it is the primary
+        provider whose free quota is spent first; Tavily is the fallback."""
+        assert provider_with_key.priority == 15
+        from app.search_providers.tavily import TavilySearchProvider
+
+        assert provider_with_key.priority < TavilySearchProvider.priority
+
+    def test_timeout_covers_rate_queue(self, provider_with_key):
+        """The manager backstop (timeout_s) must exceed the aiohttp request
+        timeout by enough to absorb the rate-limiter queue wait — a backstop
+        that fires while a query is waiting for its 1s slot would blacklist
+        a healthy provider."""
+        assert provider_with_key.timeout_s > provider_with_key._timeout
+
+    def test_brave_ordered_before_tavily_when_registered_later(self):
+        """The admin panel can set the Brave key at ANY time — long after
+        Tavily was auto-registered at boot. The registry must still try
+        Brave FIRST (priority 15), not Tavily."""
+        from app.search_providers.registry import SearchProviderRegistry
+        from app.search_providers.tavily import TavilySearchProvider
+
+        registry = SearchProviderRegistry()
+        registry.register(TavilySearchProvider(api_key="t-key"))  # boot order
+        registry.register(BraveSearchProvider(api_key="b-key"))  # added later
+
+        enabled = registry.get_enabled()
+        # get_enabled is what SearchProviderManager iterates — Brave first.
+        assert [p.provider_name for p in enabled] == ["brave", "tavily"]
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_spaces_concurrent_calls(self):
+        """Concurrent calls are spaced ≥ interval apart (free tier 1 qps).
+
+        Uses a SHORT interval so the test stays fast — the reservation
+        arithmetic is what matters, not the real 1.1s spacing.
+        """
+        import time as _time
+
+        interval = 0.05
+        provider = BraveSearchProvider(api_key="k")
+        old = BraveSearchProvider._RATE_INTERVAL_S
+        BraveSearchProvider._RATE_INTERVAL_S = interval
+        try:
+            start = _time.monotonic()
+            await asyncio.gather(
+                provider._respect_rate_limit(),
+                provider._respect_rate_limit(),
+                provider._respect_rate_limit(),
+            )
+            elapsed = _time.monotonic() - start
+        finally:
+            BraveSearchProvider._RATE_INTERVAL_S = old
+        # 3 callers: first fires immediately, the other two wait for their
+        # reserved slots → at least 2 intervals of total spacing.
+        assert elapsed >= 2 * interval - 0.01
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_no_wait_when_idle(self):
+        """A single call with an idle clock fires immediately (no sleep)."""
+        import time as _time
+
+        provider = BraveSearchProvider(api_key="k")
+        start = _time.monotonic()
+        await provider._respect_rate_limit()
+        assert _time.monotonic() - start < 0.05
 
     def test_health_check(self, provider_with_key):
         """Health check returns enabled status."""

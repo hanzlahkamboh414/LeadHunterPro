@@ -35,8 +35,12 @@ class TestTavilyProvider:
         assert provider.provider_name == "tavily"
 
     def test_provider_priority(self, provider):
-        """Provider has correct priority (REST-tier, peer of Brave)."""
+        """Tavily is the FALLBACK tier — Brave (priority 15) is tried first,
+        so Tavily queries are only spent when Brave fails or is exhausted."""
         assert provider.priority == 20
+        from app.search_providers.brave import BraveSearchProvider
+
+        assert provider.priority > BraveSearchProvider.priority
 
     def test_health_check(self, provider):
         """Health check returns enabled status."""

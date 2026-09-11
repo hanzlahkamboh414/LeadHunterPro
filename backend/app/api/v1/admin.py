@@ -9,7 +9,7 @@ Security rules (CLAUDE.md §6 — honest, never leaky):
 * ``require_api_key`` guards the whole router (M12 baseline).
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 import logging
 
@@ -19,18 +19,29 @@ from app.admin_read import (
     search_cache_status,
 )
 from app.api.v1.leads import _job_source_by_email, _store, require_api_key
+from app.auth.activity import get_activity
+from app.auth import dependencies as auth_deps
 from app.auth.dependencies import require_admin
+from app.auth.models import User, UserStore
 from app.core.runtime_keys import KNOWN_KEY_NAMES, RuntimeKeyStore
 from app.lead_research.service import _email_hash
 from app.schemas.admin import (
+    AdminActivityOut,
+    AdminActivityRow,
+    AdminAssignIn,
     AdminCachePendingOut,
     AdminDashboardOut,
     AdminDeletedOut,
     AdminKeysOut,
     AdminLeadActionOut,
     AdminLeadScopeIn,
+    AdminPasswordIn,
     AdminPurgeOut,
     AdminSearchCacheOut,
+    AdminUserCreateIn,
+    AdminUserOut,
+    AdminUsersOut,
+    AdminUserSummaryOut,
     AdminVisibilityDateOut,
     AdminVisibilityOut,
     AdminKeyOut,
@@ -38,6 +49,14 @@ from app.schemas.admin import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _user_store() -> UserStore:
+    """Resolve the auth store DYNAMICALLY via the module attribute — the same
+    indirection ``get_current_user`` already has. A direct import binds the
+    original function object at import time, which silently bypasses the
+    (test-)patched store and would touch the real users.db."""
+    return auth_deps._user_store()
 
 router = APIRouter(
     prefix="/admin",
@@ -174,12 +193,14 @@ def purge_cache_search() -> AdminPurgeOut:
 # ---------------------------------------------------------------------------
 
 def _scope_emails(scope: str, value: str) -> list[str]:
-    """Resolve a hide/show/delete scope to the exact email set it names.
+    """Resolve a hide/show/delete/assign scope to the exact email set it names.
 
     * ``date``    — every dossier researched on that ``YYYY-MM-DD`` (the user's
       "7-8 tareekh ka data").
     * ``source``  — every dossier from that query run label (``trade · location``),
       the same ``source`` the lead list shows per row.
+    * ``folder``  — every dossier organized into that named folder (the admin's
+      "50-email folder push it to a user" flow).
     * ``email``   — a single lead (returns ``[]`` when no such dossier exists).
 
     Uses the SAME store + source map as the user-facing views, so an admin action
@@ -194,6 +215,14 @@ def _scope_emails(scope: str, value: str) -> list[str]:
             d.email
             for d in _store.list_all()
             if date_by_hash.get(_email_hash(d.email), "") == value
+        ]
+    if scope == "folder":
+        meta_by_hash = _store.all_meta()
+        return [
+            d.email
+            for d in _store.list_all()
+            if (m := meta_by_hash.get(_email_hash(d.email))) is not None
+            and m.folder == value
         ]
     # source
     by_email = _job_source_by_email()
@@ -264,3 +293,109 @@ def leads_delete(body: AdminLeadScopeIn) -> AdminLeadActionOut:
         PendingLeadsStore(db_path=_store._db_path).remove(removed)
     _log("delete", body.scope, body.value, len(removed))
     return AdminLeadActionOut(affected=len(removed), emails=removed)
+
+
+# ---------------------------------------------------------------------------
+# User management — accounts + the activity log.
+# ---------------------------------------------------------------------------
+
+@router.get("/users", response_model=AdminUsersOut)
+def users() -> AdminUsersOut:
+    """Every account (no password data ever leaves the backend)."""
+    all_users = _user_store().list_all()
+    return AdminUsersOut(
+        total=len(all_users),
+        users=[AdminUserOut(**u.to_dict()) for u in all_users],
+    )
+
+
+@router.post("/users", response_model=AdminUserOut, status_code=201)
+def create_user(body: AdminUserCreateIn) -> AdminUserOut:
+    """Admin creates an account directly (username + email + password)."""
+    try:
+        user = _user_store().create(
+            username=body.username, email=body.email, password=body.password
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    logger.info("POST /admin/users -> created %s", user.username)
+    get_activity().record(user.id, user.username, "signup", detail="admin-created")
+    return AdminUserOut(**user.to_dict())
+
+
+@router.post("/users/{user_id}/password")
+def reset_user_password(user_id: str, body: AdminPasswordIn) -> dict:
+    """Admin resets any account's password by id."""
+    target = _user_store().get_by_id(user_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail=f"user {user_id} not found")
+    _user_store().reset_password(target.username, body.new_password)
+    logger.info("POST /admin/users/%s/password -> reset %s", user_id, target.username)
+    return {"success": True, "username": target.username}
+
+
+@router.delete("/users/{user_id}")
+def delete_user(user_id: str, admin: User = Depends(require_admin)) -> dict:
+    """Delete an account. Its dossiers/jobs STAY in the DB (admin-panel visible;
+    the user_id no longer resolves, so nobody else ever sees them). The admin
+    cannot delete their own account.
+    """
+    if user_id == admin.id:
+        raise HTTPException(status_code=422, detail="You cannot delete your own account")
+    target = _user_store().get_by_id(user_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail=f"user {user_id} not found")
+    _user_store().delete(user_id)
+    logger.info("DELETE /admin/users/%s -> deleted %s", user_id, target.username)
+    return {"success": True, "username": target.username}
+
+
+@router.get("/activity", response_model=AdminActivityOut)
+def activity(limit: int = Query(default=200, ge=1, le=1000),
+             user_id: str = Query(default="")) -> AdminActivityOut:
+    """Recent user activity (login / logout / signup / search), newest first.
+
+    ``user_id`` filters to one account's history — the per-user drill-down.
+    """
+    rows = get_activity().list(limit=limit, user_id=user_id)
+    return AdminActivityOut(
+        total=len(rows),
+        activity=[AdminActivityRow(**r) for r in rows],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Data control — push a folder/date/search to a user's dashboard.
+# ---------------------------------------------------------------------------
+
+@router.post("/leads/assign", response_model=AdminLeadActionOut)
+def leads_assign(body: AdminAssignIn) -> AdminLeadActionOut:
+    """Assign a slice of leads to a user's dashboard (or pull it back).
+
+    Setting ``user_id`` makes every dossier in scope appear on that user's
+    dashboard (their own-data view); ``user_id=""`` takes the leads back to
+    admin-only. The admin panel keeps seeing everything regardless. The admin's
+    "50-email folder -> single click -> user dashboard" flow.
+    """
+    emails = _scope_emails(body.scope, body.value)
+    affected = _store.set_user_bulk(emails, body.user_id)
+    _log("assign" if body.user_id else "unassign", body.scope, body.value, affected)
+    return AdminLeadActionOut(affected=affected, emails=emails)
+
+
+@router.get("/users/{user_id}/leads-summary", response_model=AdminUserSummaryOut)
+def user_leads_summary(user_id: str) -> AdminUserSummaryOut:
+    """What that user's dashboard currently holds — folders, dates, counts."""
+    target = _user_store().get_by_id(user_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail=f"user {user_id} not found")
+    catalog = _store.folder_catalog(user_id=user_id, is_admin=False)
+    dates = _store.distinct_dates(user_id=user_id, is_admin=False)
+    return AdminUserSummaryOut(
+        user_id=user_id,
+        username=target.username,
+        folders={f["name"]: f["count"] for f in catalog["folders"]},
+        unfiled=catalog["unfiled"],
+        total=catalog["total"],
+        dates=dates,
+    )

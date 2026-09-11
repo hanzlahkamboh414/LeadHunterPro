@@ -140,3 +140,68 @@ class AdminVisibilityOut(BaseModel):
     total: int
     hidden: int
     by_date: list[AdminVisibilityDateOut] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Admin — user management + activity log.
+# ---------------------------------------------------------------------------
+
+class AdminUserOut(BaseModel):
+    """One account row — password data never leaves the backend."""
+    id: str
+    username: str
+    email: str
+    is_admin: bool
+    created_at: str
+
+
+class AdminUsersOut(BaseModel):
+    total: int
+    users: list[AdminUserOut] = Field(default_factory=list)
+
+
+class AdminUserCreateIn(BaseModel):
+    """Admin-creates-an-account payload (no signup page needed)."""
+    username: str = Field(..., min_length=3, max_length=30)
+    email: str = Field(..., min_length=5, max_length=100)
+    password: str = Field(..., min_length=4, max_length=100)
+
+
+class AdminPasswordIn(BaseModel):
+    new_password: str = Field(..., min_length=4, max_length=100)
+
+
+class AdminActivityRow(BaseModel):
+    id: int
+    user_id: str
+    username: str
+    action: str
+    detail: str = ""
+    created_at: str
+
+
+class AdminActivityOut(BaseModel):
+    total: int
+    activity: list[AdminActivityRow] = Field(default_factory=list)
+
+
+class AdminAssignIn(BaseModel):
+    """Push (or pull back) a slice of leads to/from a user's dashboard.
+
+    Same ``scope``/``value`` semantics as :class:`AdminLeadScopeIn`; ``user_id``
+    names the account whose dashboard the leads appear on (``""`` = take back
+    to admin-only).
+    """
+    scope: Literal["date", "source", "email", "folder"]
+    value: str
+    user_id: str = ""
+
+
+class AdminUserSummaryOut(BaseModel):
+    """Per-user data drill-down for the admin panel Users tab."""
+    user_id: str
+    username: str
+    folders: dict[str, int] = Field(default_factory=dict)
+    unfiled: int = 0
+    total: int = 0
+    dates: list[str] = Field(default_factory=list)

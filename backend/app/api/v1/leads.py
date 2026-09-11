@@ -26,6 +26,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import Response
 
+from app.auth.activity import get_activity
 from app.auth.dependencies import get_current_user
 from app.auth.models import User
 from app.core.config import settings
@@ -55,6 +56,22 @@ router = APIRouter(prefix="/leads", tags=["Leads"])
 # Shared singletons. Tests override these with tmp-db instances.
 _manager: JobManager = JobManager()
 _store: LeadResearchStore = LeadResearchStore()
+
+#: Simple (non-admin) accounts are capped at 150 targets per search — the plan
+#: limit the founder set. The admin is unlimited.
+MAX_USER_TARGET_EMAILS = 150
+
+
+def _view_scope(user: User) -> dict[str, Any]:
+    """The per-user data scope every user-facing leads endpoint passes to the
+    store.
+
+    Every user sees their OWN dossiers/jobs. The admin additionally sees the
+    legacy pre-auth rows (``user_id=''``) — but NOT other users' searches: those
+    belong in the admin panel (per-user drill-down), not on the admin's own
+    dashboard. Store methods take these exact kwargs.
+    """
+    return {"user_id": user.id, "is_admin": False, "include_legacy": user.is_admin}
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +206,8 @@ def _user_owns_dossier(email: str, user: User) -> bool:
     return row is not None and row[0] == user.id
 
 
-def _job_source_by_email(user_id: str = "", is_admin: bool = False) -> dict[str, str]:
+def _job_source_by_email(user_id: str = "", is_admin: bool = False,
+                         include_legacy: bool = False) -> dict[str, str]:
     """Map email -> the query run that produced it, from persisted job results.
 
     Lets the leads list name each row's source run (``trade · location``) so a
@@ -197,11 +215,14 @@ def _job_source_by_email(user_id: str = "", is_admin: bool = False) -> dict[str,
     unlabeled data.
 
     When ``user_id`` is provided and the user is not admin, only the caller's
-    own jobs are scanned — so source labels respect data isolation.
+    own jobs are scanned — so source labels respect data isolation
+    (``include_legacy`` adds the admin's pre-auth jobs).
     """
     out: dict[str, str] = {}
     uid = user_id if user_id and not is_admin else None
-    for job in _manager.list_jobs(user_id=uid):
+    for job in _manager.list_jobs(
+        user_id=uid, include_legacy=include_legacy and uid is not None
+    ):
         q = job.query or {}
         label = " · ".join(
             [str(q.get("trade", "")).strip(), str(q.get("location", "")).strip()]
@@ -222,6 +243,12 @@ def _job_source_by_email(user_id: str = "", is_admin: bool = False) -> dict[str,
 @router.post("/jobs", response_model=JobOut, status_code=201, dependencies=[Depends(require_api_key)])
 def create_job(body: JobCreate, user: User = Depends(get_current_user)) -> JobOut:
     """Submit a query run; it executes in the background."""
+    if not user.is_admin and body.target_emails > MAX_USER_TARGET_EMAILS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"User accounts are limited to {MAX_USER_TARGET_EMAILS} "
+                   "targets per search (the admin account is unlimited).",
+        )
     query = ResearchQuery(
         trade=body.trade,
         location=body.location,
@@ -236,13 +263,22 @@ def create_job(body: JobCreate, user: User = Depends(get_current_user)) -> JobOu
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     job = _manager.submit(query, user_id=user.id)
     logger.info("POST /leads/jobs -> %s (%s)", job.id, query.describe())
+    get_activity().record(
+        user.id, user.username, "search",
+        detail=f"{query.trade} · {query.location} · {query.target_emails} targets",
+    )
     return _job_out(job)
 
 
 @router.get("/jobs", response_model=list[JobSummary], dependencies=[Depends(require_api_key)])
 def list_jobs(user: User = Depends(get_current_user)) -> list[JobSummary]:
-    uid = None if user.is_admin else user.id
-    return [_job_summary(j) for j in _manager.list_jobs(user_id=uid)]
+    scope = _view_scope(user)
+    return [
+        _job_summary(j)
+        for j in _manager.list_jobs(
+            user_id=scope["user_id"], include_legacy=scope["include_legacy"]
+        )
+    ]
 
 
 @router.get("/jobs/{job_id}", response_model=JobOut, dependencies=[Depends(require_api_key)])
@@ -288,9 +324,8 @@ def resume_job(job_id: str) -> dict[str, Any]:
     return {"job_id": job_id, "state": "running"}
 
 
-#: Deterministic lead ordering — "actionable first, junk last, phir score,
-#: phir naya." Saved order (newest-first from the store) is the tie-breaker, so
-#: the sort is STABLE over rec precedence, never scrambled.
+#: Discovery order — leads are listed number-wise, in the order they were
+#: found (rowid ASC). No re-ranking on refresh: what the user saw stays put.
 @router.get("", response_model=list[LeadSummary], dependencies=[Depends(require_api_key)])
 def list_leads(
     recommendation: str | None = Query(default=None, description="filter by recommendation (contact_now/nurture/skip)"),
@@ -306,13 +341,12 @@ def list_leads(
     response: Response = None,
     user: User = Depends(get_current_user),
 ) -> list[LeadSummary]:
-    """List leads with deterministic ordering + honest defaults.
+    """List leads in DISCOVERY ORDER (number-wise) with honest defaults.
 
-    ORDER — ``contact_now`` first, then ``nurture``, then (only when explicitly
-    requested) ``skip``; within a tier by score (high first), ``skip``/junk
-    never sits on top of actionable leads. Stable over saved order (newest
-    first), so an equal score keeps newest-first — never a scrambled page
-    (the old "user manuplate hota hai" feel).
+    ORDER — ``rowid ASC`` from the store: the order leads were found, stable
+    across refresh. Lead #1 stays lead #1 after a refresh; the old tier/score
+    re-sort moved rows on every refresh (the "leads jump to the bottom"
+    complaint).
 
     DEFAULTS — ``skip`` is HIDDEN unless ``recommendation=skip`` is explicit:
     a dead-domain / junk dossier is not a lead, and hiding it by default keeps
@@ -346,13 +380,17 @@ def list_leads(
     """
     from app.lead_research.scoring import regate_recommendation
 
-    source_by_email = _job_source_by_email(user_id=user.id, is_admin=user.is_admin)
+    scope = _view_scope(user)
+    source_by_email = _job_source_by_email(
+        user_id=scope["user_id"],
+        is_admin=scope["is_admin"],
+        include_legacy=scope["include_legacy"],
+    )
     source_emails = (
         {e for e, s in source_by_email.items() if s == source} if source else None
     )
     page, total = _store.query_leads(
-        user_id=user.id if not user.is_admin else None,
-        is_admin=user.is_admin,
+        **scope,
         recommendation=recommendation,
         bound=bound,
         min_score=min_score,
@@ -417,8 +455,12 @@ def export_leads(
     + actionable only); pass ``folder=*`` for every place.
     """
     email_list = [e.strip() for e in emails.split(",") if e.strip()] if emails else None
+    scope = _view_scope(user)
     source_emails = (
-        {e for e, s in _job_source_by_email(user_id=user.id, is_admin=user.is_admin).items() if s == source} if source else None
+        {e for e, s in _job_source_by_email(
+            user_id=scope["user_id"], is_admin=scope["is_admin"],
+            include_legacy=scope["include_legacy"],
+        ).items() if s == source} if source else None
     )
     csv_data = export_csv(
         _store,
@@ -432,6 +474,9 @@ def export_leads(
         bound=bound,
         min_score=min_score,
         q=q,
+        user_id=scope["user_id"],
+        is_admin=scope["is_admin"],
+        include_legacy=scope["include_legacy"],
     )
     return Response(
         content=csv_data,
@@ -455,9 +500,9 @@ def clear_junk(user: User = Depends(get_current_user)) -> dict[str, Any]:
     """
     from app.lead_research.scoring import regate_recommendation
 
+    scope = _view_scope(user)
     removed: list[str] = []
-    for d in _store.list_all(user_id=user.id if not user.is_admin else "",
-                             is_admin=user.is_admin):
+    for d in _store.list_all(**scope):
         if regate_recommendation(d) == "skip":
             if _store.delete(d.email, reason="junk"):
                 removed.append(d.email)
@@ -511,10 +556,14 @@ def organize_lead(email: str, body: OrganizeIn,
     rec = regate_recommendation(dossier) if dossier else "skip"
     logger.info("PUT /leads/%s/organize -> folder=%r tags=%r", email, body.folder, body.tags)
     meta = _store.get_meta(email)
+    scope = _view_scope(user)
     return _lead_summary(
         dossier,
         recommendation=rec,
-        source=_job_source_by_email(user_id=user.id, is_admin=user.is_admin).get(email, ""),
+        source=_job_source_by_email(
+            user_id=scope["user_id"], is_admin=scope["is_admin"],
+            include_legacy=scope["include_legacy"],
+        ).get(email, ""),
         folder=meta.folder if meta else "",
         tags=meta.tags if meta else [],
         created_at=_store.research_dates().get(_email_hash(email), ""),
@@ -530,14 +579,11 @@ def organize_rename(body: OrganizeRenameIn,
     """
     if body.kind not in ("folder", "tag"):
         raise HTTPException(status_code=422, detail="kind must be 'folder' or 'tag'")
+    scope = _view_scope(user)
     updated = (
-        _store.rename_folder(body.from_, body.to,
-                             user_id=user.id if not user.is_admin else "",
-                             is_admin=user.is_admin)
+        _store.rename_folder(body.from_, body.to, **scope)
         if body.kind == "folder"
-        else _store.rename_tag(body.from_, body.to,
-                               user_id=user.id if not user.is_admin else "",
-                               is_admin=user.is_admin)
+        else _store.rename_tag(body.from_, body.to, **scope)
     )
     logger.info("POST /leads/organize/rename %s %r->%r updated=%d", body.kind, body.from_, body.to, updated)
     return {"kind": body.kind, "from": body.from_, "to": body.to, "updated": updated}
@@ -552,14 +598,11 @@ def organize_clear(body: OrganizeClearIn,
     """
     if body.kind not in ("folder", "tag"):
         raise HTTPException(status_code=422, detail="kind must be 'folder' or 'tag'")
+    scope = _view_scope(user)
     updated = (
-        _store.clear_folder(body.value,
-                            user_id=user.id if not user.is_admin else "",
-                            is_admin=user.is_admin)
+        _store.clear_folder(body.value, **scope)
         if body.kind == "folder"
-        else _store.clear_tag(body.value,
-                              user_id=user.id if not user.is_admin else "",
-                              is_admin=user.is_admin)
+        else _store.clear_tag(body.value, **scope)
     )
     logger.info("POST /leads/organize/clear %s %r -> %d", body.kind, body.value, updated)
     return {"kind": body.kind, "value": body.value, "updated": updated}
@@ -577,8 +620,7 @@ def list_folders(user: User = Depends(get_current_user)) -> dict[str, Any]:
 
     Per-user isolation: a non-admin sees only their OWN folders/counts.
     """
-    return _store.folder_catalog(user_id=user.id if not user.is_admin else "",
-                                 is_admin=user.is_admin)
+    return _store.folder_catalog(**_view_scope(user))
 
 
 @router.get("/dates", response_model=list[str], dependencies=[Depends(require_api_key)])
@@ -593,8 +635,7 @@ def list_dates(user: User = Depends(get_current_user)) -> list[str]:
 
     Per-user isolation: a non-admin sees only dates from their OWN dossiers.
     """
-    return _store.distinct_dates(user_id=user.id if not user.is_admin else "",
-                                 is_admin=user.is_admin)
+    return _store.distinct_dates(**_view_scope(user))
 
 
 @router.get("/tags", response_model=list[dict[str, Any]], dependencies=[Depends(require_api_key)])
@@ -606,8 +647,7 @@ def list_tags(user: User = Depends(get_current_user)) -> list[dict[str, Any]]:
 
     Per-user isolation: a non-admin only counts their OWN dossiers' tags.
     """
-    return _store.tag_counts(user_id=user.id if not user.is_admin else "",
-                             is_admin=user.is_admin)
+    return _store.tag_counts(**_view_scope(user))
 
 
 @router.get("/sources", response_model=list[str], dependencies=[Depends(require_api_key)])
@@ -619,7 +659,11 @@ def list_sources(user: User = Depends(get_current_user)) -> list[str]:
 
     Per-user isolation: a non-admin sees only labels from their OWN jobs.
     """
-    return sorted({s for s in _job_source_by_email(user_id=user.id, is_admin=user.is_admin).values() if s})
+    scope = _view_scope(user)
+    return sorted({s for s in _job_source_by_email(
+        user_id=scope["user_id"], is_admin=scope["is_admin"],
+        include_legacy=scope["include_legacy"],
+    ).values() if s})
 
 
 @router.post("/folders", response_model=FolderOut, status_code=201,

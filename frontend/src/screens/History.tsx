@@ -82,6 +82,23 @@ function HistoryRow({ job }: { job: JobSummary }) {
     },
   });
 
+  // Pause / Cancel a RUNNING run straight from History (the same controls the
+  // live Research view has — History is the recall view, not read-only).
+  const pauseMut = useMutation({
+    mutationFn: () => api.pauseJob(job.id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["jobs"] });
+      queryClient.invalidateQueries({ queryKey: ["job-detail", job.id] });
+    },
+  });
+  const cancelMut = useMutation({
+    mutationFn: () => api.cancelJob(job.id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["jobs"] });
+      queryClient.invalidateQueries({ queryKey: ["job-detail", job.id] });
+    },
+  });
+
   return (
     <li className="rounded-xl border border-white/5 bg-white/[0.02]">
       <div className="flex items-stretch">
@@ -118,6 +135,33 @@ function HistoryRow({ job }: { job: JobSummary }) {
           >
             {continueMut.isPending ? <Spinner className="h-3.5 w-3.5" /> : "⏵"}
             {job.state === "paused" ? "Resume" : "Continue"}
+          </button>
+        )}
+        {job.state === "running" && (
+          <div className="shrink-0 self-center mr-3 flex items-center gap-2">
+            <button
+              onClick={() => pauseMut.mutate()}
+              disabled={pauseMut.isPending}
+              className="rounded-lg border border-amber-500/40 px-3 py-2 text-[12.5px] text-amber-300 hover:bg-amber-500/10 disabled:opacity-50"
+            >
+              {pauseMut.isPending ? "Pausing…" : "⏸ Pause"}
+            </button>
+            <button
+              onClick={() => cancelMut.mutate()}
+              disabled={cancelMut.isPending}
+              className="rounded-lg border border-rose-500/40 px-3 py-2 text-[12.5px] text-rose-300 hover:bg-rose-500/10 disabled:opacity-50"
+            >
+              {cancelMut.isPending ? "Cancelling…" : "Cancel"}
+            </button>
+          </div>
+        )}
+        {job.state === "paused" && (
+          <button
+            onClick={() => cancelMut.mutate()}
+            disabled={cancelMut.isPending}
+            className="shrink-0 self-center mr-3 rounded-lg border border-rose-500/40 px-3 py-2 text-[12.5px] text-rose-300 hover:bg-rose-500/10 disabled:opacity-50"
+          >
+            {cancelMut.isPending ? "Cancelling…" : "Cancel"}
           </button>
         )}
       </div>

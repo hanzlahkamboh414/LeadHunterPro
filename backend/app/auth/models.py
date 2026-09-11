@@ -145,6 +145,25 @@ class UserStore:
         conn.close()
         return True
 
+    def list_all(self) -> list[User]:
+        """Every user, oldest first — the admin user-management view."""
+        conn = sqlite3.connect(self._db_path)
+        cur = conn.execute("SELECT * FROM users ORDER BY created_at ASC, username ASC")
+        rows = cur.fetchall()
+        conn.close()
+        return [self._row_to_user(row) for row in rows]
+
+    def delete(self, user_id: str) -> bool:
+        """Delete a user account (row only — dossiers/jobs keep their user_id
+        and stay visible to the admin panel; the user's JWT dies on the next
+        request because get_by_id no longer resolves)."""
+        conn = sqlite3.connect(self._db_path)
+        cur = conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        removed = cur.rowcount > 0
+        conn.commit()
+        conn.close()
+        return removed
+
     def ensure_admin(self, username: str = "admin4269",
                      password: str = "223344",
                      email: str = "admin@leadhunter.local") -> User:

@@ -249,16 +249,19 @@ class LeadResearchStore:
             return None
         return LeadDossier.from_dict(json.loads(row[0]))
 
-    def list_all(self, user_id: str = "", is_admin: bool = False) -> list[LeadDossier]:
+    def list_all(self, user_id: str = "", is_admin: bool = False,
+                 include_legacy: bool = False) -> list[LeadDossier]:
         """List all stored dossiers.
 
-        Per-user isolation: a non-admin only lists their OWN dossiers.
+        Per-user isolation: a non-admin only lists their OWN dossiers;
+        ``include_legacy`` adds the pre-auth (``user_id=''``) rows — the admin's
+        own-dashboard scope.
         """
         conn = self._conn()
         args: list[Any] = []
         conds = ""
         if user_id and not is_admin:
-            conds = "WHERE user_id = ?"
+            conds = "WHERE (user_id = ? OR user_id = '')" if include_legacy else "WHERE user_id = ?"
             args = [user_id]
         rows = conn.execute(
             f"SELECT dossier_json FROM dossiers {conds} ORDER BY updated_at DESC",
@@ -387,17 +390,19 @@ class LeadResearchStore:
             return None
         return LeadMeta.from_db(row[0], row[1])
 
-    def all_meta(self, user_id: str = "", is_admin: bool = False) -> dict[str, LeadMeta]:
+    def all_meta(self, user_id: str = "", is_admin: bool = False,
+                 include_legacy: bool = False) -> dict[str, LeadMeta]:
         """Map email_hash -> folder+tags for every stored dossier (one query).
 
         Per-user isolation: a non-admin only sees metadata for their OWN
-        dossiers (admin, or no filter, sees everything).
+        dossiers (admin, or no filter, sees everything); ``include_legacy``
+        adds the pre-auth (``user_id=''``) rows.
         """
         conn = self._conn()
         args: list[Any] = []
         conds = ""
         if user_id and not is_admin:
-            conds = "WHERE user_id = ?"
+            conds = "WHERE (user_id = ? OR user_id = '')" if include_legacy else "WHERE user_id = ?"
             args = [user_id]
         rows = conn.execute(
             f"SELECT email_hash, folder, tags FROM dossiers {conds}",
@@ -457,6 +462,31 @@ class LeadResearchStore:
         conn.close()
         return {r[0] for r in rows}
 
+    def set_user_bulk(self, emails: list[str], user_id: str) -> int:
+        """Assign/unassign many dossiers to one user in ONE statement.
+
+        The admin's "push this folder to user X" control: setting ``user_id``
+        makes the leads appear on that user's dashboard (their own exact-match
+        view); ``user_id=''`` takes them back to admin-only. The admin panel
+        keeps seeing every dossier regardless. Returns how many rows moved —
+        an honest count, never silent (CLAUDE.md §6).
+        """
+        emails = [e for e in dict.fromkeys(e or "" for e in emails) if e]
+        if not emails:
+            return 0
+        conn = self._conn()
+        placeholders = ",".join("?" for _ in emails)
+        params: list[Any] = [user_id, user_id]
+        params += [_email_hash(e) for e in emails]
+        cur = conn.execute(
+            f"UPDATE dossiers SET user_id = ? "
+            f"WHERE user_id <> ? AND email_hash IN ({placeholders})",
+            params,
+        )
+        conn.commit()
+        conn.close()
+        return cur.rowcount
+
     def visibility_by_date(self) -> dict[str, dict[str, int]]:
         """``{YYYY-MM-DD: {total, hidden}}`` — the admin's per-date data control view.
 
@@ -514,6 +544,7 @@ class LeadResearchStore:
                       date: str | None = None, source_emails: set[str] | None = None,
                       q: str | None = None, global_scope: bool = False,
                       user_id: str | None = None, is_admin: bool = False,
+                      include_legacy: bool = False,
                       ) -> tuple[str, list[Any]]:
         """Shared WHERE clause for the user-facing lead views.
 
@@ -526,15 +557,22 @@ class LeadResearchStore:
         escapes so a query with %/_/\\ is a literal search, never a wildcard).
 
         Per-user isolation: non-admin users ONLY see dossiers where user_id matches
-        exactly (a new user's dashboard is fresh). Admin users see all (including
-        legacy empty-user_id rows from the pre-auth era).
+        exactly (a new user's dashboard is fresh). With ``include_legacy`` the
+        caller ALSO sees the legacy pre-auth rows (``user_id=''``) — the admin's
+        OWN dashboard uses this: own + legacy data, never other users' searches
+        (those live in the admin panel instead). The unfiltered whole-store view
+        is the admin panel's job, not a user view.
         """
         conds = ["d.hidden = 0"]
         # Per-user data isolation
         if user_id and not is_admin:
-            # EXACT match only — legacy (user_id='') dossiers belong to the admin
-            # alone; a new user's dashboard stays fresh until they run searches.
-            conds.append("d.user_id = ?")
+            if include_legacy:
+                # Own + legacy pre-auth rows — the admin's own-dashboard scope.
+                conds.append("(d.user_id = ? OR d.user_id = '')")
+            else:
+                # EXACT match only — legacy (user_id='') dossiers belong to the
+                # admin alone; a new user's dashboard stays fresh.
+                conds.append("d.user_id = ?")
             args: list[Any] = [user_id]
         else:
             args = []
@@ -608,8 +646,11 @@ class LeadResearchStore:
         X-Total-Count header so the UI can page). Each record carries ``dossier``
         (LeadDossier), ``folder``, ``tags``, ``created_at`` and the persisted
         verdict columns, so the caller's freshness re-gate has what it needs.
-        Ordering is the same deterministic tier -> score -> newest the Python sort
-        produced, made total by ``rowid`` (stable tie-break).
+
+        Ordering is DISCOVERY ORDER (``rowid ASC`` — the order leads were found,
+        number-wise), matching :meth:`all_matching`. The old tier -> score sort
+        re-ranked rows on every refresh and leads "jumped to the bottom" the
+        moment a verdict/score was re-gated; discovery order is stable.
         """
         where, args = self._filter_where(**filters)  # user_id/is_admin pass via filters
         conn = self._conn()
@@ -618,9 +659,7 @@ class LeadResearchStore:
         ).fetchone()[0]
         rows = conn.execute(
             f"SELECT {self._LIST_COLS} FROM dossiers d WHERE {where} "
-            "ORDER BY CASE d.recommendation WHEN 'contact_now' THEN 0 "
-            "WHEN 'nurture' THEN 1 WHEN 'skip' THEN 2 ELSE 9 END, "
-            "d.potential_score DESC, d.updated_at DESC, d.rowid ASC "
+            "ORDER BY d.rowid ASC "
             "LIMIT ? OFFSET ?",
             args + [int(limit), int(offset)],
         ).fetchall()
@@ -641,20 +680,22 @@ class LeadResearchStore:
         conn.close()
         return [self._row_to_lead(r) for r in rows]
 
-    def distinct_dates(self, user_id: str = "", is_admin: bool = False) -> list[str]:
+    def distinct_dates(self, user_id: str = "", is_admin: bool = False,
+                       include_legacy: bool = False) -> list[str]:
         """Every extraction date present on a VISIBLE dossier, newest first — one
         DISTINCT GROUP, no per-row Python (the old list_dates full scan). A date
         whose only rows are admin-hidden drops out of the dropdown (the user can no
         longer recall it).
 
         Per-user isolation: a non-admin only sees dates from their OWN dossiers;
-        admin (or no filter) sees every date.
+        admin (or no filter) sees every date; ``include_legacy`` adds the pre-auth
+        rows to the caller's own view.
         """
         conn = self._conn()
         args: list[Any] = []
         conds = "WHERE hidden = 0 AND date(created_at) IS NOT NULL"
         if user_id and not is_admin:
-            conds += " AND d.user_id = ?"
+            conds += " AND (d.user_id = ? OR d.user_id = '')" if include_legacy else " AND d.user_id = ?"
             args = [user_id]
         rows = conn.execute(
             "SELECT DISTINCT date(created_at) AS d FROM dossiers d "
@@ -664,7 +705,8 @@ class LeadResearchStore:
         conn.close()
         return [r[0] for r in rows]
 
-    def tag_counts(self, user_id: str = "", is_admin: bool = False) -> list[dict[str, Any]]:
+    def tag_counts(self, user_id: str = "", is_admin: bool = False,
+                   include_legacy: bool = False) -> list[dict[str, Any]]:
         """Global tag counts for the USER views (hidden + skip/ungated excluded —
         the same set the actionable list shows). Feeds the tag chips/filter, one
         GROUP BY over ``json_each`` instead of a full-list download.
@@ -675,7 +717,7 @@ class LeadResearchStore:
         args: list[Any] = []
         conds = "d.hidden = 0 AND d.recommendation NOT IN ('skip', '')"
         if user_id and not is_admin:
-            conds += " AND d.user_id = ?"
+            conds += " AND (d.user_id = ? OR d.user_id = '')" if include_legacy else " AND d.user_id = ?"
             args = [user_id]
         rows = conn.execute(
             "SELECT jt.value AS tag, COUNT(*) AS cnt "
@@ -742,7 +784,8 @@ class LeadResearchStore:
             for r in rows
         ]
 
-    def folder_catalog(self, user_id: str = "", is_admin: bool = False) -> dict[str, Any]:
+    def folder_catalog(self, user_id: str = "", is_admin: bool = False,
+                       include_legacy: bool = False) -> dict[str, Any]:
         """The organization mailbox overview — one round-trip for the UI.
 
         ``{folders: [{name, created_at, count}], unfiled, total}``: ``unfiled``
@@ -761,7 +804,8 @@ class LeadResearchStore:
         via "Clear junk") — it is just never counted as a lead.
 
         Per-user isolation: non-admin counts only their OWN dossiers; admin sees
-        all (legacy empty-user_id rows included).
+        all (legacy empty-user_id rows included); ``include_legacy`` gives a
+        caller own + legacy instead.
         """
         conn = self._conn()
         self._backfill_folders(conn)
@@ -772,7 +816,7 @@ class LeadResearchStore:
         args: list[Any] = []
         conds = "WHERE hidden = 0 AND recommendation NOT IN ('skip', '')"
         if user_id and not is_admin:
-            conds += " AND user_id = ?"
+            conds += " AND (user_id = ? OR user_id = '')" if include_legacy else " AND user_id = ?"
             args = [user_id]
         count_rows = conn.execute(
             f"SELECT folder, COUNT(*) FROM dossiers {conds} GROUP BY folder",
@@ -795,7 +839,7 @@ class LeadResearchStore:
         }
 
     def rename_folder(self, old: str, new: str, user_id: str = "",
-                      is_admin: bool = False) -> int:
+                      is_admin: bool = False, include_legacy: bool = False) -> int:
         """Rename a folder across every dossier AND the catalog; count renamed.
 
         The sweep is unchanged (folder rides on dossiers); the catalog keeps the
@@ -811,7 +855,9 @@ class LeadResearchStore:
         if not old or old == new:
             return 0
         affected = [
-            eh for eh, m in self.all_meta(user_id=user_id, is_admin=is_admin).items()
+            eh for eh, m in self.all_meta(
+                user_id=user_id, is_admin=is_admin, include_legacy=include_legacy
+            ).items()
             if m.folder == old
         ]
         for eh in affected:
@@ -829,7 +875,7 @@ class LeadResearchStore:
         return len(affected)
 
     def rename_tag(self, old: str, new: str, user_id: str = "",
-                   is_admin: bool = False) -> int:
+                   is_admin: bool = False, include_legacy: bool = False) -> int:
         """Rename a tag value across every dossier; return how many changed.
 
         Per-user isolation: a non-admin renames only within their OWN dossiers.
@@ -839,14 +885,17 @@ class LeadResearchStore:
         if not old or old == new:
             return 0
         affected = 0
-        for eh, m in self.all_meta(user_id=user_id, is_admin=is_admin).items():
+        for eh, m in self.all_meta(
+            user_id=user_id, is_admin=is_admin, include_legacy=include_legacy
+        ).items():
             if old in m.tags:
                 tags = [(new if t == old else t) for t in m.tags]
                 self.set_meta_direct(eh, m.folder, tags)
                 affected += 1
         return affected
 
-    def clear_folder(self, value: str, user_id: str = "", is_admin: bool = False) -> int:
+    def clear_folder(self, value: str, user_id: str = "", is_admin: bool = False,
+                     include_legacy: bool = False) -> int:
         """Remove a folder value from every dossier AND drop it from the catalog.
 
         Deleting a folder releases its leads (folder="") and removes the group —
@@ -861,7 +910,9 @@ class LeadResearchStore:
         if not value:
             return 0
         affected = [
-            eh for eh, m in self.all_meta(user_id=user_id, is_admin=is_admin).items()
+            eh for eh, m in self.all_meta(
+                user_id=user_id, is_admin=is_admin, include_legacy=include_legacy
+            ).items()
             if m.folder == value
         ]
         for eh in affected:
@@ -875,7 +926,8 @@ class LeadResearchStore:
         conn.close()
         return len(affected)
 
-    def clear_tag(self, value: str, user_id: str = "", is_admin: bool = False) -> int:
+    def clear_tag(self, value: str, user_id: str = "", is_admin: bool = False,
+                  include_legacy: bool = False) -> int:
         """Remove a tag value from every dossier; return how many changed.
 
         Per-user isolation: a non-admin clears only within their OWN dossiers.
@@ -884,7 +936,9 @@ class LeadResearchStore:
         if not value:
             return 0
         affected = 0
-        for eh, m in self.all_meta(user_id=user_id, is_admin=is_admin).items():
+        for eh, m in self.all_meta(
+            user_id=user_id, is_admin=is_admin, include_legacy=include_legacy
+        ).items():
             if value in m.tags:
                 tags = [t for t in m.tags if t != value]
                 self.set_meta_direct(eh, m.folder, tags)

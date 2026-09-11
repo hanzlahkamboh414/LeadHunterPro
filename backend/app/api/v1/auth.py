@@ -10,6 +10,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from app.auth.activity import get_activity
 from app.auth.dependencies import get_current_user
 from app.auth.jwt import create_access_token
 from app.auth.models import User, UserStore
@@ -81,6 +82,7 @@ def signup(body: SignupRequest) -> AuthOut:
 
     token = create_access_token(user.id, user.is_admin, username=user.username)
     logger.info("Signup: user %s created", user.username)
+    get_activity().record(user.id, user.username, "signup")
     return AuthOut(
         user_id=user.id,
         username=user.username,
@@ -99,6 +101,7 @@ def login(body: LoginRequest) -> AuthOut:
 
     token = create_access_token(user.id, user.is_admin, username=user.username)
     logger.info("Login: user %s", user.username)
+    get_activity().record(user.id, user.username, "login")
     return AuthOut(
         user_id=user.id,
         username=user.username,
@@ -127,3 +130,15 @@ def me(user: User = Depends(get_current_user)) -> MeOut:
         email=user.email,
         is_admin=user.is_admin,
     )
+
+
+@router.post("/logout")
+def logout(user: User = Depends(get_current_user)) -> dict:
+    """Record the logout in the activity log.
+
+    The JWT itself is stateless — the client discards the token. This endpoint
+    exists so the admin activity view can honestly show logouts.
+    """
+    logger.info("Logout: user %s", user.username)
+    get_activity().record(user.id, user.username, "logout")
+    return {"success": True}

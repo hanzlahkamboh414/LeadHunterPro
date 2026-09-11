@@ -113,14 +113,19 @@ def export_csv(
     bound: bool | None = None,
     min_score: float | None = None,
     q: str | None = None,
+    user_id: str = "",
+    is_admin: bool = False,
+    include_legacy: bool = False,
 ) -> str:
     """Export persisted leads to CSV.
 
     ``store`` is a LeadResearchStore. The user-view filters (folder/tag/date/
     source/bound/min_score/q) run IN SQL via :meth:`all_matching`, so export
     honours exactly the same set the Companies list shows — hidden rows excluded,
-    default = the Unfiled actionable inbox (``folder=*`` for every place, and
-    an explicit ``recommendation`` / ``emails`` for the junk / selected paths).
+    per-user isolation applied (``user_id``/``is_admin``/``include_legacy``
+    mirror the leads-list scope), default = the Unfiled actionable inbox
+    (``folder=*`` for every place, and an explicit ``recommendation`` /
+    ``emails`` for the junk / selected paths).
     ``emails`` — only export these specific emails (selected rows). ``full`` —
     all columns (default: email+name only).
 
@@ -140,6 +145,7 @@ def export_csv(
         recommendation="*" if emails else (recommendation if recommendation else None),
         folder=folder, tag=tag, date=date, source_emails=source_emails,
         bound=bound, min_score=min_score, q=q,
+        user_id=user_id, is_admin=is_admin, include_legacy=include_legacy,
     )
     dossiers = [m["dossier"] for m in matched]
     rec_map = {d.email: regate_recommendation(d) for d in dossiers}

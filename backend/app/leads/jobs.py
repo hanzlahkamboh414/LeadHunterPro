@@ -198,9 +198,18 @@ class JobStore:
             user_id=d.get("user_id", "") or "",
         )
 
-    def list_all(self, user_id: str | None = None) -> list[Job]:
+    def list_all(self, user_id: str | None = None,
+                 include_legacy: bool = False) -> list[Job]:
         conn = sqlite3.connect(self._db_path)
-        if user_id:
+        if user_id and include_legacy:
+            # The admin's own-dashboard scope: own jobs PLUS the legacy
+            # pre-auth runs (user_id='') that belong to the admin alone.
+            cur = conn.execute(
+                "SELECT * FROM jobs WHERE (user_id = ? OR user_id = '') "
+                "ORDER BY created_at DESC",
+                (user_id,),
+            )
+        elif user_id:
             # EXACT match only — a new user must NOT inherit legacy (user_id='')
             # jobs from the pre-auth era; those belong to the admin alone.
             cur = conn.execute(
@@ -439,9 +448,10 @@ class JobManager:
         self.sweep_dead_workers()
         return self._store.get(job_id)
 
-    def list_jobs(self, user_id: str | None = None) -> list[Job]:
+    def list_jobs(self, user_id: str | None = None,
+                  include_legacy: bool = False) -> list[Job]:
         self.sweep_dead_workers()
-        return self._store.list_all(user_id=user_id)
+        return self._store.list_all(user_id=user_id, include_legacy=include_legacy)
 
     # -- worker ----
 

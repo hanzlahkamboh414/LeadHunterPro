@@ -54,22 +54,38 @@ def _wait_state(client, job_id, want, timeout=5.0):
 # Fixtures
 # ---------------------------------------------------------------------------
 
-def _setup(tmp_path, monkeypatch, run_full=None):
+def _setup(tmp_path, monkeypatch, run_full=None, admin=False):
     """Point the router's manager + store at a tmp DB; optionally fake the pipeline.
 
-    Every test client is minted a JWT for a non-admin ``testuser``.  The store's
-    ``save()`` is wrapped so that all seeded dossiers carry ``user_id=testuser.id``
-    — under strict isolation the test user can only see rows that belong to them.
+    Every test client is minted a JWT for a ``testuser`` (admin=True promotes
+    them).  The store's ``save()`` is wrapped so that all seeded dossiers carry
+    ``user_id=testuser.id`` — under strict isolation the test user can only see
+    rows that belong to them.
     """
     if run_full is not None:
         monkeypatch.setattr("app.leads.jobs.run_full", run_full)
     # --- Create the test user FIRST so we know the user_id for store seeds. ---
     from app.auth.jwt import create_access_token
     from app.auth.models import UserStore
+    from app.auth.activity import ActivityStore
     import app.auth.dependencies as deps
+    import app.auth.activity as activity_module
     user_store = UserStore(db_path=str(tmp_path / "users.db"))
     monkeypatch.setattr(deps, "_user_store", lambda: user_store)
+    # create_job records "search" activity via the get_activity() singleton —
+    # point it at the tmp db too, or every test run pollutes the real one.
+    monkeypatch.setattr(
+        activity_module, "_activity_store", ActivityStore(db_path=str(tmp_path / "users.db"))
+    )
     user = user_store.create("testuser", "test@example.com", "password")
+    if admin:
+        import sqlite3
+        conn = sqlite3.connect(str(tmp_path / "users.db"))
+        conn.execute("UPDATE users SET is_admin = 1 WHERE id = ?", (user.id,))
+        conn.commit()
+        conn.close()
+        user = user_store.get_by_username("testuser")
+        assert user is not None and user.is_admin
     # Wrap the store so save() auto-injects user_id for seeded dossiers.
     _real_store = LeadResearchStore(db_path=str(tmp_path / "jobs.db"))
     _orig_save = _real_store.save
@@ -167,12 +183,13 @@ def test_create_job_and_poll_progress(tmp_path, monkeypatch):
 def test_job_completed_surfaces_honest_outcome(tmp_path, monkeypatch):
     """H1: a run that under-delivers must say so. The seam that used to discard
     run_full's outcome now stamps the job + appends an honest terminal event —
-    a 4/500 run never reads as a clean "Completed" again (§6)."""
+    a 4/500 run never reads as a clean "Completed" again (§6). Run as ADMIN:
+    500-target runs are admin-sized (users are capped at 150)."""
     def fake(query, emit=None, cancel=None, store=None, paused=None, user_id=""):
         return {"working_leads": 4, "leads_found": 17, "shortfall": 496,
                 "shortfall_reason": "discovery_exhausted"}
 
-    client = _setup(tmp_path, monkeypatch, run_full=fake)
+    client = _setup(tmp_path, monkeypatch, run_full=fake, admin=True)
     r = client.post("/api/v1/leads/jobs", json={
         "trade": "general contractor", "location": "Texas", "target_emails": 500,
     })
@@ -388,16 +405,16 @@ def test_regate_demotes_stale_ai_era_rec(tmp_path, monkeypatch):
 
 
 def test_list_leads_default_hides_skip_and_orders_actionable_first(tmp_path, monkeypatch):
-    """Default view = ACTIONABLE ONLY, deterministically ordered: tier
-    (contact_now → nurture) first, then score high→low. Dead-domain / skip
-    dossiers are hidden (they never inflate the count — the user's complaint)
-    and can't scramble the order. Even when a nurture row is NEWER and HIGHER
-    scored, contact_now still wins the tier, so the page never 'manipulates'."""
+    """Default view = ACTIONABLE ONLY, in discovery order (insertion order,
+    rowid ASC — the order leads were found, stable across refresh — the user's
+    "leads jump to the bottom after refresh" complaint). Dead-domain / skip
+    dossiers are hidden (they never inflate the count) and can't appear here."""
     client = _setup(tmp_path, monkeypatch)
     store = leads_module._store
     store.save(_dossier("high@x.com", "x.com", score=8.0, rec="contact_now"))
     store.save(_dossier("low@x.com", "x.com", score=6.0, rec="contact_now"))
-    # nurture saved LAST = newest, and OUTSCORES both — but tier must beat it.
+    # nurture saved LAST = newest, and OUTSCORES both — discovery order keeps it
+    # last regardless (no tier/score re-sort on refresh).
     store.save(_dossier("nurture@y.com", "y.com", score=8.5, rec="nurture", bound=False, person="Bo"))
     store.save(_dead_domain("dead@gone.com", "gone.com"))
     store.save(_dossier("junk@z.com", "z.com", score=2.0, rec="skip", bound=False))
@@ -408,9 +425,9 @@ def test_list_leads_default_hides_skip_and_orders_actionable_first(tmp_path, mon
     assert emails == ["high@x.com", "low@x.com", "nurture@y.com"], emails
 
 
-def test_list_leads_skip_filter_reveals_junk_ordered_by_score(tmp_path, monkeypatch):
-    """?recommendation=skip still reveals junk — score high-first, dead-domain
-    last — for the user who explicitly wants to inspect it."""
+def test_list_leads_skip_filter_reveals_junk_in_discovery_order(tmp_path, monkeypatch):
+    """?recommendation=skip still reveals junk — in discovery order (insertion
+    order, rowid ASC) — for the user who explicitly wants to inspect it."""
     client = _setup(tmp_path, monkeypatch)
     store = leads_module._store
     store.save(_dossier("a@x.com", "x.com", score=8.0, rec="contact_now"))
@@ -418,7 +435,7 @@ def test_list_leads_skip_filter_reveals_junk_ordered_by_score(tmp_path, monkeypa
     store.save(_dossier("junk@z.com", "z.com", score=2.0, rec="skip", bound=False))
 
     r = client.get("/api/v1/leads", params={"recommendation": "skip"})
-    assert [l["email"] for l in r.json()] == ["junk@z.com", "dead@gone.com"]
+    assert [l["email"] for l in r.json()] == ["dead@gone.com", "junk@z.com"]
 
 
 def test_leads_carry_source_run_and_filter(tmp_path, monkeypatch):

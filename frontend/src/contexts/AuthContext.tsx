@@ -101,6 +101,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 
   const logout = useCallback(() => {
+    // Record the logout in the admin activity log first (fire-and-forget —
+    // the token is discarded either way, the log entry is best-effort).
+    api.logout().catch(() => undefined);
     localStorage.removeItem(TOKEN_KEY);
     setToken(null);
     setUser(null);

@@ -5,6 +5,7 @@
 // configured in the UI (persisted to localStorage) it is sent as X-API-Key.
 
 import type {
+  AdminActivity,
   AdminCachePending,
   AdminDashboard,
   AdminDeleted,
@@ -12,6 +13,8 @@ import type {
   AdminLeadAction,
   AdminLeadScope,
   AdminSearchCache,
+  AdminUserLeadSummary,
+  AdminUsers,
   AdminVisibility,
   FolderCreateOut,
   FoldersOut,
@@ -180,6 +183,12 @@ export const api = {
     return request("/auth/me");
   },
 
+  /** Record the logout in the admin activity log (fire-and-forget; the client
+   * discards the token right after — the JWT itself is stateless). */
+  logout(): Promise<{ success: boolean }> {
+    return request("/auth/logout", { method: "POST" });
+  },
+
   adminDashboard(): Promise<AdminDashboard> {
     return request<AdminDashboard>("/admin/dashboard");
   },
@@ -242,6 +251,56 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
+  },
+
+  /** Admin — push a date/source/folder/email slice to a user's dashboard
+   * (userId "" pulls it back to admin-only). */
+  adminAssignLeads(body: AdminLeadScope & { user_id: string }): Promise<AdminLeadAction> {
+    return request<AdminLeadAction>("/admin/leads/assign", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  },
+
+  // Admin — user management + activity log.
+  adminUsers(): Promise<AdminUsers> {
+    return request<AdminUsers>("/admin/users");
+  },
+  adminCreateUser(body: {
+    username: string;
+    email: string;
+    password: string;
+  }): Promise<AdminUsers["users"][number]> {
+    return request("/admin/users", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  },
+  adminDeleteUser(userId: string): Promise<{ success: boolean; username: string }> {
+    return request(`/admin/users/${encodeURIComponent(userId)}`, {
+      method: "DELETE",
+    });
+  },
+  adminResetUserPassword(
+    userId: string,
+    newPassword: string
+  ): Promise<{ success: boolean; username: string }> {
+    return request(`/admin/users/${encodeURIComponent(userId)}/password`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ new_password: newPassword }),
+    });
+  },
+  adminActivity(limit = 200, userId = ""): Promise<AdminActivity> {
+    const qs = userId ? `?limit=${limit}&user_id=${encodeURIComponent(userId)}` : `?limit=${limit}`;
+    return request<AdminActivity>(`/admin/activity${qs}`);
+  },
+  adminUserLeadSummary(userId: string): Promise<AdminUserLeadSummary> {
+    return request<AdminUserLeadSummary>(
+      `/admin/users/${encodeURIComponent(userId)}/leads-summary`
+    );
   },
 
   // Jobs ---------------------------------------------------------------

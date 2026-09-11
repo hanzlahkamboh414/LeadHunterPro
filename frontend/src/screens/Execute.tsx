@@ -1,4 +1,4 @@
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { Rocket, KeyRound } from "lucide-react";
@@ -6,16 +6,67 @@ import { api, ApiError, getStoredApiKey, setStoredApiKey } from "../api/client";
 import type { Job } from "../types";
 import StatusChip, { Spinner } from "../components/StatusChip";
 import { elapsed, recommendationBadge, recommendationLabel } from "../lib/format";
+import { useAuth } from "../contexts/AuthContext";
+import { CITIES_BY_STATE, TRADES, US_STATES } from "../data/locations";
+
+/** "Custom…" sentinel in the dropdowns — admin-only free-text escape hatch. */
+const CUSTOM = "__custom__";
+
+/** localStorage key for the per-user active job (survives refresh/navigation). */
+function activeJobKey(userId: string): string {
+  return `leadhunter.activeJob.${userId}`;
+}
 
 export default function Execute() {
+  const { user } = useAuth();
+  const isAdmin = !!user?.is_admin;
+  const maxTargets = isAdmin ? 500 : 150;
+
+  const [tradeChoice, setTradeChoice] = useState<string>("");
   const [trade, setTrade] = useState("");
-  const [location, setLocation] = useState("");
-  const [targetEmails, setTargetEmails] = useState(500);
+  const [stateChoice, setStateChoice] = useState<string>("");
+  const [cityChoice, setCityChoice] = useState<string>("");
+  const [customLocation, setCustomLocation] = useState("");
+  const [targetEmails, setTargetEmails] = useState(150);
   const [searchName, setSearchName] = useState("");
   const [saveFolder, setSaveFolder] = useState("");
   const [apiKey, setApiKey] = useState(getStoredApiKey());
   const [showKey, setShowKey] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
+
+  // Restore the active job after a refresh / dashboard round-trip: the jobId is
+  // persisted per user, so the live activity view comes right back.
+  useEffect(() => {
+    if (!user?.id || jobId) return;
+    try {
+      const saved = localStorage.getItem(activeJobKey(user.id));
+      if (saved) setJobId(saved);
+    } catch {
+      /* private-mode / blocked storage — the form just starts fresh */
+    }
+  }, [user?.id, jobId]);
+
+  // A terminal job no longer needs restoring — clear the stored key (the view
+  // itself stays until the user starts another search).
+  function setJob(id: string | null) {
+    setJobId(id);
+    if (!user?.id) return;
+    try {
+      if (id) localStorage.setItem(activeJobKey(user.id), id);
+      else localStorage.removeItem(activeJobKey(user.id));
+    } catch {
+      /* ignore storage failures */
+    }
+  }
+
+  // The location the search actually uses: the picked city, or the admin's
+  // free-text custom entry.
+  const location =
+    stateChoice && stateChoice !== CUSTOM
+      ? cityChoice && cityChoice !== CUSTOM
+        ? cityChoice
+        : stateChoice
+      : customLocation;
 
   const create = useMutation({
     mutationFn: () =>
@@ -26,7 +77,7 @@ export default function Execute() {
         search_name: searchName.trim() || undefined,
         folder: saveFolder.trim() || undefined,
       }),
-    onSuccess: (job) => setJobId(job.id),
+    onSuccess: (job) => setJob(job.id),
   });
 
   // Existing folders (datalist options) so the user can pick an EXISTING folder
@@ -62,6 +113,19 @@ export default function Execute() {
     mutationFn: () => api.resumeJob(jobId!),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["job", jobId] }),
   });
+
+  // A terminal job no longer needs restoring after a refresh — drop the stored
+  // key (the finished view stays on screen until "Start another").
+  useEffect(() => {
+    const s = job.data?.state;
+    if (jobId && (s === "completed" || s === "failed" || s === "cancelled") && user?.id) {
+      try {
+        localStorage.removeItem(activeJobKey(user.id));
+      } catch {
+        /* ignore */
+      }
+    }
+  }, [job.data?.state, jobId, user?.id]);
 
   const active = job.data?.state === "running" || job.data?.state === "queued";
   const paused = job.data?.state === "paused";
@@ -125,52 +189,106 @@ export default function Execute() {
         <form onSubmit={onSubmit} className="space-y-4">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <Field label="Trade (WHAT)">
-              <input
+              <select
                 required
-                value={trade}
-                onChange={(e) => setTrade(e.target.value)}
-                placeholder="e.g. general contractor"
+                value={tradeChoice}
+                onChange={(e) => {
+                  setTradeChoice(e.target.value);
+                  if (e.target.value !== CUSTOM) setTrade(e.target.value);
+                  else setTrade("");
+                }}
                 className={inputCls}
-              />
+              >
+                <option value="" disabled>
+                  Select a trade…
+                </option>
+                {TRADES.map((t) => (
+                  <option key={t} value={t}>
+                    {t}
+                  </option>
+                ))}
+                {isAdmin && <option value={CUSTOM}>Custom…</option>}
+              </select>
+              {tradeChoice === CUSTOM && isAdmin && (
+                <input
+                  required
+                  autoFocus
+                  value={trade}
+                  onChange={(e) => setTrade(e.target.value)}
+                  placeholder="e.g. general contractor"
+                  className={`${inputCls} mt-2`}
+                />
+              )}
             </Field>
             <Field label="Location (WHERE)">
-              <input
+              <select
                 required
-                value={location}
-                onChange={(e) => setLocation(e.target.value)}
-                placeholder="e.g. Houston TX, Dallas, Austin, Texas"
+                value={stateChoice}
+                onChange={(e) => {
+                  setStateChoice(e.target.value);
+                  setCityChoice("");
+                  if (e.target.value === CUSTOM) setCustomLocation("");
+                }}
                 className={inputCls}
-              />
-              <p className="text-[11.5px] text-slate-600 mt-1.5">
-                City-level search yields more targeted results (e.g. "Houston TX" or "Dallas County")
-              </p>
-              <div className="flex flex-wrap gap-1.5 mt-2">
-                {CITY_SUGGESTIONS.map((city) => (
-                  <button
-                    key={city}
-                    type="button"
-                    onClick={() => setLocation(city)}
-                    className={`rounded-md px-2 py-0.5 text-[11.5px] border transition-colors ${
-                      location === city
-                        ? "border-indigo-500/50 bg-indigo-500/10 text-indigo-300"
-                        : "border-white/5 bg-white/[0.02] text-slate-500 hover:text-slate-300 hover:bg-white/[0.04]"
-                    }`}
-                  >
-                    {city}
-                  </button>
+              >
+                <option value="" disabled>
+                  Select a state…
+                </option>
+                {US_STATES.map((s) => (
+                  <option key={s} value={s}>
+                    {s}
+                  </option>
                 ))}
-              </div>
+                {isAdmin && <option value={CUSTOM}>Custom…</option>}
+              </select>
+              {stateChoice && stateChoice !== CUSTOM && (
+                <select
+                  required
+                  value={cityChoice}
+                  onChange={(e) => setCityChoice(e.target.value)}
+                  className={`${inputCls} mt-2`}
+                >
+                  <option value="" disabled>
+                    Select a city in {stateChoice}…
+                  </option>
+                  {(CITIES_BY_STATE[stateChoice] ?? []).map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                </select>
+              )}
+              {stateChoice === CUSTOM && isAdmin && (
+                <input
+                  required
+                  autoFocus
+                  value={customLocation}
+                  onChange={(e) => setCustomLocation(e.target.value)}
+                  placeholder="e.g. Houston TX, Dallas County"
+                  className={`${inputCls} mt-2`}
+                />
+              )}
+              <p className="text-[11.5px] text-slate-600 mt-1.5">
+                {stateChoice === CUSTOM
+                  ? "Custom location (admin) — any city, county, or region."
+                  : "City-level search yields more targeted results."}
+              </p>
             </Field>
           </div>
-          <Field label="Target number of leads">
+          <Field label={`Target number of leads${isAdmin ? "" : ` (max ${maxTargets})`}`}>
             <input
               type="number"
               min={1}
-              max={500}
+              max={maxTargets}
               value={targetEmails}
-              onChange={(e) => setTargetEmails(Number(e.target.value))}
+              onChange={(e) => setTargetEmails(Math.min(maxTargets, Number(e.target.value)))}
               className={`${inputCls} max-w-[180px]`}
             />
+            <p className="text-[11.5px] text-slate-600 mt-1.5">
+              {isAdmin
+                ? "Admin account — up to 500 targets per search."
+                : `User accounts are limited to ${maxTargets} targets per search.`}
+            </p>
           </Field>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1">
@@ -222,7 +340,7 @@ export default function Execute() {
               <button
                 type="button"
                 onClick={() => {
-                  setJobId(null);
+                  setJob(null);
                   create.reset();
                 }}
                 className="text-[13px] text-slate-500 hover:text-white"
@@ -488,17 +606,6 @@ function estimateRemaining(job: Job): string | null {
   const s = Math.round(rem % 60);
   return m > 0 ? `${m}m ${s}s` : `${s}s`;
 }
-
-const CITY_SUGGESTIONS = [
-  "Houston TX",
-  "Dallas TX",
-  "Austin TX",
-  "San Antonio TX",
-  "Fort Worth TX",
-  "Miami FL",
-  "Orlando FL",
-  "Tampa FL",
-];
 
 const inputCls =
   "w-full bg-white/[0.04] border border-white/5 rounded-lg px-3.5 py-2.5 text-[13px] text-slate-300 placeholder:text-slate-500 outline-none focus:ring-2 focus:ring-indigo-500/40";

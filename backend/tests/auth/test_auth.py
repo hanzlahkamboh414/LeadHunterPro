@@ -19,7 +19,7 @@ def tmp_user_store(tmp_path):
 
 
 @pytest.fixture()
-def client(tmp_user_store, monkeypatch):
+def client(tmp_user_store, tmp_path, monkeypatch):
     """FastAPI test client wired to a temp UserStore."""
     app = FastAPI()
     app.include_router(auth_router, prefix="/api/v1")
@@ -32,6 +32,15 @@ def client(tmp_user_store, monkeypatch):
     # temp store, so a token minted by signup resolves in /me.
     import app.auth.dependencies as deps
     monkeypatch.setattr(deps, "_user_store", lambda: tmp_user_store)
+
+    # login/signup/logout record activity via the get_activity() singleton —
+    # point it at the SAME temp db, or every test run pollutes the real one.
+    from app.auth.activity import ActivityStore
+    import app.auth.activity as activity_module
+    monkeypatch.setattr(
+        activity_module, "_activity_store",
+        ActivityStore(db_path=str(tmp_path / "users.db")),
+    )
 
     return TestClient(app)
 

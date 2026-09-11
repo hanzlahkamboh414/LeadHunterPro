@@ -136,7 +136,7 @@ _NON_CLIENT_SOURCE_HOSTS_DEFAULTS = (
 #: and who is NOT a target (CLAUDE.md §6 honest context, never silence).
 _PROMPT_DEFAULTS = {
     "company_name": "The Best Estimator LLC",
-    "location": "Texas",
+    "location": "United States (nationwide)",
     "what_we_sell": (
         "preconstruction / construction estimation services: bid preparation, "
         "cost estimation, quantity takeoffs"

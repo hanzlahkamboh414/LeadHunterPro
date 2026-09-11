@@ -258,8 +258,8 @@ export interface AdminSearchCache {
   top_queries: Array<{ query: string; max_results: number; fetched_at: string }>;
 }
 
-/** Admin — Dashboard data control (hide / show / delete user-facing leads). */
-export type AdminLeadScopeKind = "date" | "source" | "email";
+/** Admin — Dashboard data control (hide / show / delete/assign user-facing leads). */
+export type AdminLeadScopeKind = "date" | "source" | "email" | "folder";
 
 export interface AdminLeadScope {
   scope: AdminLeadScopeKind;
@@ -281,4 +281,41 @@ export interface AdminVisibility {
   total: number;
   hidden: number;
   by_date: AdminVisibilityDate[];
+}
+
+/** Admin — user management + activity log. */
+export interface AdminUser {
+  id: string;
+  username: string;
+  email: string;
+  is_admin: boolean;
+  created_at: string;
+}
+
+export interface AdminUsers {
+  total: number;
+  users: AdminUser[];
+}
+
+export interface AdminActivityRow {
+  id: number;
+  user_id: string;
+  username: string;
+  action: string;
+  detail: string;
+  created_at: string;
+}
+
+export interface AdminActivity {
+  total: number;
+  activity: AdminActivityRow[];
+}
+
+export interface AdminUserLeadSummary {
+  user_id: string;
+  username: string;
+  folders: Record<string, number>;
+  unfiled: number;
+  total: number;
+  dates: string[];
 }

@@ -43,7 +43,7 @@ class TestDefaultProfileLoads:
 
     def test_default_location(self) -> None:
         profile = _fresh_profile()
-        assert profile.location == "Texas"
+        assert profile.location == "United States (nationwide)"
 
     def test_target_trades_not_empty(self) -> None:
         profile = _fresh_profile()

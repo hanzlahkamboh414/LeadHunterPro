@@ -2,9 +2,9 @@
 
 Ties all stages into one pipeline:
 
-  Stage 0  triage          → skip free-mail / generic local-part
+  Stage 0  triage          → skip free-mail / placeholder domain
   Stage 1  refine/company  → CompanyResearcher (AI cited)
-  Stage 2  person          → PersonResearcherAI (deterministic + AI augment)
+  Stage 2  person          → PersonResearcherAI (skipped for generic emails)
   Stage 3  intent/timing   → IntentTimingAnalyzer (AI reasoned)
   Stage 4  fit/score       → LeadScorer (AI + deterministic gate)
 
@@ -79,6 +79,59 @@ def _is_generic_local_part(email: str) -> bool:
         "postmaster", "abuse", "noreply", "no-reply",
     }
     return local in generic
+
+
+#: Reserved / placeholder domains that never host a real, deliverable company
+#: mailbox. RFC 2606 reserves example.* and the .test/.invalid/.localhost TLDs;
+#: scraped discovery data also carries test/placeholder addresses. An address
+#: on one of these is junk — never know a real company for it, never contact
+#: it, and never spend research credit on it (CLAUDE.md §12 fake-domain rule).
+_PLACEHOLDER_DOMAINS = frozenset(
+    {
+        "example.com", "example.org", "example.net", "example.edu",
+        "test.com", "test.org", "test.net",
+        "invalid", "localhost", "local", "localdomain", "test",
+    }
+)
+
+
+#: TLDs that are file/asset extensions, not mail domains. An address like
+#: ``logo@3x-1-236x60.png`` — local-part@filename — is an extractor artifact
+#: (the plan-holder/crawler latched onto a logo or document name), never a
+#: contactable mailbox. Fails closed: any address whose LAST label is one of
+#: these is rejected in triage before ANY research.
+_FILE_TLDS = frozenset(
+    {
+        "png", "jpg", "jpeg", "jpe", "gif", "webp", "svg", "bmp", "ico",
+        "tif", "tiff", "avif", "heic",
+        "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "csv", "tsv",
+        "zip", "tar", "gz", "rar", "7z",
+        "css", "js", "mjs", "html", "htm", "json", "xml", "yaml", "yml",
+        "mp3", "mp4", "webm", "mov", "avi", "wav",
+        "woff", "woff2", "ttf", "otf", "eot",
+        "apk", "exe", "dll", "bin", "iso",
+    }
+)
+
+
+def _is_placeholder_or_fake_domain(domain: str) -> bool:
+    """True when a mail domain is a reserved placeholder or a file-extension
+    artifact — never a real, deliverable mailbox (e.g. ``example.com`` or the
+    ``3x-1-236x60.png`` inside ``logo@3x-1-236x60.png``). Pure string check, no
+    network: runs in Stage-0 triage BEFORE free-mail / MX / company research so
+    junk costs nothing and never reaches results (CLAUDE.md §12)."""
+    d = (domain or "").strip().lower().rstrip(".")
+    if not d:
+        return True
+    if d in _PLACEHOLDER_DOMAINS:
+        return True
+    # Only the LAST label is the TLD. "png.com" is a real .com domain and is
+    # never caught; a filename artifact ending ".png" (.pdf / .svg / …) is.
+    # Both observed junk cases (yourname@example.com, logo@3x-1-236x60.png)
+    # land here.
+    if "." in d and d.rsplit(".", 1)[1] in _FILE_TLDS:
+        return True
+    return False
 
 
 class AILeadResearchAgent:
@@ -187,6 +240,26 @@ class AILeadResearchAgent:
             domain = email.split("@", 1)[1].strip()
             dossier.domain = domain
 
+        # Junk/placeholder gate (CLAUDE.md §12 — fake domains must never reach
+        # results): an address whose OWN domain is a reserved placeholder
+        # (yourname@example.com) or a file-extension artifact
+        # (logo@3x-1-236x60.png) is not a real mailbox. Check the address's own
+        # @-domain — NOT the caller's registered-domain field, which the
+        # extractor may set to a plausible company domain — so the junk email
+        # string itself is caught regardless of what registered-domain was
+        # passed. Pure string, no network: catches both observed cases before
+        # free-mail / MX / any research, saving the credit junk would spend.
+        addr_domain = (email or "").rsplit("@", 1)[-1].strip().lower()
+        if _is_placeholder_or_fake_domain(addr_domain):
+            dossier.fit = (
+                f"Junk/placeholder address — {addr_domain} is not a real mailbox "
+                f"domain (reserved placeholder or file-extension artifact). "
+                f"Rejected before research."
+            )
+            dossier.recommendation = "skip"
+            logger.info("Triage: %s has junk/placeholder domain %s → skip", email, addr_domain)
+            return dossier
+
         if _is_free_mail(domain):
             # Free-mail domains (gmail/yahoo/hotmail) are NOT deleted — they
             # are kept at second priority (nurture) so a person can still be
@@ -196,14 +269,14 @@ class AILeadResearchAgent:
             logger.info("Triage: %s is free mail → nurture (2nd priority)", domain)
             return dossier
 
-        if _is_generic_local_part(email):
-            # Generic emails (info@/admin@/contact@) are NOT deleted — they are
-            # filed into a separate "generic" section (no specific person, but
-            # the company may still be worth keeping for outreach).
-            dossier.fit = "Generic email — separate section (no specific person)"
-            dossier.recommendation = "generic"
-            logger.info("Triage: %s has generic local part → generic section", email)
-            return dossier
+        # Generic email flag: info@/admin@/contact@ on a REAL business domain
+        # still runs company research (Stage 1) — the company may be a valid
+        # construction firm worth keeping for outreach even without a named
+        # person.  Person research (Stage 2) is skipped for generic addresses
+        # because there is no specific individual to find.
+        is_generic_email = _is_generic_local_part(email)
+        if is_generic_email:
+            logger.info("Triage: %s has generic local part — company research will run, person research skipped", email)
 
         # Stage 0.5: dead-domain gate. A domain that resolves no MX record
         # cannot receive email, so the address is undeliverable — such leads
@@ -256,6 +329,9 @@ class AILeadResearchAgent:
         #   * learned — this industry has completed MIN_TRIALS research runs and
         #     never once produced a real lead (the self-correcting fit loop:
         #     "khud improvement kare, kabi wahi ghalti na kare").
+        #   * user_rejected — you DELETED this company/domain as irrelevant/not
+        #     our client (Phase E). ONE human verdict is decisive: it outranks
+        #     every AI score, so a purged company stays purged on re-discovery.
         if dossier.company.name:
             prof = get_profile()
             det_reason = (
@@ -267,12 +343,26 @@ class AILeadResearchAgent:
                 self._fit_learning is not None
                 and self._fit_learning.should_skip_industry(dossier.company.industry)
             )
-            if det_reason or ai_no or learned:
+            user_rejected = (
+                self._fit_learning is not None
+                and (
+                    self._fit_learning.should_skip_company(dossier.refined_company)
+                    or self._fit_learning.should_skip_company(dossier.company.name)
+                    or self._fit_learning.should_skip_domain(dossier.refined_domain)
+                    or self._fit_learning.should_skip_domain(domain)
+                )
+            )
+            if det_reason or ai_no or learned or user_rejected:
                 ind = dossier.company.industry or "(unknown industry)"
                 name = dossier.refined_company or dossier.company.name
                 if ai_no and dossier.company.client_reason:
                     # The AI's own grounded justification is the most specific.
                     dossier.fit = f"Not our client — {dossier.company.client_reason}"
+                elif user_rejected and not det_reason:
+                    dossier.fit = (
+                        f"Not our client — {name} ({ind}). You marked this "
+                        f"company as not-a-client; auto-skipped."
+                    )
                 elif learned and not det_reason:
                     dossier.fit = (
                         f"Not our client — {name} ({ind}). This class has never "
@@ -290,37 +380,48 @@ class AILeadResearchAgent:
                 dossier.sources_checked = sources_checked
                 dossier.source_errors = source_errors
                 logger.info(
-                    "Stage skip: %s industry=%r verdict=%r learned=%s → skip (not our client)",
-                    email, ind, dossier.company.is_our_client, learned,
+                    "Stage skip: %s industry=%r verdict=%r learned=%s user_rejected=%s → skip (not our client)",
+                    email, ind, dossier.company.is_our_client, learned, user_rejected,
                 )
                 return dossier
 
         # Stage 2: person research
-        try:
-            person_result = self._person.research(
-                email=email,
-                refined_domain=dossier.refined_domain or domain,
-                company_name=dossier.company.name,
-                company_industry=dossier.company.industry,
-                company_facts=dossier.company.facts,
-                query_planner=planner,
-            )
-            dossier.person = person_result
-            sources_checked.append("person_research")
-        except Exception as exc:
-            logger.error("Stage 2 failed for %s: %s", email, exc)
-            source_errors["person_research"] = str(exc)
+        # Generic emails (info@/admin@/contact@) skip person research — there
+        # is no specific individual to find; spending an AI call here would
+        # always return empty.  The dossier stays person-unbound, and scoring
+        # treats "company identified, person unbound" as a valid nurture tier.
+        if is_generic_email:
+            logger.info("Stage 2 skipped for %s: generic email, no person to research", email)
+        else:
+            try:
+                person_result = self._person.research(
+                    email=email,
+                    refined_domain=dossier.refined_domain or domain,
+                    company_name=dossier.company.name,
+                    company_industry=dossier.company.industry,
+                    company_facts=dossier.company.facts,
+                    query_planner=planner,
+                )
+                dossier.person = person_result
+                sources_checked.append("person_research")
+            except Exception as exc:
+                logger.error("Stage 2 failed for %s: %s", email, exc)
+                source_errors["person_research"] = str(exc)
 
         # Stage 1b: deep-dive (only for qualifying leads)
         # If the company is construction-related AND on-vertical (a fiber/
         # telecom/utility/materials company never spends deep-research credits —
         # it is not our client, root-cause fix for the fiber leak) AND we have a
-        # name + reachable person, run the growth/need queries.
+        # company name, run the growth/need queries. A bound decision-maker is
+        # NOT a prerequisite: deep research examines the COMPANY (contractor
+        # licence / newsworthy growth / hiring / expansion / bid wins), not the
+        # person — gating it on person.bound silently starved the lane on runs
+        # where discovery surfaced a company but no decision-maker, so the
+        # second AI key never fired (the "sirf ek AI chala" gap).
         if (
             dossier.company.name
             and _is_construction(dossier.company.industry)
             and not get_profile().is_off_vertical(dossier.company.industry)
-            and dossier.person.bound
         ):
             # Recorded as checked whether or not it finds facts, so a run where
             # the deep lane found no growth signals is distinguishable from one

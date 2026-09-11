@@ -386,10 +386,17 @@ function JobLiveView({
       {/* Progress bar */}
       <div className="mt-4">
         <p className="text-[12px] text-slate-500 mb-1">
-          {newest ? `${newest.phase} — step ${newest.step}/${newest.total}` : "Waiting to start…"}
+          {job.state === "completed"
+            ? `${completedSummary(job)}`
+            : newest
+              ? `${newest.phase} — step ${newest.step}/${newest.total}`
+              : "Waiting to start…"}
         </p>
         <div className="h-2 rounded-full bg-[#0B0E14] overflow-hidden">
-          <div className="h-full bg-indigo-500 transition-all" style={{ width: progressWidth(newest) }} />
+          <div
+            className="h-full bg-indigo-500 transition-all"
+            style={{ width: job.state === "completed" ? workingWidth(job) : progressWidth(newest) }}
+          />
         </div>
       </div>
 
@@ -448,6 +455,23 @@ function JobLiveView({
 function progressWidth(ev: { step: number; total: number } | undefined): string {
   if (!ev || !ev.total) return "0%";
   return `${Math.min(100, Math.round((ev.step / ev.total) * 100))}%`;
+}
+
+// H1/H3: a finished run shows its REAL delivery, never a stale mid-run
+// "step X/target" (which measured the target, not the pool). Honest outcome.
+function completedSummary(job: Job): string {
+  const w = job.working_leads ?? 0;
+  const t = job.query.target_emails ?? 0;
+  const reason = job.shortfall_reason ? ` · ${job.shortfall_reason}` : "";
+  return `completed — ${w} of ${t} working${reason}`;
+}
+
+// Progress against the target once the run is done (0–100%).
+function workingWidth(job: Job): string {
+  const t = job.query.target_emails ?? 0;
+  if (!t) return "0%";
+  const w = job.working_leads ?? 0;
+  return `${Math.min(100, Math.round((w / t) * 100))}%`;
 }
 
 // Rough ETA from live telemetry: extrapolate the current phase's step/total

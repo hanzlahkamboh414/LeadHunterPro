@@ -13,13 +13,13 @@ import logging
 import time
 from typing import Any
 
-from app.search_providers.base import BaseSearchProvider
+from app.search_providers.base import BaseSearchProvider, LoopSessionMixin
 from app.search_providers.models import SearchQuery, SearchResponse, SearchResult
 
 logger = logging.getLogger(__name__)
 
 
-class BraveSearchProvider(BaseSearchProvider):
+class BraveSearchProvider(BaseSearchProvider, LoopSessionMixin):
     """Search provider backed by the Brave Search API.
 
     Requires BRAVE_SEARCH_API_KEY environment variable.
@@ -48,7 +48,9 @@ class BraveSearchProvider(BaseSearchProvider):
         self._timeout = timeout
         self._max_results = min(max(max_results, 1), 50)  # Brave limits to 50
         self._endpoint = "https://api.search.brave.com/res/v1/web/search"
-        self._session: Any = None
+        # LoopSessionMixin: one session per event loop (concurrency fix —
+        # see the mixin docstring in base.py).
+        self._init_sessions()
 
     @staticmethod
     def _load_api_key() -> str | None:
@@ -56,21 +58,6 @@ class BraveSearchProvider(BaseSearchProvider):
         import os
 
         return os.environ.get("BRAVE_SEARCH_API_KEY")
-
-    async def _get_session(self) -> Any:
-        """Get or create an aiohttp session."""
-        import aiohttp
-
-        if self._session is None or self._session.closed:
-            timeout = aiohttp.ClientTimeout(total=self._timeout)
-            self._session = aiohttp.ClientSession(timeout=timeout)
-        return self._session
-
-    async def close(self) -> None:
-        """Close the underlying HTTP session."""
-        if self._session is not None and not self._session.closed:
-            await self._session.close()
-            self._session = None
 
     async def __aenter__(self) -> BraveSearchProvider:
         return self

@@ -9,7 +9,10 @@ import type {
   AdminDashboard,
   AdminDeleted,
   AdminKeys,
+  AdminLeadAction,
+  AdminLeadScope,
   AdminSearchCache,
+  AdminVisibility,
   FolderCreateOut,
   FoldersOut,
   Job,
@@ -48,12 +51,44 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, init?: RequestInit, text = false): Promise<T> {
+/** Auth header map (X-API-Key when the UI has configured one), merged over any
+ * init headers on the caller's request. Also sends JWT Bearer token when logged
+ * in (Phase 3 auth). */
+function authHeaders(init?: RequestInit): Record<string, string> {
   const headers: Record<string, string> = {
     ...(init?.headers as Record<string, string> | undefined),
   };
   const key = getStoredApiKey();
   if (key) headers["X-API-Key"] = key;
+  // JWT token from auth system
+  try {
+    const token = localStorage.getItem("leadhunter.jwt");
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+  } catch {
+    /* ignore private-mode failures */
+  }
+  return headers;
+}
+
+/** Query-string for the leads list — shared by listLeads / pageLeads so the
+ * Companies screen filters behave identically across both call shapes. */
+function leadsParams(filter: LeadsFilter): string {
+  const q = new URLSearchParams();
+  if (filter.recommendation) q.set("recommendation", filter.recommendation);
+  if (filter.bound !== undefined) q.set("bound", String(filter.bound));
+  if (filter.min_score !== undefined) q.set("min_score", String(filter.min_score));
+  if (filter.source) q.set("source", filter.source);
+  if (filter.folder) q.set("folder", filter.folder);
+  if (filter.tag) q.set("tag", filter.tag);
+  if (filter.date) q.set("date", filter.date);
+  if (filter.q) q.set("q", filter.q);
+  if (filter.limit !== undefined) q.set("limit", String(filter.limit));
+  if (filter.offset !== undefined) q.set("offset", String(filter.offset));
+  return q.toString();
+}
+
+async function request<T>(path: string, init?: RequestInit, text = false): Promise<T> {
+  const headers = authHeaders(init);
 
   const res = await fetch(`${BASE}${path}`, { ...init, headers });
   if (!res.ok) {
@@ -91,6 +126,8 @@ export interface LeadsFilter {
   folder?: string;
   tag?: string;
   date?: string;
+  /** Identity text search (company / email / person / role) — matched server-side. */
+  q?: string;
   limit?: number;
   offset?: number;
 }
@@ -100,7 +137,49 @@ export interface OrganizeInput {
   tags: string[];
 }
 
+/** CSV-export filter — the same user-view filters as the Companies list. */
+export interface ExportFilter {
+  recommendation?: string;
+  emails?: string[];
+  folder?: string;
+  tag?: string;
+  date?: string;
+  source?: string;
+  bound?: boolean;
+  min_score?: number;
+  q?: string;
+}
+
 export const api = {
+  // Auth -----------------------------------------------------------------
+  login(username: string, password: string): Promise<{ user_id: string; username: string; is_admin: boolean; token: string }> {
+    return request("/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    });
+  },
+
+  signup(username: string, email: string, password: string): Promise<{ user_id: string; username: string; token: string }> {
+    return request("/auth/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, email, password }),
+    });
+  },
+
+  resetPassword(username: string, new_password: string): Promise<{ success: boolean }> {
+    return request("/auth/reset-password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, new_password }),
+    });
+  },
+
+  getMe(): Promise<{ user_id: string; username: string; email: string; is_admin: boolean }> {
+    return request("/auth/me");
+  },
+
   adminDashboard(): Promise<AdminDashboard> {
     return request<AdminDashboard>("/admin/dashboard");
   },
@@ -137,6 +216,32 @@ export const api = {
   /** Admin — purge TTL-expired search-cache entries. */
   purgeSearchCache(): Promise<{ removed: number }> {
     return request("/admin/cache/purge-search", { method: "POST" });
+  },
+
+  // Admin — Dashboard data control (hide / show / delete user-facing leads).
+  adminVisibility(): Promise<AdminVisibility> {
+    return request<AdminVisibility>("/admin/leads/visibility");
+  },
+  adminHideLeads(body: AdminLeadScope): Promise<AdminLeadAction> {
+    return request<AdminLeadAction>("/admin/leads/hide", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  },
+  adminShowLeads(body: AdminLeadScope): Promise<AdminLeadAction> {
+    return request<AdminLeadAction>("/admin/leads/show", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  },
+  adminDeleteLeads(body: AdminLeadScope): Promise<AdminLeadAction> {
+    return request<AdminLeadAction>("/admin/leads/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
   },
 
   // Jobs ---------------------------------------------------------------
@@ -176,18 +281,48 @@ export const api = {
 
   // Leads ---------------------------------------------------------------
   listLeads(filter: LeadsFilter = {}): Promise<LeadSummary[]> {
-    const q = new URLSearchParams();
-    if (filter.recommendation) q.set("recommendation", filter.recommendation);
-    if (filter.bound !== undefined) q.set("bound", String(filter.bound));
-    if (filter.min_score !== undefined) q.set("min_score", String(filter.min_score));
-    if (filter.source) q.set("source", filter.source);
-    if (filter.folder) q.set("folder", filter.folder);
-    if (filter.tag) q.set("tag", filter.tag);
-    if (filter.date) q.set("date", filter.date);
-    if (filter.limit !== undefined) q.set("limit", String(filter.limit));
-    if (filter.offset !== undefined) q.set("offset", String(filter.offset));
-    const qs = q.toString();
+    const qs = leadsParams(filter);
     return request<LeadSummary[]>(`/leads${qs ? `?${qs}` : ""}`);
+  },
+
+  /** Paged leads for ONE page of the Companies screen.
+   *
+   * The backend filters, sorts and paginates IN SQL, so only a page is
+   * downloaded (never the whole store — the root cause of the slow screen).
+   * ``total`` is the honest count for the SAME filters (from the X-Total-Count
+   * header) so the UI can page with "Show more" and still report true totals.
+   */
+  async pageLeads(
+    filter: LeadsFilter = {},
+  ): Promise<{ rows: LeadSummary[]; total: number }> {
+    const qs = leadsParams(filter);
+    const res = await fetch(`${BASE}/leads${qs ? `?${qs}` : ""}`, {
+      headers: authHeaders(),
+    });
+    if (!res.ok) {
+      let detail = res.statusText;
+      try {
+        const body = await res.json();
+        if (typeof body.detail === "string") detail = body.detail;
+      } catch { /* non-JSON error body */ }
+      throw new ApiError(res.status, detail);
+    }
+    const rows = (await res.json()) as LeadSummary[];
+    const raw = res.headers.get("X-Total-Count");
+    const total = raw !== null && raw !== "" && !Number.isNaN(Number(raw))
+      ? Number(raw) : rows.length;
+    return { rows, total };
+  },
+
+  /** Global tag counts for the user views (hidden + skip excluded) — one SQL
+   * GROUP BY, so the Companies chip bar never downloads the whole list. */
+  listTags(): Promise<{ tag: string; count: number }[]> {
+    return request<{ tag: string; count: number }[]>("/leads/tags");
+  },
+
+  /** Every query-run source label, for the Run/source dropdown. */
+  listSources(): Promise<string[]> {
+    return request<string[]>("/leads/sources");
   },
 
   // Organization (Phase B): set one lead's folder/tags.
@@ -264,10 +399,17 @@ export const api = {
   // Fetch CSV text (sends the API key header) so the client can trigger a
   // same-origin blob download — works even when the backend enforces a key.
   async exportCsvData(
-    filter: { recommendation?: string; emails?: string[] } = {},
+    filter: ExportFilter = {},
   ): Promise<string> {
     const params = new URLSearchParams();
     if (filter.recommendation) params.set("recommendation", filter.recommendation);
+    if (filter.folder) params.set("folder", filter.folder);
+    if (filter.tag) params.set("tag", filter.tag);
+    if (filter.date) params.set("date", filter.date);
+    if (filter.source) params.set("source", filter.source);
+    if (filter.bound !== undefined) params.set("bound", String(filter.bound));
+    if (filter.min_score !== undefined) params.set("min_score", String(filter.min_score));
+    if (filter.q) params.set("q", filter.q);
     if (filter.emails && filter.emails.length > 0) params.set("emails", filter.emails.join(","));
     const qs = params.toString();
     return request<string>(`/leads/export.csv${qs ? `?${qs}` : ""}`, {

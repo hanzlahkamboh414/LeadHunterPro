@@ -98,6 +98,37 @@ class TestSearchProviderManager:
         assert provider.call_count == 1
 
     @pytest.mark.asyncio
+    async def test_results_carry_provider_attribution(self):
+        """Every result is stamped with the provider that actually produced it —
+        the attribution point provider-yield learning reads. When TWO providers
+        succeed into the same response, attribution must never blend."""
+        registry = SearchProviderRegistry()
+        first = FakeProvider(
+            "first",
+            priority=10,
+            results=[
+                SearchResult(title="A", url="https://a.com"),
+                SearchResult(title="B", url="https://b.com"),
+            ],
+        )
+        second = FakeProvider(
+            "second",
+            priority=20,
+            results=[SearchResult(title="C", url="https://c.com")],
+        )
+        registry.register(first)
+        registry.register(second)
+        manager = SearchProviderManager(registry)
+
+        response = await manager.search(SearchQuery(keywords="test"), min_results=5)
+        by_url = {r.url: r.provider for r in response.results}
+        assert by_url == {
+            "https://a.com": "first",
+            "https://b.com": "first",
+            "https://c.com": "second",
+        }
+
+    @pytest.mark.asyncio
     async def test_fallback_to_next_provider(self):
         """First provider fails, second succeeds."""
         registry = SearchProviderRegistry()
@@ -314,6 +345,39 @@ class TestSearchProviderManager:
         # Hung provider never called a second time — skipped instantly.
         assert hung.call_count == 1
         assert good.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_backstop_grace_lets_own_timeout_resolve(self):
+        """Root fix for aiohttp "Connector is closed": the manager's gate is a
+        BACKSTOP (timeout_s + grace), never a cancel at the same instant as the
+        provider's own aiohttp ClientTimeout. A provider that resolves at/just
+        past its timeout_s (the shape of a clean internal timeout) must complete
+        NORMALLY — its honest result survives and its session is never poisoned
+        for the next query. Only providers with NO internal timeout are killed
+        by the backstop."""
+        registry = SearchProviderRegistry()
+        late = FakeProvider(
+            "late",
+            priority=10,
+            sleep=0.05,
+            timeout_s=0.02,  # its OWN timeout would have fired; it just resolved
+            results=[SearchResult(title="Late", url="https://late.com")],
+        )
+        registry.register(late)
+        manager = SearchProviderManager(registry)
+
+        t0 = time.monotonic()
+        response = await manager.search(SearchQuery(keywords="test"))
+        elapsed = time.monotonic() - t0
+
+        # Coroutine was allowed to complete past timeout_s, before the backstop
+        # — no hard-cancel, so the request's result is honored, not "timed out".
+        assert response.status == "success"
+        assert response.results[0].url == "https://late.com"
+        assert late.call_count == 1
+        assert "timed out" not in response.error
+        assert registry.is_down("late") is False  # never cancelled → never down
+        assert elapsed < 1.0, f"backstop not >elapsed budget: {elapsed:.2f}s"
 
     @pytest.mark.asyncio
     async def test_error_response_provider_is_blacklisted(self):

@@ -9,6 +9,10 @@ import LeadDetail from "./screens/LeadDetail";
 import History from "./screens/History";
 import Settings from "./screens/Settings";
 import Admin from "./screens/Admin";
+import Login from "./screens/Login";
+import Signup from "./screens/Signup";
+import ResetPassword from "./screens/ResetPassword";
+import { useAuth } from "./contexts/AuthContext";
 
 // h-screen (a FIXED height), not min-h-screen: with a minimum the shell grew with
 // its content, <main> never got a bounded height, and its overflow-y-auto did
@@ -18,6 +22,30 @@ import Admin from "./screens/Admin";
 // flex children lets them shrink: flex items default to min-height:auto and will
 // otherwise refuse to scroll.
 export default function App() {
+  const { user, token, loading } = useAuth();
+
+  // While checking auth state, show nothing (prevents flash)
+  if (loading) {
+    return (
+      <div className="h-screen w-full flex items-center justify-center bg-[#0B0E14]">
+        <div className="text-slate-400 text-sm">Loading...</div>
+      </div>
+    );
+  }
+
+  // Not logged in — only show auth pages
+  if (!token || !user) {
+    return (
+      <Routes>
+        <Route path="/login" element={<Login />} />
+        <Route path="/signup" element={<Signup />} />
+        <Route path="/reset-password" element={<ResetPassword />} />
+        <Route path="*" element={<Navigate to="/login" replace />} />
+      </Routes>
+    );
+  }
+
+  // Logged in — normal app shell
   return (
     <div className="h-screen w-full overflow-hidden bg-[#0B0E14] text-slate-200 flex font-sans">
       <Sidebar />
@@ -32,7 +60,7 @@ export default function App() {
             <Route path="/leads/:email" element={<LeadDetail />} />
             <Route path="/history" element={<History />} />
             <Route path="/settings" element={<Settings />} />
-            <Route path="/admin" element={<Admin />} />
+            {user.is_admin && <Route path="/admin" element={<Admin />} />}
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </main>

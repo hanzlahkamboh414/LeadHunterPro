@@ -97,8 +97,15 @@ function HistoryRow({ job }: { job: JobSummary }) {
               <StatusChip state={job.state} />
             </div>
             <p className="text-[12.5px] text-slate-500 mt-0.5">
-              {timeAgo(job.created_at)} · target {job.query.target_emails} ·{" "}
-              {job.elapsed_s ? elapsed(job.elapsed_s) : "—"}
+              {timeAgo(job.created_at)} ·{" "}
+              {job.state === "completed" && (job.shortfall ?? 0) > 0 ? (
+                <span className="text-amber-300/90">
+                  {job.working_leads} of {job.query.target_emails} working —{" "}
+                  {job.shortfall_reason || "under-delivered"}
+                </span>
+              ) : (
+                <>target {job.query.target_emails} · {job.elapsed_s ? elapsed(job.elapsed_s) : "—"}</>
+              )}
             </p>
           </div>
           <span className={`text-slate-500 transition-transform shrink-0 ${open ? "rotate-90" : ""}`}>›</span>

@@ -38,6 +38,21 @@ def is_dead_domain_dossier(dossier: LeadDossier) -> bool:
     )
 
 
+#: Reason-substrings that mark a delete as a USER REJECTION of the company —
+#: the only deletes that feed identity-rejection learning (Phase E). "junk" and
+#: "manual" are NOT here on purpose: the Junk sweep is a data-hygiene action,
+#: not a verdict on the company itself, and a plain manual delete carries no
+#: rejection signal. Underscores/dashes are folded to spaces for matching, so
+#: ``irrelevant-2026-09-08: Cloud CM SaaS`` and ``reason="non_client"`` both hit.
+_REJECTION_REASON_MARKS = ("irrelevant", "not our client", "non client", "nonclient")
+
+
+def _is_rejection_reason(reason: str) -> bool:
+    """True when ``reason`` carries an explicit "not our client" verdict."""
+    r = (reason or "").lower().replace("_", " ").replace("-", " ")
+    return any(m in r for m in _REJECTION_REASON_MARKS)
+
+
 class LeadResearchStore:
     """SQLite store for LeadDossier results."""
 
@@ -48,11 +63,35 @@ class LeadResearchStore:
         self._db_path = db_path
         self._init_db()
 
+    def _conn(self) -> sqlite3.Connection:
+        """Open a SQLite connection that WAITS under lock/IO contention.
+
+        Galti #1 fix: consumers crashed with ``sqlite3.OperationalError: disk I/O
+        error`` because rows were claimed without a busy_timeout. Every other
+        store (yield/candidate) sets ``PRAGMA busy_timeout``; this one did not,
+        so a write under lock contention failed the worker. WAL is a persistent
+        DB-header property (inherited per-connection), so a fresh connection here
+        still gets WAL; only the busy-wait must be re-applied per connection.
+        """
+        conn = sqlite3.connect(self._db_path)
+        conn.execute("PRAGMA busy_timeout = 5000")
+        return conn
+
     def _init_db(self) -> None:
         import os
         os.makedirs(os.path.dirname(self._db_path), exist_ok=True)
-        conn = sqlite3.connect(self._db_path)
-        conn.execute("""
+        conn = self._conn()
+        # WAL (permanent, §7 fix for "searching never started"): in the default
+        # rollback journal a writer locks the WHOLE database, so while the
+        # background discovery worker writes a pass every reader — GET /jobs,
+        # GET /leads — the frontend's live status poll — blocks up to
+        # busy_timeout and the run reads as stuck at "0 results". WAL lets a
+        # reader ALWAYS serve the last committed snapshot, so a discovery
+        # writer never blocks the frontend. journal_mode persists in the DB
+        # header the first time it is set (a later set is a no-op).
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS dossiers (
                 email_hash TEXT PRIMARY KEY,
                 email TEXT NOT NULL,
@@ -72,6 +111,39 @@ class LeadResearchStore:
             conn.execute("ALTER TABLE dossiers ADD COLUMN folder TEXT NOT NULL DEFAULT ''")
         if "tags" not in cols:
             conn.execute("ALTER TABLE dossiers ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'")
+        # Additive migration — admin visibility flag (Dashboard data control).
+        # The admin HIDES a date/search/lead from the USER views; the dossier stays
+        # in the DB (reversible via SHOW) and the admin dashboard still sees it.
+        # Same guarded-ALTER pattern as folder/tags; default 0 keeps every existing
+        # caller byte-compatible (old code simply ignores the new column).
+        if "hidden" not in cols:
+            conn.execute(
+                "ALTER TABLE dossiers ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0"
+            )
+        # Additive migration — persisted FILTER columns (Phase 2, frontend speed).
+        # The leads list used to materialize EVERY dossier (full JSON) + re-gate it
+        # in Python + paginate LAST, so a request scanned the whole store — the root
+        # cause of a slow Companies screen. recommendation / potential_score / bound
+        # let list_leads filter, sort and paginate IN SQL. They are written at
+        # save() (the deterministic gate, never a stale AI-era label) and backfilled
+        # once below — same guarded-ALTER pattern as folder/tags/hidden.
+        if "recommendation" not in cols:
+            conn.execute(
+                "ALTER TABLE dossiers ADD COLUMN recommendation TEXT NOT NULL DEFAULT ''"
+            )
+        if "potential_score" not in cols:
+            conn.execute(
+                "ALTER TABLE dossiers ADD COLUMN potential_score REAL NOT NULL DEFAULT 0"
+            )
+        if "bound" not in cols:
+            conn.execute(
+                "ALTER TABLE dossiers ADD COLUMN bound INTEGER NOT NULL DEFAULT 0"
+            )
+        # Per-user data isolation. Empty string = pre-migration rows (admin sees all).
+        if "user_id" not in cols:
+            conn.execute(
+                "ALTER TABLE dossiers ADD COLUMN user_id TEXT NOT NULL DEFAULT ''"
+            )
         # Phase B.2 — first-class folder catalog. A folder is a persisted, clickable
         # group (empty folders included — "create the folder first, then move leads").
         # Names are also backfilled from dossiers on read, so folders that only ever
@@ -93,27 +165,82 @@ class LeadResearchStore:
                 reason TEXT NOT NULL DEFAULT 'manual'
             )
         """)
+        self._backfill_filter_columns(conn)
         conn.commit()
         conn.close()
 
-    def save(self, dossier: LeadDossier) -> None:
-        """Save or update a dossier."""
+    def _backfill_filter_columns(self, conn: sqlite3.Connection) -> None:
+        """One-time (idempotent) pass that fills the persisted filter columns for
+        rows saved BEFORE the columns existed (``recommendation = ''``).
+
+        Applies TODAY'S deterministic gate to every legacy row, so SQL filtering
+        in :meth:`query_leads` sees the same verdicts the old read-time re-gate
+        produced. Idempotent by construction: a row is only touched while its
+        column is still ``''`` — after the first pass nothing matches. A corrupt
+        legacy row never blocks boot (skipped, logged by the reader).
+        """
+        from app.lead_research.scoring import regate_recommendation
+
+        rows = conn.execute(
+            "SELECT email_hash, dossier_json FROM dossiers WHERE recommendation = ''"
+        ).fetchall()
+        for eh, payload in rows:
+            try:
+                d = LeadDossier.from_dict(json.loads(payload))
+            except (ValueError, TypeError):
+                continue  # a corrupt legacy row is not our job to fix here
+            try:
+                rec = regate_recommendation(d)
+            except Exception:  # noqa: BLE001 — a broken profile must not block boot
+                continue
+            conn.execute(
+                "UPDATE dossiers SET recommendation = ?, potential_score = ?, bound = ? "
+                "WHERE email_hash = ?",
+                (rec, float(d.potential_score), 1 if d.person.bound else 0, eh),
+            )
+
+    @staticmethod
+    def _filter_values(dossier: LeadDossier) -> tuple[str, float, int]:
+        """The three persisted filter columns for one dossier.
+
+        ``recommendation`` is TODAY'S deterministic gate (regate), never the stale
+        AI-era probe label — the same authority the old read-time list used, so a
+        fluxed label never filters as itself. A broken profile/role import must
+        never block a save, so it degrades to the stored label (honest fallback).
+        """
+        from app.lead_research.scoring import regate_recommendation
+
+        try:
+            rec = regate_recommendation(dossier)
+        except Exception:  # noqa: BLE001
+            rec = dossier.recommendation or "skip"
+        return rec, float(dossier.potential_score), 1 if dossier.person.bound else 0
+
+    def save(self, dossier: LeadDossier, user_id: str = "") -> None:
+        """Save or update a dossier (writes the persisted filter columns too)."""
         eh = _email_hash(dossier.email)
-        conn = sqlite3.connect(self._db_path)
+        rec, score, bound = self._filter_values(dossier)
+        conn = self._conn()
         conn.execute("""
-            INSERT INTO dossiers (email_hash, email, domain, dossier_json, updated_at)
-            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            INSERT INTO dossiers (email_hash, email, domain, dossier_json,
+                                  recommendation, potential_score, bound,
+                                  user_id, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(email_hash) DO UPDATE SET
                 dossier_json = excluded.dossier_json,
+                recommendation = excluded.recommendation,
+                potential_score = excluded.potential_score,
+                bound = excluded.bound,
                 updated_at = CURRENT_TIMESTAMP
-        """, (eh, dossier.email, dossier.domain, json.dumps(dossier.to_dict())))
+        """, (eh, dossier.email, dossier.domain, json.dumps(dossier.to_dict()),
+              rec, score, bound, user_id))
         conn.commit()
         conn.close()
 
     def get(self, email: str) -> LeadDossier | None:
         """Retrieve a dossier by email."""
         eh = _email_hash(email)
-        conn = sqlite3.connect(self._db_path)
+        conn = self._conn()
         row = conn.execute(
             "SELECT dossier_json FROM dossiers WHERE email_hash = ?", (eh,)
         ).fetchone()
@@ -122,17 +249,26 @@ class LeadResearchStore:
             return None
         return LeadDossier.from_dict(json.loads(row[0]))
 
-    def list_all(self) -> list[LeadDossier]:
-        """List all stored dossiers."""
-        conn = sqlite3.connect(self._db_path)
+    def list_all(self, user_id: str = "", is_admin: bool = False) -> list[LeadDossier]:
+        """List all stored dossiers.
+
+        Per-user isolation: a non-admin only lists their OWN dossiers.
+        """
+        conn = self._conn()
+        args: list[Any] = []
+        conds = ""
+        if user_id and not is_admin:
+            conds = "WHERE user_id = ?"
+            args = [user_id]
         rows = conn.execute(
-            "SELECT dossier_json FROM dossiers ORDER BY updated_at DESC"
+            f"SELECT dossier_json FROM dossiers {conds} ORDER BY updated_at DESC",
+            args,
         ).fetchall()
         conn.close()
         return [LeadDossier.from_dict(json.loads(r[0])) for r in rows]
 
     def count(self) -> int:
-        conn = sqlite3.connect(self._db_path)
+        conn = self._conn()
         n = conn.execute("SELECT COUNT(*) FROM dossiers").fetchone()[0]
         conn.close()
         return n
@@ -144,9 +280,18 @@ class LeadResearchStore:
         Junk sweep) into the ``deleted_leads`` audit trail the admin screen
         reads ("kon kon c email delete ki"). Same transaction, so the log can
         never show a deletion the dossier survived (or vice versa).
+
+        When ``reason`` carries a rejection verdict ("irrelevant" / "not our
+        client"), the deleted dossier's company+domain are fed to fit-learning
+        as a USER rejection (Phase E) — so a company the user proves is not a
+        client stays purged on the next discovery pass instead of resurfacing
+        to burn credit again (root cause of the 2026-09-08 purge).
         """
         eh = _email_hash(email)
-        conn = sqlite3.connect(self._db_path)
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT dossier_json FROM dossiers WHERE email_hash = ?", (eh,)
+        ).fetchone()
         cur = conn.execute("DELETE FROM dossiers WHERE email_hash = ?", (eh,))
         if cur.rowcount > 0:
             conn.execute(
@@ -156,12 +301,33 @@ class LeadResearchStore:
                 (email, reason or "manual"),
             )
             conn.commit()
+            if row is not None and _is_rejection_reason(reason):
+                self._feed_user_rejection(LeadDossier.from_dict(json.loads(row[0])))
         conn.close()
         return cur.rowcount > 0
 
+    def _feed_user_rejection(self, dossier: LeadDossier) -> None:
+        """Teach fit-learning that this dossier's company+domain are NOT clients.
+
+        Called only on rejection-class deletes. Company name and mail domain
+        are recorded from the dossier itself (the SAME names the next discovery
+        pass would surface), so a user's "delete as irrelevant" is a permanent
+        identity-level skip. Uses the same DB file as this store so the learning
+        table and the dossiers table can never drift apart.
+        """
+        from app.lead_research.fit_learning import FitLearningStore
+
+        learning = FitLearningStore(self._db_path)
+        company = dossier.refined_company or dossier.company.name
+        if company:
+            learning.reject_company(company)
+        domain = dossier.refined_domain or dossier.domain
+        if domain:
+            learning.reject_domain(domain)
+
     def deleted_log(self, limit: int = 100) -> list[dict[str, str]]:
         """The admin audit trail: emails deleted, when, and why (newest first)."""
-        conn = sqlite3.connect(self._db_path)
+        conn = self._conn()
         rows = conn.execute(
             "SELECT email, deleted_at, reason FROM deleted_leads "
             "ORDER BY deleted_at DESC LIMIT ?",
@@ -199,7 +365,7 @@ class LeadResearchStore:
         """
         f, tags_json = self._normalize(folder, tags)
         eh = _email_hash(email)
-        conn = sqlite3.connect(self._db_path)
+        conn = self._conn()
         cur = conn.execute(
             "UPDATE dossiers SET folder = ?, tags = ?, updated_at = CURRENT_TIMESTAMP "
             "WHERE email_hash = ?",
@@ -212,7 +378,7 @@ class LeadResearchStore:
     def get_meta(self, email: str) -> LeadMeta | None:
         """A dossier's folder + tags, or None when the dossier is absent."""
         eh = _email_hash(email)
-        conn = sqlite3.connect(self._db_path)
+        conn = self._conn()
         row = conn.execute(
             "SELECT folder, tags FROM dossiers WHERE email_hash = ?", (eh,)
         ).fetchone()
@@ -221,12 +387,93 @@ class LeadResearchStore:
             return None
         return LeadMeta.from_db(row[0], row[1])
 
-    def all_meta(self) -> dict[str, LeadMeta]:
-        """Map email_hash -> folder+tags for every stored dossier (one query)."""
-        conn = sqlite3.connect(self._db_path)
-        rows = conn.execute("SELECT email_hash, folder, tags FROM dossiers").fetchall()
+    def all_meta(self, user_id: str = "", is_admin: bool = False) -> dict[str, LeadMeta]:
+        """Map email_hash -> folder+tags for every stored dossier (one query).
+
+        Per-user isolation: a non-admin only sees metadata for their OWN
+        dossiers (admin, or no filter, sees everything).
+        """
+        conn = self._conn()
+        args: list[Any] = []
+        conds = ""
+        if user_id and not is_admin:
+            conds = "WHERE user_id = ?"
+            args = [user_id]
+        rows = conn.execute(
+            f"SELECT email_hash, folder, tags FROM dossiers {conds}",
+            args,
+        ).fetchall()
         conn.close()
         return {r[0]: LeadMeta.from_db(r[1], r[2]) for r in rows}
+
+    # -- Admin visibility flag (Dashboard data control) ---------------------
+
+    def set_hidden(self, email: str, hidden: bool) -> bool:
+        """Mark ONE dossier hidden (True = hidden from user views) / visible.
+
+        Pure metadata — ``dossier_json`` is untouched (same rule as ``set_meta``).
+        The row stays in the DB and in the admin's unfiltered dashboard; only the
+        USER-facing lead views filter it. False when no such dossier exists.
+        """
+        eh = _email_hash(email)
+        conn = self._conn()
+        cur = conn.execute(
+            "UPDATE dossiers SET hidden = ?, updated_at = CURRENT_TIMESTAMP "
+            "WHERE email_hash = ?",
+            (1 if hidden else 0, eh),
+        )
+        conn.commit()
+        conn.close()
+        return cur.rowcount > 0
+
+    def set_hidden_bulk(self, emails: list[str], hidden: bool) -> int:
+        """Mark many dossiers hidden/visible in ONE statement; returns how many.
+
+        Used by the date/search admin scopes. Empty input is an honest 0. Invalid
+        emails (no matching hash) simply don't count — never an error (CLAUDE.md §6).
+        """
+        emails = list(dict.fromkeys(e or "" for e in emails))
+        emails = [e for e in emails if e]
+        if not emails:
+            return 0
+        conn = self._conn()
+        placeholders = ",".join("?" for _ in emails)
+        target = 1 if hidden else 0
+        params: list[Any] = [target, target]
+        params += [_email_hash(e) for e in emails]
+        cur = conn.execute(
+            f"UPDATE dossiers SET hidden = ?, updated_at = CURRENT_TIMESTAMP "
+            f"WHERE hidden <> ? AND email_hash IN ({placeholders})",
+            params,
+        )
+        conn.commit()
+        conn.close()
+        return cur.rowcount
+
+    def hidden_hashes(self) -> set[str]:
+        """Email hashes whose dossier is `hidden` from the user views."""
+        conn = self._conn()
+        rows = conn.execute("SELECT email_hash FROM dossiers WHERE hidden = 1").fetchall()
+        conn.close()
+        return {r[0] for r in rows}
+
+    def visibility_by_date(self) -> dict[str, dict[str, int]]:
+        """``{YYYY-MM-DD: {total, hidden}}`` — the admin's per-date data control view.
+
+        Reuses :meth:`research_dates` + :meth:`hidden_hashes` (no new query shape):
+        which dates hold data, and how much of each date is currently hidden from
+        the user dashboard. The admin picks a row here to Hide / Show / Delete.
+        """
+        hidden = self.hidden_hashes()
+        out: dict[str, dict[str, int]] = {}
+        for eh, date in self.research_dates().items():
+            if not date:
+                continue
+            rec = out.setdefault(date, {"total": 0, "hidden": 0})
+            rec["total"] += 1
+            if eh in hidden:
+                rec["hidden"] += 1
+        return out
 
     def research_dates(self) -> dict[str, str]:
         """Map email_hash -> the research date (``YYYY-MM-DD``) of each dossier.
@@ -235,12 +482,210 @@ class LeadResearchStore:
         honest "kis tareekh ko nikala" the list/detail views surface — never a
         rebuilt timestamp, the actual row the pipeline wrote.
         """
-        conn = sqlite3.connect(self._db_path)
+        conn = self._conn()
         rows = conn.execute(
             "SELECT email_hash, date(created_at) FROM dossiers"
         ).fetchall()
         conn.close()
         return {r[0]: (r[1] or "") for r in rows}
+
+    # -- Persisted filter columns + SQL paging (Phase 2, frontend speed) -----
+
+    def set_filter_columns(self, email_hash: str, recommendation: str,
+                           potential_score: float, bound: bool) -> None:
+        """Heal ONE row's persisted verdict to today's rules (self-healing drift).
+
+        list_leads re-gates its page and writes any drift back here, so a rule
+        change corrects the column the moment the row is next viewed — the next
+        request then filters it correctly up-front.
+        """
+        conn = self._conn()
+        conn.execute(
+            "UPDATE dossiers SET recommendation = ?, potential_score = ?, bound = ? "
+            "WHERE email_hash = ?",
+            (recommendation, float(potential_score), 1 if bound else 0, email_hash),
+        )
+        conn.commit()
+        conn.close()
+
+    def _filter_where(self, *, recommendation: str | None = None,
+                      bound: bool | None = None, min_score: float | None = None,
+                      folder: str | None = None, tag: str | None = None,
+                      date: str | None = None, source_emails: set[str] | None = None,
+                      q: str | None = None, global_scope: bool = False,
+                      user_id: str | None = None, is_admin: bool = False,
+                      ) -> tuple[str, list[Any]]:
+        """Shared WHERE clause for the user-facing lead views.
+
+        Mirrors the old Python filtering in :func:`app.api.v1.leads.list_leads`
+        exactly —``hidden`` always excluded, ``recommendation=None`` means
+        actionable-only (``skip`` and ungated ``''`` hidden), ``folder=None`` is
+        the UNFILED inbox unless a date/tag makes the view GLOBAL (no place
+        scoping), ``folder='*'`` is every place. ``q`` searches the identity
+        fields via ``json_extract`` (substring, case-insensitive LIKE, literal-safe
+        escapes so a query with %/_/\\ is a literal search, never a wildcard).
+
+        Per-user isolation: non-admin users ONLY see dossiers where user_id matches
+        exactly (a new user's dashboard is fresh). Admin users see all (including
+        legacy empty-user_id rows from the pre-auth era).
+        """
+        conds = ["d.hidden = 0"]
+        # Per-user data isolation
+        if user_id and not is_admin:
+            # EXACT match only — legacy (user_id='') dossiers belong to the admin
+            # alone; a new user's dashboard stays fresh until they run searches.
+            conds.append("d.user_id = ?")
+            args: list[Any] = [user_id]
+        else:
+            args = []
+        if recommendation is None:
+            conds.append("d.recommendation NOT IN ('skip', '')")
+        elif recommendation == "*":
+            pass  # every recommendation incl skip/ungated (the CSV "all" path)
+        else:
+            conds.append("d.recommendation = ?")
+            args.append(recommendation)
+        if bound is not None:
+            conds.append("d.bound = ?")
+            args.append(1 if bound else 0)
+        if min_score is not None:
+            conds.append("d.potential_score >= ?")
+            args.append(float(min_score))
+        if folder is None:
+            if not global_scope:
+                conds.append("d.folder = ''")  # default = the Unfiled inbox
+        elif folder != "*":
+            conds.append("d.folder = ?")
+            args.append(folder)
+        if tag:
+            conds.append("EXISTS (SELECT 1 FROM json_each(d.tags) AS jt WHERE jt.value = ?)")
+            args.append(tag)
+        if date:
+            conds.append("date(d.created_at) = ?")
+            args.append(date)
+        if source_emails:
+            ems = [e for e in dict.fromkeys(source_emails) if e]
+            if ems:
+                conds.append(f"d.email IN ({','.join('?' for _ in ems)})")
+                args.extend(ems)
+        if q and q.strip():
+            lit = (q or "").replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            like = f"%{lit}%"
+            conds.append(
+                "(d.email LIKE ? ESCAPE '\\' OR d.domain LIKE ? ESCAPE '\\' "
+                "OR json_extract(d.dossier_json, '$.company.name') LIKE ? ESCAPE '\\' "
+                "OR json_extract(d.dossier_json, '$.refined_company') LIKE ? ESCAPE '\\' "
+                "OR json_extract(d.dossier_json, '$.person.name') LIKE ? ESCAPE '\\' "
+                "OR json_extract(d.dossier_json, '$.person.role') LIKE ? ESCAPE '\\')"
+            )
+            args.extend([like] * 6)
+        return " AND ".join(conds), args
+
+    #: The columns :meth:`query_leads` / :meth:`all_matching` read.
+    _LIST_COLS = (
+        "d.email_hash, d.email, d.domain, "
+        "json_extract(d.dossier_json, '$.company.name') AS _cn, d.dossier_json, "
+        "d.folder, d.tags, date(d.created_at), "
+        "d.recommendation, d.potential_score, d.bound"
+    )
+
+    @staticmethod
+    def _row_to_lead(r) -> dict[str, Any]:
+        """Row -> the record both SQL readers return."""
+        return {
+            "email_hash": r[0], "email": r[1], "domain": r[2],
+            "dossier": LeadDossier.from_dict(json.loads(r[4])),
+            "folder": r[5] or "", "tags": LeadMeta.from_db(r[5], r[6]).tags,
+            "created_at": r[7] or "",
+            "recommendation": r[8], "potential_score": r[9], "bound": r[10],
+        }
+
+    def query_leads(self, *, limit: int = 100, offset: int = 0, **filters) -> tuple[list[dict[str, Any]], int]:
+        """SQL filter + sort + paginate — the whole-store materialize is gone.
+
+        Returns ``(page, total)``: only the PAGE is parsed (a page, not the whole
+        store); ``total`` is the honest count for the SAME filters (drives the
+        X-Total-Count header so the UI can page). Each record carries ``dossier``
+        (LeadDossier), ``folder``, ``tags``, ``created_at`` and the persisted
+        verdict columns, so the caller's freshness re-gate has what it needs.
+        Ordering is the same deterministic tier -> score -> newest the Python sort
+        produced, made total by ``rowid`` (stable tie-break).
+        """
+        where, args = self._filter_where(**filters)  # user_id/is_admin pass via filters
+        conn = self._conn()
+        total = conn.execute(
+            f"SELECT COUNT(*) FROM dossiers d WHERE {where}", args
+        ).fetchone()[0]
+        rows = conn.execute(
+            f"SELECT {self._LIST_COLS} FROM dossiers d WHERE {where} "
+            "ORDER BY CASE d.recommendation WHEN 'contact_now' THEN 0 "
+            "WHEN 'nurture' THEN 1 WHEN 'skip' THEN 2 ELSE 9 END, "
+            "d.potential_score DESC, d.updated_at DESC, d.rowid ASC "
+            "LIMIT ? OFFSET ?",
+            args + [int(limit), int(offset)],
+        ).fetchall()
+        conn.close()
+        return [self._row_to_lead(r) for r in rows], total
+
+    def all_matching(self, **filters) -> list[dict[str, Any]]:
+        """Every dossier matching the user-view filters (no pagination) — the
+        CSV-export path. Same WHERE as :meth:`query_leads`, so export honours the
+        exact same filters the list shows (hidden + actionable-only included).
+        """
+        where, args = self._filter_where(**filters)
+        conn = self._conn()
+        rows = conn.execute(
+            f"SELECT {self._LIST_COLS} FROM dossiers d WHERE {where} ORDER BY d.rowid ASC",
+            args,
+        ).fetchall()
+        conn.close()
+        return [self._row_to_lead(r) for r in rows]
+
+    def distinct_dates(self, user_id: str = "", is_admin: bool = False) -> list[str]:
+        """Every extraction date present on a VISIBLE dossier, newest first — one
+        DISTINCT GROUP, no per-row Python (the old list_dates full scan). A date
+        whose only rows are admin-hidden drops out of the dropdown (the user can no
+        longer recall it).
+
+        Per-user isolation: a non-admin only sees dates from their OWN dossiers;
+        admin (or no filter) sees every date.
+        """
+        conn = self._conn()
+        args: list[Any] = []
+        conds = "WHERE hidden = 0 AND date(created_at) IS NOT NULL"
+        if user_id and not is_admin:
+            conds += " AND d.user_id = ?"
+            args = [user_id]
+        rows = conn.execute(
+            "SELECT DISTINCT date(created_at) AS d FROM dossiers d "
+            f"{conds} ORDER BY d DESC",
+            args,
+        ).fetchall()
+        conn.close()
+        return [r[0] for r in rows]
+
+    def tag_counts(self, user_id: str = "", is_admin: bool = False) -> list[dict[str, Any]]:
+        """Global tag counts for the USER views (hidden + skip/ungated excluded —
+        the same set the actionable list shows). Feeds the tag chips/filter, one
+        GROUP BY over ``json_each`` instead of a full-list download.
+
+        Per-user isolation: non-admin only counts their OWN dossiers' tags.
+        """
+        conn = self._conn()
+        args: list[Any] = []
+        conds = "d.hidden = 0 AND d.recommendation NOT IN ('skip', '')"
+        if user_id and not is_admin:
+            conds += " AND d.user_id = ?"
+            args = [user_id]
+        rows = conn.execute(
+            "SELECT jt.value AS tag, COUNT(*) AS cnt "
+            "FROM dossiers d, json_each(d.tags) AS jt "
+            f"WHERE {conds} "
+            "GROUP BY jt.value ORDER BY cnt DESC, tag COLLATE NOCASE ASC",
+            args,
+        ).fetchall()
+        conn.close()
+        return [{"tag": r[0], "count": r[1]} for r in rows]
 
     # -- Folders catalog (Phase B.2) ------------------------------------
 
@@ -267,7 +712,7 @@ class LeadResearchStore:
         name = (name or "").strip()
         if not name:
             return False
-        conn = sqlite3.connect(self._db_path)
+        conn = self._conn()
         cur = conn.execute(
             "INSERT OR IGNORE INTO folders(name) VALUES (?)", (name,)
         )
@@ -282,11 +727,11 @@ class LeadResearchStore:
         is the point of the catalog). ``_backfill_folders`` makes sure a folder
         name that only rides on leads (legacy or post-rename) is never missing.
         """
-        conn = sqlite3.connect(self._db_path)
+        conn = self._conn()
         self._backfill_folders(conn)
         rows = conn.execute(
             "SELECT f.name, f.created_at, "
-            "(SELECT COUNT(*) FROM dossiers d WHERE d.folder = f.name) AS cnt "
+            "(SELECT COUNT(*) FROM dossiers d WHERE d.folder = f.name AND d.hidden = 0) AS cnt "
             "FROM folders f "
             "ORDER BY f.created_at DESC, f.name COLLATE NOCASE ASC"
         ).fetchall()
@@ -297,7 +742,7 @@ class LeadResearchStore:
             for r in rows
         ]
 
-    def folder_catalog(self) -> dict[str, Any]:
+    def folder_catalog(self, user_id: str = "", is_admin: bool = False) -> dict[str, Any]:
         """The organization mailbox overview — one round-trip for the UI.
 
         ``{folders: [{name, created_at, count}], unfiled, total}``: ``unfiled``
@@ -309,106 +754,137 @@ class LeadResearchStore:
         COUNTS = THE LIST, NOT THE STORE — the root cause of the "chip says
         313 but the view shows 38" bug. The leads list hides ``skip``/junk
         dossiers by default (a dead-domain / non-construction / sub-threshold
-        dossier is not a lead), so the catalog applies the SAME re-gate
-        (:func:`~app.lead_research.scoring.regate_recommendation`) and counts
-        only what the list would actually show. Junk still exists in the store
-        (purgeable via "Clear junk") — it is just never counted as a lead.
-        """
-        from app.lead_research.scoring import regate_recommendation
+        dossier is not a lead), so the catalog applies the SAME persisted
+        ``recommendation`` column (the gate written at save-time, identical to
+        read-time re-gate) and counts only what the list would show — all in SQL,
+        never materializing the store. Junk still exists in the store (purgeable
+        via "Clear junk") — it is just never counted as a lead.
 
-        conn = sqlite3.connect(self._db_path)
+        Per-user isolation: non-admin counts only their OWN dossiers; admin sees
+        all (legacy empty-user_id rows included).
+        """
+        conn = self._conn()
         self._backfill_folders(conn)
         rows = conn.execute(
             "SELECT f.name, f.created_at FROM folders f "
             "ORDER BY f.created_at DESC, f.name COLLATE NOCASE ASC"
         ).fetchall()
+        args: list[Any] = []
+        conds = "WHERE hidden = 0 AND recommendation NOT IN ('skip', '')"
+        if user_id and not is_admin:
+            conds += " AND user_id = ?"
+            args = [user_id]
+        count_rows = conn.execute(
+            f"SELECT folder, COUNT(*) FROM dossiers {conds} GROUP BY folder",
+            args,
+        ).fetchall()
         conn.commit()  # backfill may have inserted rows
         conn.close()
 
-        meta = self.all_meta()
-        total = 0
-        unfiled = 0
-        by_folder: dict[str, int] = {}
-        for d in self.list_all():
-            if regate_recommendation(d) == "skip":
-                continue  # hidden junk — counted nowhere (matches the list view)
-            total += 1
-            m = meta.get(_email_hash(d.email))
-            f = m.folder if m else ""
-            if f:
-                by_folder[f] = by_folder.get(f, 0) + 1
-            else:
-                unfiled += 1
+        by_folder = {r[0]: r[1] for r in count_rows}
+        total = sum(by_folder.values())
+        unfiled = by_folder.get("", 0)
         return {
             "folders": [
-                {"name": name, "created_at": (created or "")[:19], "count": by_folder.get(name, 0)}
+                {"name": name, "created_at": (created or "")[:19],
+                 "count": by_folder.get(name, 0)}
                 for name, created in rows
             ],
             "unfiled": unfiled,
             "total": total,
         }
 
-    def rename_folder(self, old: str, new: str) -> int:
+    def rename_folder(self, old: str, new: str, user_id: str = "",
+                      is_admin: bool = False) -> int:
         """Rename a folder across every dossier AND the catalog; count renamed.
 
         The sweep is unchanged (folder rides on dossiers); the catalog keeps the
         group first-class. An empty folder that is renamed stays an empty group
         under the new name — nothing is lost.
+
+        Per-user isolation: a non-admin renames only within their OWN dossiers
+        (never touching another user's leads or legacy rows); the catalog row is
+        kept for everyone who still holds the old name.
         """
         old = (old or "").strip()
         new = (new or "").strip()
         if not old or old == new:
             return 0
-        affected = [eh for eh, m in self.all_meta().items() if m.folder == old]
+        affected = [
+            eh for eh, m in self.all_meta(user_id=user_id, is_admin=is_admin).items()
+            if m.folder == old
+        ]
         for eh in affected:
             self.set_meta_direct(eh, new, None)
-        conn = sqlite3.connect(self._db_path)
-        conn.execute("DELETE FROM folders WHERE name = ?", (old,))
+        # Catalog swap only when it no longer hides a used folder name: drop the
+        # old group only if NO dossier outside the sweep still uses it.
+        conn = self._conn()
+        still_used = conn.execute(
+            "SELECT COUNT(*) FROM dossiers WHERE folder = ?", (old,)
+        ).fetchone()[0]
+        conn.execute("DELETE FROM folders WHERE name = ?", (old,)) if still_used == 0 else None
         conn.execute("INSERT OR IGNORE INTO folders(name) VALUES (?)", (new,))
         conn.commit()
         conn.close()
         return len(affected)
 
-    def rename_tag(self, old: str, new: str) -> int:
-        """Rename a tag value across every dossier; return how many changed."""
+    def rename_tag(self, old: str, new: str, user_id: str = "",
+                   is_admin: bool = False) -> int:
+        """Rename a tag value across every dossier; return how many changed.
+
+        Per-user isolation: a non-admin renames only within their OWN dossiers.
+        """
         old = (old or "").strip()
         new = (new or "").strip()
         if not old or old == new:
             return 0
         affected = 0
-        for eh, m in self.all_meta().items():
+        for eh, m in self.all_meta(user_id=user_id, is_admin=is_admin).items():
             if old in m.tags:
                 tags = [(new if t == old else t) for t in m.tags]
                 self.set_meta_direct(eh, m.folder, tags)
                 affected += 1
         return affected
 
-    def clear_folder(self, value: str) -> int:
+    def clear_folder(self, value: str, user_id: str = "", is_admin: bool = False) -> int:
         """Remove a folder value from every dossier AND drop it from the catalog.
 
         Deleting a folder releases its leads (folder="") and removes the group —
         the honest count of released leads is returned (0 for an empty folder is
         a valid "folder deleted, nothing to release").
+
+        Per-user isolation: a non-admin clears only within their OWN dossiers;
+        the catalog group is dropped only when no dossier outside the radius
+        still uses the name.
         """
         value = (value or "").strip()
         if not value:
             return 0
-        affected = [eh for eh, m in self.all_meta().items() if m.folder == value]
+        affected = [
+            eh for eh, m in self.all_meta(user_id=user_id, is_admin=is_admin).items()
+            if m.folder == value
+        ]
         for eh in affected:
             self.set_meta_direct(eh, "", None)
-        conn = sqlite3.connect(self._db_path)
-        conn.execute("DELETE FROM folders WHERE name = ?", (value,))
+        conn = self._conn()
+        still_used = conn.execute(
+            "SELECT COUNT(*) FROM dossiers WHERE folder = ?", (value,)
+        ).fetchone()[0]
+        conn.execute("DELETE FROM folders WHERE name = ?", (value,)) if still_used == 0 else None
         conn.commit()
         conn.close()
         return len(affected)
 
-    def clear_tag(self, value: str) -> int:
-        """Remove a tag value from every dossier; return how many changed."""
+    def clear_tag(self, value: str, user_id: str = "", is_admin: bool = False) -> int:
+        """Remove a tag value from every dossier; return how many changed.
+
+        Per-user isolation: a non-admin clears only within their OWN dossiers.
+        """
         value = (value or "").strip()
         if not value:
             return 0
         affected = 0
-        for eh, m in self.all_meta().items():
+        for eh, m in self.all_meta(user_id=user_id, is_admin=is_admin).items():
             if value in m.tags:
                 tags = [t for t in m.tags if t != value]
                 self.set_meta_direct(eh, m.folder, tags)
@@ -422,14 +898,14 @@ class LeadResearchStore:
         a tag-list normalizes + replaces (rename/clear on a tag).
         """
         if tags is None:
-            conn = sqlite3.connect(self._db_path)
+            conn = self._conn()
             row = conn.execute(
                 "SELECT tags FROM dossiers WHERE email_hash = ?", (email_hash,)
             ).fetchone()
             conn.close()
             tags = list(LeadMeta.from_db("", row[0]).tags) if row else []
         _, tags_json = self._normalize(folder, tags)
-        conn = sqlite3.connect(self._db_path)
+        conn = self._conn()
         conn.execute(
             "UPDATE dossiers SET folder = ?, tags = ?, updated_at = CURRENT_TIMESTAMP "
             "WHERE email_hash = ?",
@@ -485,10 +961,28 @@ class PendingLeadsStore:
         self._db_path = db_path
         self._init_db()
 
+    def _conn(self) -> sqlite3.Connection:
+        """Open a SQLite connection that WAITS under lock/IO contention.
+
+        WAL is a persistent DB-header property (inherited per-connection), so a
+        reader never blocks on a writer. But a NEW connection without a
+        ``busy_timeout`` still fails instantly on residual transient contention
+        — the uncaught consumer "disk I/O error" that silently stopped
+        background research even though the pending buffer held hundreds of
+        leads. Same risk-control the yield/candidate stores already apply
+        (``PRAGMA busy_timeout = 5000``): a worker retries the lock briefly
+        instead of throwing and dying mid-run (CLAUDE.md §6, background threads
+        must be robust). Only the per-connection timeout needs setting each
+        time; WAL rides along from the header.
+        """
+        conn = sqlite3.connect(self._db_path)
+        conn.execute("PRAGMA busy_timeout = 5000")
+        return conn
+
     def _init_db(self) -> None:
         import os
         os.makedirs(os.path.dirname(self._db_path), exist_ok=True)
-        conn = sqlite3.connect(self._db_path)
+        conn = self._conn()
         conn.execute("""
             CREATE TABLE IF NOT EXISTS pending_leads (
                 email_hash TEXT PRIMARY KEY,
@@ -519,14 +1013,34 @@ class PendingLeadsStore:
             conn.execute(
                 "ALTER TABLE pending_leads ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0"
             )
+        # ``dork`` (Phase G) — the Layer-1 dork template that surfaced this
+        # lead, persisted so a cached lead researched in a LATER run can still
+        # credit its producing dork's yield. Additive, default ''. Live DBs
+        # predate the column; a plain ADD is safe ('' = unattributable).
+        if "dork" not in cols:
+            conn.execute(
+                "ALTER TABLE pending_leads ADD COLUMN dork TEXT NOT NULL DEFAULT ''"
+            )
+        # ``gated`` (Galti #3) — a cached row rejected by the serve-time vertical
+        # gate. Rows cached BEFORE the non-client boundary existed (the DCTA
+        # transit/mobility junk) were silently skipped by ``take``'s Python
+        # filter but never left the head of the ``ORDER BY created_at ASC``
+        # window, so every consumer claim returned empty forever: 20 minutes,
+        # zero claims, zero dossiers, silent. Marking them lets the SQL window
+        # ADVANCE past them — invisible to serving, exactly like ``dead``, same
+        # additive guarded-ALTER pattern. Default 0 keeps old code compatible.
+        if "gated" not in cols:
+            conn.execute(
+                "ALTER TABLE pending_leads ADD COLUMN gated INTEGER NOT NULL DEFAULT 0"
+            )
         conn.commit()
         conn.close()
 
     def get(self, email: str) -> dict | None:
         eh = _email_hash(email)
-        conn = sqlite3.connect(self._db_path)
+        conn = self._conn()
         row = conn.execute(
-            "SELECT email, domain, company, person, source_url, location "
+            "SELECT email, domain, company, person, source_url, location, dork "
             "FROM pending_leads WHERE email_hash = ?", (eh,)
         ).fetchone()
         conn.close()
@@ -535,6 +1049,7 @@ class PendingLeadsStore:
         return {
             "email": row[0], "domain": row[1], "company": row[2],
             "person": row[3], "source_url": row[4], "location": row[5],
+            "dork": row[6],
         }
 
     def add(self, leads: list[dict]) -> int:
@@ -549,7 +1064,7 @@ class PendingLeadsStore:
         from app.email.email_cleaner import is_free_mail_domain
         from app.company_profile import get_profile
 
-        conn = sqlite3.connect(self._db_path)
+        conn = self._conn()
         added = 0
         for lead in leads:
             email = (lead.get("email") or "").strip()
@@ -576,8 +1091,8 @@ class PendingLeadsStore:
             eh = _email_hash(email)
             conn.execute("""
                 INSERT INTO pending_leads
-                    (email_hash, email, domain, company, person, source_url, location)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (email_hash, email, domain, company, person, source_url, location, dork)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(email_hash) DO UPDATE SET location = excluded.location
             """, (
                 eh, email,
@@ -586,6 +1101,7 @@ class PendingLeadsStore:
                 lead.get("person", ""),
                 lead.get("source_url", ""),
                 lead.get("location", ""),
+                lead.get("dork", "") or lead.get("_discovery_dork", ""),
             ))
             added += 1
         conn.commit()
@@ -617,17 +1133,17 @@ class PendingLeadsStore:
             if cooldown_seconds and cooldown_seconds > 0
             else None
         )
-        conn = sqlite3.connect(self._db_path)
+        conn = self._conn()
         if location:
             sql = (
-                "SELECT email, domain, company, person, source_url, location "
-                "FROM pending_leads WHERE location = ? AND dead = 0"
+                "SELECT email, domain, company, person, source_url, location, dork "
+                "FROM pending_leads WHERE location = ? AND dead = 0 AND gated = 0"
             )
             args: list[Any] = [location]
         else:
             sql = (
-                "SELECT email, domain, company, person, source_url, location "
-                "FROM pending_leads WHERE dead = 0"
+                "SELECT email, domain, company, person, source_url, location, dork "
+                "FROM pending_leads WHERE dead = 0 AND gated = 0"
             )
             args = []
         if since is not None:
@@ -639,23 +1155,43 @@ class PendingLeadsStore:
         sql += " ORDER BY created_at ASC LIMIT ?"
         args.append(count)
         rows = conn.execute(sql, args).fetchall()
-        conn.close()
         # Same vertical gate as ``add``, applied at SERVE time too: rows cached
         # BEFORE the boundary existed (the DCTA transit/mobility junk) must never
         # be served again — they stay in the table (Phase C can purge to show
         # the user exactly what was excluded) but no research credit touches them.
+        # Galti #3: a gate-rejected row must NOT keep occupying the head of the
+        # created_at window — it can never be served, so it is marked ``gated``
+        # here and the window advances to rows that CAN (a batch whose rows were
+        # all rejected marks them all and serves the rows behind them on the
+        # next call; without this, every consumer claim returns empty forever).
         from app.company_profile import get_profile
 
+        gated_emails: list[str] = []
         served: list[dict] = []
         for r in rows:
             if get_profile().lead_is_non_client(
                 company=r[2], domain=r[1], source_url=r[4]
             ):
+                gated_emails.append(r[0])
                 continue
             served.append(
                 {"email": r[0], "domain": r[1], "company": r[2],
-                 "person": r[3], "source_url": r[4], "location": r[5]}
+                 "person": r[3], "source_url": r[4], "location": r[5],
+                 "dork": r[6]},
             )
+        if gated_emails:
+            # Persist the advance so the NEXT take() window starts AFTER the
+            # marked rows instead of re-returning the same gated head forever.
+            conn.executemany(
+                "UPDATE pending_leads SET gated = 1 WHERE email = ?",
+                [(e,) for e in gated_emails],
+            )
+            conn.commit()
+            logger.info(
+                "pending take: marked %d gate-rejected row(s) gated — queue "
+                "advanced (served %d)", len(gated_emails), len(served),
+            )
+        conn.close()
         return served
 
     def cooling_emails(self, cooldown_seconds: int = 0) -> set[str]:
@@ -668,7 +1204,7 @@ class PendingLeadsStore:
         """
         if not cooldown_seconds or cooldown_seconds <= 0:
             return set()
-        conn = sqlite3.connect(self._db_path)
+        conn = self._conn()
         rows = conn.execute(
             "SELECT email FROM pending_leads "
             "WHERE attempted_at IS NOT NULL "
@@ -690,7 +1226,7 @@ class PendingLeadsStore:
         """
         if not emails:
             return 0
-        conn = sqlite3.connect(self._db_path)
+        conn = self._conn()
         recorded = 0
         for email in emails:
             cur = conn.execute(
@@ -713,7 +1249,7 @@ class PendingLeadsStore:
         """
         if not emails:
             return 0
-        conn = sqlite3.connect(self._db_path)
+        conn = self._conn()
         flagged = 0
         for email in emails:
             cur = conn.execute(
@@ -727,7 +1263,7 @@ class PendingLeadsStore:
 
     def dead_emails(self) -> set[str]:
         """Every email currently flagged dead (never serve, never re-research)."""
-        conn = sqlite3.connect(self._db_path)
+        conn = self._conn()
         rows = conn.execute(
             "SELECT email FROM pending_leads WHERE dead = 1"
         ).fetchall()
@@ -768,7 +1304,7 @@ class PendingLeadsStore:
         if domain_delivers is None:
             domain_delivers = domain_delivers_email
 
-        conn = sqlite3.connect(self._db_path)
+        conn = self._conn()
         rows = conn.execute(
             "SELECT email FROM pending_leads WHERE dead = 0"
         ).fetchall()
@@ -817,7 +1353,7 @@ class PendingLeadsStore:
         """Remove researched emails from pending; return count removed."""
         if not emails:
             return 0
-        conn = sqlite3.connect(self._db_path)
+        conn = self._conn()
         removed = 0
         for email in emails:
             eh = _email_hash(email)
@@ -828,7 +1364,7 @@ class PendingLeadsStore:
         return removed
 
     def count(self) -> int:
-        conn = sqlite3.connect(self._db_path)
+        conn = self._conn()
         n = conn.execute("SELECT COUNT(*) FROM pending_leads").fetchone()[0]
         conn.close()
         return n

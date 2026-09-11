@@ -1,11 +1,11 @@
 import { useCallback, useLayoutEffect, useMemo, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useLocation, useSearchParams } from "react-router-dom";
 import { Download, CheckSquare, Inbox, Layers, Square, Tag, Trash2, X } from "lucide-react";
 import { api } from "../api/client";
 import { Spinner } from "../components/StatusChip";
 import ManageMenu from "../components/ManageMenu";
-import type { EvidenceFact, LeadSummary } from "../types";
+import type { EvidenceFact } from "../types";
 import { recommendationBadge, recommendationLabel, scoreColor } from "../lib/format";
 
 // Working-only (CLAUDE.md §1 honest leads): skip/junk dossiers are NOT leads —
@@ -155,10 +155,15 @@ export default function Leads() {
   }
   const [manageOpen, setManageOpen] = useState(false);
 
-  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
-    queryKey: ["leads", rec, bound, minScore, src, folder, tag, date],
-    queryFn: () =>
-      api.listLeads({
+  // The Companies screen pages IN THE DATABASE (Phase 2 — server speed): the
+  // backend filters, sorts and paginates in SQL, so only ONE page is downloaded
+  // (never the whole store). q is answered server-side now, so the queryKey
+  // carries it and the old client-side filter memo is gone.
+  const PAGE = 100;
+  const pageQ = useInfiniteQuery({
+    queryKey: ["leads", rec, bound, minScore, src, folder, tag, date, q],
+    queryFn: ({ pageParam = 0 }) =>
+      api.pageLeads({
         recommendation: rec || undefined,
         bound: bound === "" ? undefined : bound === "true",
         min_score: minScore === "" ? undefined : Number(minScore),
@@ -166,9 +171,24 @@ export default function Leads() {
         folder: folder || undefined,
         tag: tag || undefined,
         date: date || undefined,
-        limit: 1000,
+        q: q || undefined,
+        limit: PAGE,
+        offset: pageParam,
       }),
+    initialPageParam: 0,
+    getNextPageParam: (lastPage, allPages) => {
+      const loaded = allPages.reduce((n, p) => n + p.rows.length, 0);
+      return loaded < lastPage.total ? loaded : undefined;
+    },
   });
+  const { isLoading, isError, error, isFetching, refetch } = pageQ;
+  const leads = useMemo(
+    () => pageQ.data?.pages.flatMap((p) => p.rows) ?? [],
+    [pageQ.data],
+  );
+  // Honest total for the CURRENT filters (from X-Total-Count), so "Show more"
+  // knows when it's done and the header can be accurate even on page 1.
+  const totalLeads = pageQ.data?.pages[0]?.total ?? 0;
 
   // Folders catalog (Phase B.2) — persisted, empty-allowed clickable groups.
   // The filter + manage panel read from here so a folder exists BEFORE any
@@ -184,20 +204,27 @@ export default function Leads() {
     queryKey: ["dates"],
     queryFn: () => api.listDates(),
   });
-  // Global tag counts (every dossier, folders included) — feeds the tag chips
-  // + Manage menu. A dedicated All-scoped read, so a tag on a FOLDERED lead
-  // still shows (the current view sees only one place). Shares the ["leads"]
-  // prefix, so organize/delete auto-refreshes it with the lead list.
+  // Global tag COUNTS — one SQL GROUP BY via /leads/tags, so the tag chips +
+  // Manage menu + tag dropdown never download the whole list just to tally
+  // tags (the old tagsQ pulled folder="*" limit=1000). Shares the ["leads"]
+  // prefix so organize/delete still auto-refreshes it.
   const tagsQ = useQuery({
     queryKey: ["leads", { scope: "org-tags" }],
-    queryFn: () => api.listLeads({ folder: "*", limit: 1000 }),
+    queryFn: () => api.listTags(),
   });
   const globalTagCounts = useMemo(() => {
     const m = new Map<string, number>();
-    (tagsQ.data ?? []).forEach((l) => l.tags.forEach((t) => m.set(t, (m.get(t) ?? 0) + 1)));
+    (tagsQ.data ?? []).forEach((t) => m.set(t.tag, t.count));
     return m;
   }, [tagsQ.data]);
   const globalTags = useMemo(() => [...globalTagCounts.keys()].sort(), [globalTagCounts]);
+  // Every query-run source label — /leads/sources (the old sourceOptions read
+  // them off the downloaded page; now they arrive complete in one call).
+  const sourcesQ = useQuery({
+    queryKey: ["sources"],
+    queryFn: () => api.listSources(),
+  });
+  const sourceOptions = useMemo(() => sourcesQ.data ?? [], [sourcesQ.data]);
 
   const [expandedEmail, setExpandedEmail] = useState<string | null>(null);
   const detailQ = useQuery({
@@ -329,29 +356,6 @@ export default function Leads() {
   // dropdown (each label row has its own ✏️/🗑 buttons); browsing lives in the
   // chip bar above the table.
 
-  const leads = useMemo(() => {
-    // ORDER is the backend's job: contact_now -> nurture -> skip, then score
-    // (high first), then newest — returned already sorted by list_leads. A
-    // client-side re-sort here is exactly what used to scramble the order
-    // ("data ki tarteeb achi ni hai"), so the frontend only FILTERS and
-    // preserves the server order as-is.
-    const base = data ?? [];
-    if (!q) return base;
-    return base.filter(
-      (l) =>
-        l.company.toLowerCase().includes(q) ||
-        l.email.toLowerCase().includes(q) ||
-        (l.person || "").toLowerCase().includes(q),
-    );
-  }, [data, q]);
-
-  // Distinct source runs + folder/tag options (with counts), for the filters —
-  // same derived-options pattern as sourceOptions.
-  const sourceOptions = useMemo(() => {
-    const set = new Set<string>();
-    (data ?? []).forEach((l) => l.source && set.add(l.source));
-    return [...set].sort();
-  }, [data]);
   // Folder + tag names for the assign inputs' datalists (the catalog feeds the
   // bulk bar + row editor suggestions; the sidebar renders the rail itself).
   const catalog = foldersQ.data;
@@ -359,25 +363,26 @@ export default function Leads() {
     () => (catalog?.folders ?? []).slice().sort((a, b) => a.name.localeCompare(b.name)),
     [catalog],
   );
-  const tagCounts = useMemo(() => {
-    const m = new Map<string, number>();
-    (data ?? []).forEach((l) => l.tags.forEach((t) => m.set(t, (m.get(t) ?? 0) + 1)));
-    return m;
-  }, [data]);
-  const uniqueTags = useMemo(() => [...tagCounts.keys()].sort(), [tagCounts]);
-  // Distinct extraction dates — GLOBAL (every dossier, folders included). Page
-  // data is the fallback so the dropdown is never empty while the catalog is
-  // still loading.
+  // Tag counts/options for the Tag dropdown + tag datalist — GLOBAL now (the
+  // /leads/tags group), so the dropdown lists ALL tags, not just the current
+  // page (the old page-derived map hid tags once paging arrived).
+  const tagCounts = globalTagCounts;
+  const uniqueTags = useMemo(() => [...globalTagCounts.keys()].sort(), [globalTagCounts]);
+  // Distinct extraction dates — GLOBAL (every dossier, folders included). The
+  // loaded page is the fallback so the dropdown is never empty while the
+  // catalog is still loading.
   const uniqueDates = useMemo(() => {
     const fromApi = datesQ.data ?? [];
     if (fromApi.length > 0) return fromApi;
-    return [...new Set((data ?? []).map((l) => l.created_at).filter(Boolean))].sort(
+    return [...new Set(leads.map((l) => l.created_at).filter(Boolean))].sort(
       (a, b) => b.localeCompare(a),
     );
-  }, [datesQ.data, data]);
+  }, [datesQ.data, leads]);
 
   // --- Selection state ---
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  // Select-all mirrors the LOADED rows (page by page), so check-all stays honest
+  // as "Show more" reveals more — the user picks from what is actually on screen.
 
   function toggleSelect(email: string) {
     setSelected((prev) => {
@@ -442,14 +447,39 @@ export default function Leads() {
     return () => cancelAnimationFrame(raf);
   }, [isLoading]);
 
-  const exportSelected = useCallback(() => {
-    const selectedLeads = leads.filter((l) => selected.has(l.email));
-    downloadLeadsCsv(selectedLeads, `leads-selected-${selectedLeads.length}.csv`);
-  }, [leads, selected]);
+  // Export runs SERVER-SIDE (Phase 2): the CSV honours the exact filters the
+  // Companies list shows and exports the WHOLE matching set — the downloadable
+  // file no longer depends on how many pages happen to be loaded on screen.
+  const exportSelected = useCallback(async () => {
+    if (selected.size === 0) return;
+    try {
+      const csv = await api.exportCsvData({
+        emails: [...selected],
+        folder: folder || undefined,
+      });
+      downloadCsvText(csv, `leads-selected-${selected.size}.csv`);
+    } catch {
+      window.alert("Export selected done nahi ho saka (server ne CSV nahi diya).");
+    }
+  }, [selected, folder]);
 
-  const exportAll = useCallback(() => {
-    downloadLeadsCsv(leads, `leads-${rec || "all"}.csv`);
-  }, [leads, rec]);
+  const exportAll = useCallback(async () => {
+    try {
+      const csv = await api.exportCsvData({
+        recommendation: rec === "contact_now" || rec === "nurture" ? rec : undefined,
+        folder: folder || undefined,
+        tag: tag || undefined,
+        date: date || undefined,
+        source: src || undefined,
+        bound: bound === "" ? undefined : bound === "true",
+        min_score: minScore === "" ? undefined : Number(minScore),
+        q: q || undefined,
+      });
+      downloadCsvText(csv, `leads-${rec || "all"}.csv`);
+    } catch {
+      window.alert("Export done nahi ho saka (server ne CSV nahi diya).");
+    }
+  }, [rec, folder, tag, date, src, bound, minScore, q]);
 
   return (
     <div className="px-8 py-7 max-w-7xl">
@@ -764,6 +794,7 @@ export default function Leads() {
           )}
         </div>
       ) : (
+        <>
         <div className="overflow-x-auto rounded-xl border border-white/5">
           <table className="w-full text-[13.5px]">
             <thead>
@@ -1008,6 +1039,23 @@ export default function Leads() {
             </tbody>
           </table>
         </div>
+
+        {/* Show more — the backend pages in SQL (limit 100), so only one page is
+            downloaded at a time (the root cause of the slow screen was the whole
+            store + 4 full scans). Revealed only while another page exists. */}
+        {pageQ.hasNextPage && (
+          <div className="mt-4 flex justify-center">
+            <button
+              onClick={() => pageQ.fetchNextPage()}
+              disabled={pageQ.isFetchingNextPage}
+              className="inline-flex items-center gap-2 rounded-lg border border-white/5 bg-white/[0.02] px-5 py-2.5 text-[13px] text-slate-200 hover:bg-white/[0.06] disabled:opacity-60"
+            >
+              {pageQ.isFetchingNextPage ? <Spinner className="h-4 w-4" /> : "↓"}
+              Show more ({leads.length} / {totalLeads})
+            </button>
+          </div>
+        )}
+        </>
       )}
 
       {/* Organize one lead — modal editor */}
@@ -1121,22 +1169,10 @@ function Badge({ value }: { value: string }) {
   );
 }
 
-/** Frontend-only CSV: email, name, company, linkedin. */
-function downloadLeadsCsv(leads: LeadSummary[], filename: string) {
-  const escape = (v: string) => {
-    if (v.includes(",") || v.includes('"') || v.includes("\n")) {
-      return `"${v.replace(/"/g, '""')}"`;
-    }
-    return v;
-  };
-  const header = "email,name,company,linkedin";
-  const rows = leads.map(
-    (l) =>
-      [l.email, l.person, l.company, l.linkedin].map(escape).join(","),
-  );
-  // BOM so Excel opens UTF-8 correctly
-  const csv = "﻿" + header + "\r\n" + rows.join("\r\n") + "\r\n";
-  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+/** Blob-download CSV text the server already rendered (honours the server's
+ * exact filters + BOM). The client no longer re-derives rows locally. */
+function downloadCsvText(text: string, filename: string) {
+  const blob = new Blob([text], { type: "text/csv;charset=utf-8;" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;

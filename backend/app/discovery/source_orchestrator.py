@@ -34,6 +34,25 @@ from app.discovery.sources.status import SourceStatus
 logger = logging.getLogger(__name__)
 
 
+def _source_label(name: str, stats: dict[str, Any]) -> str:
+    """One human-readable ``name: STATUS (detail)`` line for fallback reasons.
+
+    Handles ``SourceStatus`` enums and plain strings so callers never crash
+    on either shape.  The ``detail`` is the most specific fact the source
+    returned: ``metadata.reason`` (e.g. ``search_failed``) when present, else
+    the ``error`` string — never empty parens when there IS a fact to show.
+    """
+    status = stats.get("status", "unknown")
+    status_str = status.value if hasattr(status, "value") else str(status)
+    detail = (stats.get("metadata") or {}).get("reason") or stats.get("error") or ""
+    return f"{name}: {status_str}" + (f" ({detail})" if detail else "")
+
+
+def _normalize_status(status: Any) -> str:
+    """Extract ``status.value`` from a ``SourceStatus`` enum, or ``str(status)``."""
+    return status.value if hasattr(status, "value") else str(status)
+
+
 class SourceOrchestrator:
     """Orchestrates discovery across multiple independent sources.
 
@@ -133,7 +152,7 @@ class SourceOrchestrator:
                     limit=limit,
                 )
                 source_stats[source_name] = {
-                    "status": status,
+                    "status": _normalize_status(status),
                     "results": len(companies),
                     "metadata": meta,
                 }
@@ -188,14 +207,23 @@ class SourceOrchestrator:
         ):
             data_source = "fixture"
             parts = [
-                f"{k}: {v.get('status', 'unknown').value}"
+                _source_label(k, v)
                 for k, v in source_stats.items()
                 if k != "fixture_bridge"
             ]
             fallback_reason = "; ".join(parts) or "no_live_providers_configured"
         else:
             data_source = "empty"
-            fallback_reason = "no_sources_registered"
+            # Honest per-source breakdown (CLAUDE.md §5/§6): when no fixture
+            # bridge is registered the only fallback is the truth about what
+            # each source returned.  ``no_sources_registered`` was misleading
+            # when providers WERE registered but every one of them errored or
+            # returned empty — callers need the per-source status to diagnose.
+            parts = [
+                _source_label(k, v)
+                for k, v in source_stats.items()
+            ]
+            fallback_reason = "; ".join(parts) or "no_sources_configured"
 
         metadata: dict[str, Any] = {
             "data_source": data_source,
@@ -270,9 +298,9 @@ class SourceOrchestrator:
                 count_str = "0 companies"
             else:
                 stats = source_stats.get(name, {})
-                status = stats.get("status", SourceStatus.EMPTY)
+                status = stats.get("status", "empty")
                 count = stats.get("results", 0)
-                status_str = status.value.upper().ljust(12)
+                status_str = _normalize_status(status).upper().ljust(12)
                 count_str = f"{count} companies"
             lines.append(f"  {name:<{max_name_len}}  {status_str}  ({count_str})")
 

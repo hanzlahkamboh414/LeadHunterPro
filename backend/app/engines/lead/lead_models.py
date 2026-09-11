@@ -65,6 +65,8 @@ ROLE_RELEVANCE_KEYWORDS = (
     "chief executive",
     "chief operating",
     "chief financial",
+    "managing partner",
+    "managing member",
     "vice president",
     "operations manager",
     "ops manager",
@@ -75,6 +77,8 @@ ROLE_RELEVANCE_KEYWORDS = (
     "director of",
     "president",
     "principal",
+    "partner",
+    "leadership",
     "founder",
     "owner",
 )

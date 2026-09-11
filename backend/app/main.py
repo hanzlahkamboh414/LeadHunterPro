@@ -27,6 +27,16 @@ async def lifespan(app: FastAPI):
             logger.warning("stale in-flight jobs marked failed at boot: %d", recovered)
     except Exception:  # noqa: BLE001 - boot must survive a failed sweep
         logger.exception("recover_orphans failed at boot — continuing")
+
+    # Seed the admin user on first boot (idempotent).
+    try:
+        from app.auth.models import UserStore
+        store = UserStore()
+        admin = store.ensure_admin()
+        logger.info("Admin user ready: %s (id=%s)", admin.username, admin.id)
+    except Exception:  # noqa: BLE001 — auth failure must never block startup
+        logger.exception("admin seed failed — continuing without auth")
+
     # The sweep is the startup block; yield hands control to the app until it
     # shuts down (no shutdown work needed — an orphaned job is exactly the
     # other process's business, the next boot sweeps it).

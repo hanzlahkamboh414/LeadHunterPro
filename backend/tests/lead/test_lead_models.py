@@ -132,6 +132,35 @@ class TestRoleRelevance:
         ):
             assert role_is_plausibly_relevant(role) is True, role
 
+    def test_decision_maker_partner_roles_recognized(self):
+        """Managing partners/members and leadership-team members are the
+        DECISION-MAKERS this product's hunt targets — they must not be buried
+        in nurture. Real examples seen live: "Managing Partner / Leadership
+        Team Member" and "Managing Member" scored 8.0 yet slipped through the
+        old keyword list."""
+        for role in (
+            "Managing Partner",
+            "Managing Member",
+            "Managing Partner / Leadership Team Member",
+            "Partner",
+            "Director of Operations",
+            "Leadership Team Member",
+        ):
+            assert role_is_plausibly_relevant(role) is True, role
+
+    def test_functional_director_roles_stay_irrelevant(self):
+        """Bare "director" is deliberately NOT a keyword — "Marketing Director"
+        / "Sales Director" head an internal function, they don't decide to BUY
+        estimation services (the pre-existing pin: "Marketing is a ROLE_MODIFIER,
+        not a title keyword"). Only "director of" (an operational area) counts."""
+        for role in (
+            "Marketing Director",
+            "Sales Director",
+            "Director",
+            "Executive Director",
+        ):
+            assert role_is_plausibly_relevant(role) is False, role
+
     def test_irrelevant_roles_are_rejected(self):
         """Estimators, procurement and purchasing DO estimation in-house —
         they are the competitor, not the buyer — so they never qualify as a

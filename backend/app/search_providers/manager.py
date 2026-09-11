@@ -7,6 +7,7 @@ falling back to the next provider when one fails or returns no results.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import time
 from typing import Any
@@ -80,9 +81,22 @@ class SearchProviderManager:
             provider_start = time.monotonic()
 
             try:
+                # Timeout design: providers carry their OWN aiohttp
+                # ClientTimeout — an internal timeout that raises INSIDE the
+                # request, is translated to an honest error response, and
+                # leaves the session connector healthy. The manager gate must
+                # therefore be a BACKSTOP with a grace margin, never a cancel
+                # that lands at the same instant: cancelling a real request
+                # mid-flight races aiohttp's own timeout and can leave the
+                # provider's SHARED lazy session half-closed, so the NEXT
+                # query reuses a broken connector (aiohttp "Connector is
+                # closed"). Test/fake providers with no internal timeout are
+                # still caught by the backstop.
+                timeout_s = getattr(provider, "timeout_s", 10.0)
+                backstop = timeout_s + max(timeout_s * 0.1, 0.25)
                 response = await asyncio.wait_for(
                     asyncio.ensure_future(provider.search(query)),
-                    timeout=getattr(provider, "timeout_s", 10.0),
+                    timeout=backstop,
                 )
                 provider_elapsed = (time.monotonic() - provider_start) * 1000
 
@@ -94,7 +108,15 @@ class SearchProviderManager:
                 }
 
                 if response.status == "success" and response.results:
-                    all_results.extend(response.results)
+                    # Stamp the PRODUCING provider on every result. Provider
+                    # identity is known HERE and lost the moment results are
+                    # merged — this one line is the attribution point provider-
+                    # yield learning reads (a merged, unstamped result could
+                    # never be traced back to Tavily vs SearXNG vs Brave).
+                    for r in response.results:
+                        all_results.append(
+                            dataclasses.replace(r, provider=provider.provider_name)
+                        )
                     logger.info(
                         "Provider %s returned %d results in %.1fms",
                         provider.provider_name,

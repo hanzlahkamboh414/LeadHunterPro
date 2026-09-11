@@ -95,6 +95,7 @@ from app.engines.lead.lead_models import (
     is_generic_email_local_part,
 )
 from app.engines.phone_engine import PHONE_PATTERN
+from app.engines.verification.location_verifier import _extract_mentions
 
 logger = logging.getLogger(__name__)
 
@@ -321,6 +322,11 @@ class PlanHolderParseReport:
     rows_rejected: int = 0
     emails_in_document: int = 0
     emails_captured: int = 0
+    #: Distinct US state CODES (2-letter) the document text explicitly names —
+    #: computed once here so the plan-holder SOURCE can gate parsed documents by
+    #: query region (a document that names a non-target state is evidence the
+    #: list is out-of-region). Empty when the document names no state at all.
+    state_codes: list[str] = field(default_factory=list)
     coverage_ratio: float = 0.0
     #: Phone equivalents of the email coverage fields. Measured with
     #: ``PHONE_AUDIT_PATTERN``, NOT with the extractor's own regex, so that an
@@ -352,6 +358,7 @@ class PlanHolderParseReport:
             "rows_rejected": self.rows_rejected,
             "emails_in_document": self.emails_in_document,
             "emails_captured": self.emails_captured,
+            "state_codes": list(self.state_codes),
             "coverage_ratio": round(self.coverage_ratio, 4),
             "phones_in_document": self.phones_in_document,
             "phones_captured": self.phones_captured,
@@ -420,6 +427,12 @@ class PdfPlanHolderParser:
         )
         document_phones = self._document_phones(full_text)
         report.phones_in_document = len(document_phones)
+        # Expose the US states this document names (if any) so the source can
+        # gate parsed rows by query region. Reuses the shared mention extractor,
+        # so the source and this report always agree on what counts (§14).
+        report.state_codes = sorted({
+            code for _, code in _extract_mentions(full_text)[0] if code
+        })
 
         if report.pages and report.text_chars < MIN_TEXT_CHARS_PER_PAGE * report.pages:
             report.parse_status = STATUS_NEEDS_OCR

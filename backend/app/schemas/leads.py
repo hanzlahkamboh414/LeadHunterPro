@@ -41,6 +41,12 @@ class JobOut(BaseModel):
     created_at: str
     updated_at: str
     elapsed_s: float = 0.0
+    # Run outcome (H1): honest delivery vs target. Defaults keep pre-H1 payloads
+    # valid on the client.
+    working_leads: int = 0
+    leads_found: int = 0
+    shortfall: int = 0
+    shortfall_reason: str = ""
 
 
 class JobSummary(BaseModel):
@@ -53,6 +59,10 @@ class JobSummary(BaseModel):
     created_at: str
     updated_at: str
     elapsed_s: float = 0.0
+    working_leads: int = 0
+    leads_found: int = 0
+    shortfall: int = 0
+    shortfall_reason: str = ""
 
 
 class LeadSummary(BaseModel):

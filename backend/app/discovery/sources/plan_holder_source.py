@@ -64,7 +64,13 @@ from app.discovery.pdf_plan_holder_parser import (
 )
 from app.discovery.sources.base_source import BaseSource
 from app.discovery.sources.status import SourceStatus
+from app.discovery.yield_learning import segment_key
 from app.email.email_cleaner import is_free_mail_domain
+from app.engines.verification.location_verifier import (
+    _US_STATES,
+    _extract_mentions,
+    _parse_target,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +133,102 @@ def _host(url: str) -> str:
         return ""
 
 
+def _result_text(result: Any) -> str:
+    """Title + snippet of a search result, as one text blob for the location gate.
+
+    The gate reasons about a PDF WITHOUT fetching it: the search engine's own
+    snippet usually names the state a document covers (its title is often the
+    agency/dot name, its snippet often "…North Carolina DOT…"). Falling back to
+    the bare snippet when there is no title keeps the url-only fakes green.
+    """
+    title = getattr(result, "title", "") or ""
+    snippet = getattr(result, "snippet", "") or ""
+    return f"{title}\n{snippet}".strip()
+
+
+def _order_by_location(
+    pdf_urls: list[str],
+    candidate_text: dict[str, str],
+    target_state: str | None,
+) -> tuple[list[str], int]:
+    """Gate candidate plan-holder PDFs by query region BEFORE fetch/parse.
+
+    Location Fix (Phase D): a plan-holder PDF for a DIFFERENT state leaks
+    nationwide junk (NYC/ND/KS/IN/FL/MD/IL/OK DOT lists) and out-of-region
+    agencies (S.Carolina DOT) into a Houston run — a credit burn plus a
+    relevance failure. This reuses the deterministic ``location_verifier``
+    state extractor on each candidate's search title/snippet:
+
+      rank 2 — snippet names the target state  -> KEEP, dispatch first
+      rank 0 — snippet names a DIFFERENT state -> out-of-region, DROP
+      rank 1 — no state signal                -> KEEP (conservative: never
+               reject without evidence)
+
+    A snippet naming BOTH the target and another state stays rank 2 (only a
+    set of states WITHOUT the target drops). The query has no parseable state
+    (e.g. a bare city) -> nothing is rejected. On-target PDFs are ordered
+    before neutral ones so MAX_PDFS favours in-region leads.
+
+    Returns (kept_urls, dropped_count). dropped_count is surfaced in metadata
+    (CLAUDE.md §6 — never silent).
+    """
+    if not target_state or not pdf_urls:
+        return pdf_urls, 0
+    # ``location_verifier._extract_mentions`` deliberately reads a state CODE
+    # only in comma-form ("Dallas, TX") — a bare code is ambiguous for
+    # VERIFYING where a company is. A document-REGION gate is different: we
+    # know the one target we care about, so scanning specifically for THAT bare
+    # uppercase code (e.g. ``\\bTX\\b``) is safe and closes the gap that made a
+    # "Houston TX project bidders" snippet register nothing.
+    target_code_re = re.compile(rf"\b{re.escape(target_state)}\b")
+    target_name_re = re.compile(
+        rf"\b{re.escape(_US_STATES.get(target_state, target_state))}\b",
+        re.IGNORECASE,
+    )
+    scored: list[tuple[int, str]] = []
+    for url in pdf_urls:
+        text = (candidate_text.get(url) or "").strip()
+        rank = 1  # no signal -> keep (conservative)
+        if text:
+            mentions, _rejected = _extract_mentions(text)
+            states = {s for _, s in mentions if s}
+            mentions_target = (
+                target_state in states
+                or bool(target_code_re.search(text))
+                or bool(target_name_re.search(text))
+            )
+            mentions_other = any(s != target_state for s in states)
+            if mentions_target:
+                rank = 2  # in-region -> keep, dispatch first
+            elif mentions_other:
+                rank = 0  # names a different state -> out-of-region junk
+        scored.append((rank, url))
+    scored.sort(key=lambda item: -item[0])  # stable: order preserved within rank
+    kept = [url for rank, url in scored if rank > 0]
+    return kept, len(scored) - len(kept)
+
+
+def _content_out_of_region(state_codes: list[str], target_state: str | None) -> bool:
+    """Gate a PARSED document's rows against the query region.
+
+    The snippet gate (:func:`_order_by_location`) reads only search-result title
+    + snippet, which often lacks the state name altogether (a nationwide bid
+    list's snippet is "Plan holders for General Contractors", no state). This
+    content gate reads the document's OWN parsed text via the state codes the
+    parser exposed, so a list whose body names a non-target state — Clark County
+    *Washington*, *New York City* DCAS, a South Dakota newspaper — is caught even
+    when its snippet was silent.
+
+    Rule (conservative, never false-drops an in-region list): out-of-region ONLY
+    when the document names at least one state AND none of them is the target.
+    A document the extractor reads as location-silent names no state -> kept.
+    A document naming Texas/TX for a ``San Antonio TX`` query -> kept.
+    """
+    if not target_state or not state_codes:
+        return False
+    return target_state not in set(state_codes)
+
+
 class PlanHolderSource(BaseSource):
     """Find plan-holder PDFs live and feed their rows into discovery.
 
@@ -151,6 +253,8 @@ class PlanHolderSource(BaseSource):
         fetch: Callable[[str], bytes | None] | None = None,
         parser: PdfPlanHolderParser | None = None,
         dork_templates: tuple[str, ...] | None = None,
+        yield_store: Any | None = None,
+        candidate_store: Any | None = None,
     ) -> None:
         """Configure the source.
 
@@ -162,6 +266,17 @@ class PlanHolderSource(BaseSource):
             parser: PDF -> rows. Defaults to a real :class:`PdfPlanHolderParser`.
             dork_templates: Dork templates (``{industry}``/``{location}``
                 placeholders). Defaults to the validated plan-holder set.
+            yield_store: OPTIONAL :class:`~app.discovery.yield_learning.
+                DiscoveryYieldStore` for the Layer-1 dork-yield loop (Phase G).
+                When present, a dork template already proven (MIN_TRIALS
+                dispatches, zero working leads) is NOT dispatched, and every
+                actually-dispatched dork records a trial. Companies carry the
+                producing dork's label so research can credit ``working``.
+            candidate_store: OPTIONAL :class:`~app.discovery.template_candidates.
+                TemplateCandidateStore` for Phase H. When present (with a
+                ``yield_store``), LLM-GENERATED dork templates that have not
+                been proven dead join the dispatch set after the static dorks —
+                the add-side of the self-learning loop.
         """
         self._search = search
         self._fetch = fetch
@@ -169,6 +284,16 @@ class PlanHolderSource(BaseSource):
         self._dork_templates = (
             dork_templates if dork_templates is not None else _DORK_TEMPLATES
         )
+        self._yield_store = yield_store
+        self._candidate_store = candidate_store
+        # Per-call search diagnostics: provider failures surfaced by the lazy
+        # default search, reset at the top of every discover() so a stale
+        # failure from an earlier pass never leaks into a later one.
+        self._last_search_errors: list[str] = []
+        # Per-call candidate text (title+snippet per PDF URL) threaded from the
+        # search into _discover for the Location-Fix gate — filled by whichever
+        # search path ran (seam or default), read once after _search_pdfs.
+        self._last_candidate_text: dict[str, str] = {}
 
     # -- BaseSource -------------------------------------------------------
 
@@ -192,11 +317,16 @@ class PlanHolderSource(BaseSource):
 
         Never raises: an unexpected error is returned as ``ERROR`` so the
         orchestrator can continue with the next source (orchestrator contract).
+
+        Phase I: the (industry, location) pair is normalized into a SEGMENT
+        (``segment_key``) and threaded through dispatch + yield credit, so the
+        learned gates act per (trade, location) instead of globally.
         """
         try:
             return self._discover(
                 industry=industry, location=location, limit=limit,
                 skip_pdfs=skip_pdfs,
+                segment=segment_key(industry, location),
             )
         except Exception as exc:  # noqa: BLE001 — never propagate to orchestrator
             logger.exception("PlanHolderSource: unexpected error")
@@ -212,6 +342,7 @@ class PlanHolderSource(BaseSource):
         location: str,
         limit: int,
         skip_pdfs: set[str] | None = None,
+        segment: str = "",
     ) -> tuple[SourceStatus, list[dict[str, Any]], dict[str, Any]]:
         if limit <= 0:
             return SourceStatus.EMPTY, [], {
@@ -219,17 +350,64 @@ class PlanHolderSource(BaseSource):
                 "reason": "limit_zero",
             }
 
+        # Reset per-call search diagnostics BEFORE the search so a stale
+        # failure from a previous pass never leaks into this one.
+        self._last_search_errors: list[str] = []
         skip = set(skip_pdfs or ())
-        dorks = self._build_dorks(industry, location)
-        pdf_urls = self._search_pdfs(dorks, skip=skip)
+        dork_pairs = self._build_dork_pairs(industry, location, segment)
+        dorks = [d for _, d in dork_pairs]
+        # (pdf_urls, url_to_dork): the second maps each surfaced PDF back to the
+        # dork TEMPLATE that produced it, so every company record can carry its
+        # producing dork for Layer-1 yield attribution (Phase G). ``segment``
+        # (the normalized trade|location) is threaded into the yield gate so a
+        # dork proven dead FOR THIS SEGMENT is not dispatched here (Phase I).
+        pdf_urls, url_to_dork = self._search_pdfs(dork_pairs, skip=skip, segment=segment)
+        search_errors = list(self._last_search_errors)
         if not pdf_urls:
             # CLAUDE.md §5: never go silent about WHY live discovery failed.
-            # ``no_unseen_pdfs`` distinguishes real exhaustion (every surfaced
-            # PDF already parsed) from an empty first search.
+            # A URL-less pass is NOT automatically "no results": when every
+            # dork search ERRORED (provider down / quota-exhausted), the honest
+            # status is UNAVAILABLE with the exact provider errors — not a
+            # quiet "no_pdf_results" that reads as "nothing exists on the web"
+            # (§12: hidden fallback / silent failure is forbidden). ``no_unseen_pdfs``
+            # distinguishes real exhaustion (every surfaced PDF already parsed)
+            # from an honestly-empty first search.
+            if search_errors:
+                return SourceStatus.UNAVAILABLE, [], {
+                    "source": self.source_name,
+                    "reason": "search_failed",
+                    "search_errors": search_errors,
+                    "dorks": dorks,
+                    "industry": industry,
+                    "location": location,
+                }
             return SourceStatus.EMPTY, [], {
                 "source": self.source_name,
                 "reason": "no_unseen_pdfs" if skip else "no_pdf_results",
+                "search_errors": search_errors,
                 "pdfs_already_parsed": len(skip),
+                "dorks": dorks,
+                "industry": industry,
+                "location": location,
+            }
+
+        # Location Fix (Phase D): gate candidate PDFs by query region BEFORE any
+        # fetch/parse. Rank-0 (names a different state) documents are dropped
+        # and on-target docs ordered first, so MAX_PDFS favours in-region leads
+        # instead of spending fetch+parse credits on nationwide junk. Nothing
+        # knows the target state (bare-city query) -> all kept, no risk.
+        raw_pdf_urls = pdf_urls
+        _candidate_city, target_state = _parse_target(location)
+        pdf_urls, location_dropped = _order_by_location(
+            raw_pdf_urls, (self._last_candidate_text or {}), target_state,
+        )
+        if not pdf_urls:
+            return SourceStatus.EMPTY, [], {
+                "source": self.source_name,
+                "reason": "all_pdfs_out_of_region",
+                "pdfs_found": len(raw_pdf_urls),
+                "pdfs_location_dropped": location_dropped,
+                "target_state": target_state,
                 "dorks": dorks,
                 "industry": industry,
                 "location": location,
@@ -240,6 +418,19 @@ class PlanHolderSource(BaseSource):
         fetch_failures = 0
         fetched = 0
         parse_unreadable = 0
+        # Galti #2 relevance gate: rows with NO email. A plan-holder row with an
+        # email is a contactable company; one without (phone/company-only from a
+        # giant spec, RFP attachment, council agenda or newsletter) cannot clear
+        # the qualification gate — researching it guarantees a skip and spends
+        # credits. Every real list we parse (hrgreen, SCDOT, BSE, RCTLMA) emits
+        # email-carrying rows, so this drops only noise. Counted, never silent.
+        email_less = 0
+        # Content-level location gate (Phase D, content pass): an in-region
+        # snippet can STILL be a nationwide list, so after parse we re-gate by
+        # the states the document's own text names. Same conservative rule as
+        # the snippet gate — drop ONLY a document that explicitly names a
+        # non-target state; a location-silent document is kept (no false drops).
+        content_dropped = 0
 
         # Fetch the working set concurrently (bounded workers) so a pass costs
         # ~one slow-PDF latency instead of the sum of every PDF's timeout.
@@ -253,7 +444,12 @@ class PlanHolderSource(BaseSource):
             fetched += 1
             result = self._parser.parse(data, source_url=url)
             if result.rows:
-                rows.extend(result.rows)
+                if _content_out_of_region(result.report.state_codes, target_state):
+                    content_dropped += 1
+                    continue
+                kept = [r for r in result.rows if r.emails]
+                email_less += len(result.rows) - len(kept)
+                rows.extend(kept)
             else:
                 # A reachable PDF with no usable rows is not a fetch failure —
                 # it is a layout/scan mismatch we cannot extract from yet.
@@ -271,14 +467,20 @@ class PlanHolderSource(BaseSource):
                 "dorks": dorks,
             }
 
-        records = self._dedup([self._to_company_record(r) for r in rows])
+        records = self._dedup([
+            self._to_company_record(r, discovery_dork=url_to_dork.get(r.source_url, ""))
+            for r in rows
+        ])
         if not records:
             return SourceStatus.EMPTY, [], {
                 "source": self.source_name,
                 "reason": "no_rows_in_pdfs",
                 "pdfs_found": len(pdf_urls),
+                "pdfs_location_dropped": location_dropped,
                 "pdfs_fetched": fetched,
                 "pdfs_unreadable": parse_unreadable,
+                "pdfs_content_dropped": content_dropped,
+                "target_state": target_state,
                 "rows_raw": len(rows),
             }
 
@@ -288,27 +490,35 @@ class PlanHolderSource(BaseSource):
             "status": SourceStatus.SUCCESS,
             "dorks": dorks,
             "pdf_urls": pdf_urls,
-            "pdfs_found": len(pdf_urls),
+            "pdfs_found": len(raw_pdf_urls),
+            "pdfs_location_dropped": location_dropped,
+            "target_state": target_state,
             "pdfs_skipped": len(skip),
             "pdfs_fetched": fetched,
             "pdfs_failed": fetch_failures,
             "pdfs_unreadable": parse_unreadable,
+            "pdfs_content_dropped": content_dropped,
             "rows_raw": len(rows),
+            "rows_email_less_dropped": email_less,
             "rows_emitted": len(records),
             "industry": industry,
             "location": location,
             "limit": limit,
         }
         logger.info(
-            "PlanHolderSource: %s — %d rows from %d PDFs (%d found, %d fetched, "
-            "%d failed, %d unreadable)",
+            "PlanHolderSource: %s — %d rows from %d PDFs (%d found, %d "
+            "location-dropped, %d content-dropped, %d fetched, %d failed, %d "
+            "unreadable, %d email-less dropped)",
             SourceStatus.SUCCESS.value,
             len(records),
             len(rows),
-            len(pdf_urls),
+            len(raw_pdf_urls),
+            location_dropped,
+            content_dropped,
             fetched,
             fetch_failures,
             parse_unreadable,
+            email_less,
         )
         return SourceStatus.SUCCESS, records[:limit], metadata
 
@@ -334,37 +544,96 @@ class PlanHolderSource(BaseSource):
 
     # -- dork + search ----------------------------------------------------
 
-    def _build_dorks(self, industry: str, location: str) -> list[str]:
-        """Expand the dork templates with the query terms, deduplicated."""
+    def _effective_dork_templates(self, segment: str = "") -> tuple[str, ...]:
+        """Static dorks + LLM-generated candidates not proven dead (Phase H).
+
+        ``candidate_store.effective_dorks(yield_store, segment)`` returns the
+        dispatch-eligible generated patterns; the yield store is the single
+        source of truth (a candidate dispatches unless proven dead FOR THE
+        SEGMENT). Without a candidate store the set is exactly the static dorks
+        — the pre-Phase-H behavior, untouched.
+        """
+        if self._candidate_store is None:
+            return self._dork_templates
+        try:
+            generated = self._candidate_store.effective_dorks(
+                self._yield_store, segment=segment,
+            ) or ()
+        except Exception:  # noqa: BLE001 — a broken candidate store must never
+            logger.warning("PlanHolderSource: candidate store unavailable", exc_info=True)
+            return self._dork_templates
+        # Dedup against statics (a candidate can never shadow a known dork).
+        known = set(self._dork_templates)
+        added = tuple(g for g in generated if g not in known)
+        if added:
+            logger.info(
+                "PlanHolderSource: dispatching %d generated dork(s) after statics",
+                len(added),
+            )
+        return self._dork_templates + added
+
+    def _build_dork_pairs(
+        self, industry: str, location: str, segment: str = "",
+    ) -> list[tuple[str, str]]:
+        """Expand the dork templates into ``(template_label, filled_dork)`` pairs.
+
+        The LABEL is the raw template (with ``{industry}``/``{location}``
+        placeholders) — the STABLE learning key for Phase G yield, so a dork's
+        yield is measured across every query, never per concrete spelling.
+        ``segment`` (Phase I) is the normalized trade|location the running
+        query belongs to; it gates which candidate dorks dispatch.
+        """
         industry = (industry or "").strip()
         location = (location or "").strip()
-        dorks: list[str] = []
-        for template in self._dork_templates:
+        pairs: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for template in self._effective_dork_templates(segment):
             text = template.format(industry=industry, location=location)
             text = re.sub(r"\s+", " ", text).strip()
-            if text and text not in dorks:
-                dorks.append(text)
-        return dorks
+            if text and text not in seen:
+                seen.add(text)
+                pairs.append((template, text))
+        return pairs
 
-    def _search_pdfs(self, dorks: list[str], *, skip: set[str] | None = None) -> list[str]:
+    def _build_dorks(self, industry: str, location: str) -> list[str]:
+        """Expand the dork templates with the query terms, deduplicated."""
+        return [d for _, d in self._build_dork_pairs(industry, location)]
+
+    def _search_pdfs(
+        self, dork_pairs: list[tuple[str, str]], *, skip: set[str] | None = None,
+        segment: str = "",
+    ) -> tuple[list[str], dict[str, str]]:
         """Run the dorks and post-filter to .pdf URLs, preserving order.
 
-        A semantic engine (Tavily) ignores ``filetype:pdf``, so the filter is
-        applied to the returned URLs here — the validated lesson of the dork
-        probe (pdf_ratio tells the engine apart, it is not a result filter).
-        ``skip`` (source_urls already parsed in this run) is honoured so a pass
-        only collects documents that can actually ADVANCE discovery.
+        Returns ``(pdf_urls, url_to_dork)``. A semantic engine (Tavily) ignores
+        ``filetype:pdf``, so the filter is applied to the returned URLs here —
+        the validated lesson of the dork probe. ``skip`` (source_urls already
+        parsed in this run) is honoured so a pass only collects documents that
+        can actually ADVANCE discovery.
 
-        The injected ``_search`` seam keeps its all-dorks-at-once contract.
-        The default live path is lazy: dorks run one at a time and stop as soon
-        as MAX_PDFS unseen PDF URLs are collected, so a dork that already
-        surfaces enough PDFs does not spend extra search credits on the
-        remaining dorks.
+        ``segment`` (Phase I) is the normalized ``segment_key`` of the running
+        query; it flows to the yield gate so a dork dead for one segment still
+        dispatches for another.
+
+        The injected ``_search`` seam keeps its all-dorks-at-once contract, but
+        returns no per-dork signal — its ``url_to_dork`` is empty (no yield
+        attribution, silence not evidence). The default live path is lazy: dorks
+        run one at a time and stop as soon as MAX_PDFS unseen PDF URLs are
+        collected, so a dork that already surfaces enough PDFs does not spend
+        extra search credits on the remaining dorks.
         """
         if self._search:
-            results = self._search(dorks)
-            return self._filter_pdfs(results, skip=skip)
-        return self._default_search_pdfs(dorks, skip=skip)
+            results = self._search([d for _, d in dork_pairs])
+            # Stash each surfaced PDF's title+snippet so _discover can gate by
+            # location without re-fetching. Extra keys (non-PDF / already-seen)
+            # are harmless: _order_by_location only looks up URLs actually kept.
+            self._last_candidate_text = {
+                url: _result_text(r)
+                for r in results
+                if (url := getattr(r, "url", "")) and _is_pdf(url)
+            }
+            return self._filter_pdfs(results, skip=skip), {}
+        return self._default_search_pdfs(dork_pairs, skip=skip, segment=segment)
 
     @staticmethod
     def _filter_pdfs(results: list[Any], *, skip: set[str] | None = None) -> list[str]:
@@ -382,8 +651,9 @@ class PlanHolderSource(BaseSource):
         return urls
 
     def _default_search_pdfs(
-        self, dorks: list[str], *, skip: set[str] | None = None
-    ) -> list[str]:
+        self, dork_pairs: list[tuple[str, str]], *, skip: set[str] | None = None,
+        segment: str = "",
+    ) -> tuple[list[str], dict[str, str]]:
         """Run the dorks lazily through the search manager in ONE event loop.
 
         Imported here, not at module scope, to avoid an import cycle with the
@@ -400,6 +670,13 @@ class PlanHolderSource(BaseSource):
         soon as MAX_PDFS *unseen* PDF URLs are collected — a pass stops
         spending search credits once it has enough PDFs to fetch (CLAUDE.md §4:
         discovery must not burn a provider budget it does not need).
+
+        Phase G yield loop: with a ``yield_store`` present, a dork template
+        already proven (MIN_TRIALS dispatches, zero working leads) is SKIPPED
+        before its search — no credit spent on a dead dork — and every dork
+        actually dispatched records a trial. The returned ``url_to_dork`` maps
+        each surfaced PDF to the dork template that produced it for yield
+        attribution.
         """
         from app.search_providers.manager import SearchProviderManager
         from app.search_providers.models import SearchQuery
@@ -408,15 +685,50 @@ class PlanHolderSource(BaseSource):
         manager = SearchProviderManager()
         seen: set[str] = set(skip or ())
         urls: list[str] = []
+        url_to_dork: dict[str, str] = {}
+        candidate_text: dict[str, str] = {}
 
         async def _run_all() -> None:
             try:
-                for dork in dorks:
+                for label, dork in dork_pairs:
                     if len(urls) >= MAX_PDFS:
                         break
+                    # Learned-dork gate (Phase G + I): a template with MIN_TRIALS
+                    # dispatches and zero working leads is dropped BEFORE its
+                    # search is issued — the whole point is to stop spending a
+                    # provider credit on it. Default-keep until enough data. The
+                    # gate is SEGMENT-aware: a dork dead for this (trade,
+                    # location) segment is skipped here while still dispatching
+                    # where it earns working leads (global-drop still wins).
+                    if self._yield_store is not None and self._yield_store.should_skip(label, segment):
+                        logger.info(
+                            "PlanHolderSource: dork template learned dead, "
+                            "skipping dispatch: %r", label[:70],
+                        )
+                        continue
                     response = await manager.search(
                         SearchQuery(keywords=dork, num_results=RESULTS_PER_DORK)
                     )
+                    # Dispatch credited at issue time, never backfilled (P-D);
+                    # the trial lands on the (template, segment) row.
+                    if self._yield_store is not None:
+                        self._yield_store.record_dispatch(label, segment)
+                    # Surface search provider failures immediately so the
+                    # caller knows WHY zero PDFs were found (CLAUDE.md §5/§6).
+                    # ``getattr`` keeps the injected-seam fakes (which expose
+                    # only ``results``) working unchanged.
+                    status = getattr(response, "status", "success")
+                    if status == "error":
+                        error = getattr(response, "error", "") or ""
+                        if error:
+                            self._last_search_errors.append(
+                                f"search({dork[:60]}…): {error}"
+                            )
+                            logger.warning(
+                                "PlanHolderSource: dork search failed: %s — %s",
+                                dork,
+                                error,
+                            )
                     for result in response.results:
                         url = getattr(result, "url", None) or ""
                         if not url or not _is_pdf(url):
@@ -425,6 +737,8 @@ class PlanHolderSource(BaseSource):
                             continue
                         seen.add(url)
                         urls.append(url)
+                        url_to_dork[url] = label
+                        candidate_text[url] = _result_text(result)
                         if len(urls) >= MAX_PDFS:
                             break
             finally:
@@ -437,7 +751,8 @@ class PlanHolderSource(BaseSource):
                             pass
 
         asyncio.run(_run_all())
-        return urls
+        self._last_candidate_text = candidate_text
+        return urls, url_to_dork
 
     # -- fetch + parse ----------------------------------------------------
 
@@ -480,7 +795,7 @@ class PlanHolderSource(BaseSource):
 
     # -- row -> company record ---------------------------------------------
 
-    def _to_company_record(self, row: PlanHolderRow) -> dict[str, Any]:
+    def _to_company_record(self, row: PlanHolderRow, *, discovery_dork: str = "") -> dict[str, Any]:
         """Project one plan-holder row onto the source company schema.
 
         The connector's step-3 filters and ``_normalize_company`` adapter
@@ -489,6 +804,11 @@ class PlanHolderSource(BaseSource):
         The plan-holder person/emails/phones/date ride in ``metadata["plan_holder"]``
         so a later increment (Inc 3) can bridge the pre-bound person into the
         LeadPipeline without re-crawling the site — and so nothing is lost here.
+
+        ``discovery_dork`` (Phase G) is the dork TEMPLATE that surfaced this
+        row's PDF, carried as ``_discovery_dork`` so the pipeline can attribute
+        a future WORKING lead back to the dork that produced it. Empty for rows
+        whose PDF had no attributable dork (e.g. the injected search seam).
         """
         emails = [
             {"email": e.email, "tier": e.tier.value, "source_url": e.source_url}
@@ -526,6 +846,9 @@ class PlanHolderSource(BaseSource):
             # (AcceptanceGate-verified company) stays unsatisfied until a later
             # stage verifies the company.
             "gate_accepted": False,
+            # Layer-1 yield attribution (Phase G): the dork TEMPLATE that
+            # surfaced this company's PDF. "" when unattributable.
+            "_discovery_dork": discovery_dork,
             "plan_holder": {
                 "person": person,
                 "emails": emails,

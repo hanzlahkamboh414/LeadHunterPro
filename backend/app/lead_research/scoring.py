@@ -107,6 +107,13 @@ class LeadScorer:
             signals.append(("reachable person", 1.5))
         if person.name and person.role_relevance:
             signals.append(("relevant role", 1.0))
+        # Generic email backstop: a real-domain info@/admin@ address that
+        # passed company research (Stage 1) but skipped person research is
+        # still a valid construction company worth keeping for outreach.
+        # Without this signal, the unbound person caps the score at 2.5
+        # (construction 2.0 + facts 0.5), missing the 3.0 nurture threshold.
+        elif company.name and not person.bound and company.industry:
+            signals.append(("generic company contact", 0.5))
 
         # --- Intent signals ---
         if (intent.needs_estimation or "").lower() in ("yes", "likely", "probable"):

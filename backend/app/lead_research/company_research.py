@@ -558,10 +558,16 @@ class CompanyResearcher:
         :func:`_license_region`).
         """
         search_fn = self._get_search()
+        # Confirmed segment for the deep queries (Phase F): the bucket is
+        # deterministic from company text (confirmed_bucket), never the AI
+        # industry label, so deep:license's yield is tracked PER bucket.
+        from app.lead_research.query_learning import confirmed_bucket
+
+        segment = confirmed_bucket(company=company_name, domain=domain)
         search_results = self._gather_search(
             search_fn, "", domain,
             queries=self._deep_queries(domain, location),
-            query_planner=query_planner,
+            query_planner=query_planner, segment=segment,
         )
 
         prompt = deep_research_prompt(
@@ -673,6 +679,7 @@ class CompanyResearcher:
         queries: list[tuple[str, str]] | None = None,
         *,
         query_planner: Any | None = None,
+        segment: str = "",
     ) -> list[dict[str, str]]:
         """Run multiple search queries (CONCURRENTLY) and merge unique results.
 
@@ -703,7 +710,10 @@ class CompanyResearcher:
         # Learn-loop prune: drop templates proven to yield no verified citation
         # (> MIN_TRIALS runs, zero verified). No planner → keep everything.
         if query_planner is not None:
-            pairs = [(q, lbl) for (q, lbl) in pairs if not query_planner.should_skip(lbl)]
+            pairs = [
+                (q, lbl) for (q, lbl) in pairs
+                if not query_planner.should_skip(lbl, segment)
+            ]
 
         if not pairs:
             logger.debug("All search queries pruned by yield loop for %s", domain)
@@ -725,7 +735,7 @@ class CompanyResearcher:
             for lbl, batch in zip(labels, batches):
                 urls = [r.get("url", "") for r in batch if r.get("url")]
                 if query_planner is not None:
-                    query_planner.note(lbl, urls)
+                    query_planner.note(lbl, urls, segment=segment)
                 for r in batch:
                     url = r.get("url", "")
                     if url and url not in seen_urls:
@@ -740,7 +750,7 @@ class CompanyResearcher:
                 logger.debug("Search query %r failed: %s", q, exc)
                 found = []
             if query_planner is not None:
-                query_planner.note(lbl, [r.get("url", "") for r in found if r.get("url")])
+                query_planner.note(lbl, [r.get("url", "") for r in found if r.get("url")], segment=segment)
             return found
 
         with ThreadPoolExecutor(max_workers=_search_workers(len(q_strs))) as ex:

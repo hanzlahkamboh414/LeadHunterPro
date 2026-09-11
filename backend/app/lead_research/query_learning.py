@@ -12,6 +12,24 @@ citations, the template is auto-dropped so no future lead spends a provider
 credit on it. Until a template has enough data it is KEPT (default-keep is the
 safe choice: dropping on one bad run would starve the pipeline).
 
+SEGMENT-LEVEL KEYS (Phase F — the user's "yield ko GLOBAL se SEGMENT-LEVEL pe
+le jao"): a deep template's yield is no longer averaged across every company
+type. "deep:license" can be great for a General Contractor and zero for a
+marine/heavy-civil firm; a single averaged number hides both. So each deep
+template also records a row per CONFIRMED segment (``deep:license`` +
+``segment=GC``), while screening templates stay GLOBAL (their job is identity
+confirmation, not niche yield — the segment is a different model for them).
+
+The segment decision uses a strict hierarchy (Problem 2, mandatory):
+  * a GLOBAL drop is authoritative — never overridden, one-way;
+  * a segment decides for itself only once it has its OWN ``MIN_TRIALS``;
+  * otherwise it falls back to the global decision (KEEP default).
+
+The segment bucket is computed by :func:`confirmed_bucket` from company text
+and the profile's relevance term lists — NEVER from the AI's industry label,
+so a marine firm the AI mislabels "GC" still buckets marine_heavycivil (kills
+the mislabel contamination path, Problem 4/P-C).
+
 Only new dossiers feed the loop (existing dossiers cannot be attributed to a
 template retrospectively), so the first runs simply accumulate — pruning starts
 no earlier than it has evidence for.
@@ -33,6 +51,76 @@ _DEFAULT_DB = os.path.join(os.path.dirname(__file__), "..", "..", "output", "lea
 
 #: Serializes writes across concurrent research threads (LEADS_CONCURRENCY).
 _write_lock = threading.Lock()
+
+
+# ---------------------------------------------------------------------------
+# Confirmed segment buckets (Phase F) — deterministic, NEVER from the AI label
+# ---------------------------------------------------------------------------
+#
+# P-C ("bucket contamination usi mislabel bug se"): the industry_bucket must
+# NOT come from the AI-written industry string. A marine firm the AI mislabels
+# "GC" would otherwise poison the GC segment's yield. So the bucket is derived
+# by :func:`confirmed_bucket` from company/domain/fact TEXT against the same
+# relevance term lists the re-gate uses — one boundary, one source of truth.
+
+#: The three v1 buckets (P-C: keep it a 3-way split, no over-ambition).
+BUCKET_ON_VERTICAL = "on_vertical"
+BUCKET_MARINE_HEAVY = "marine_heavycivil"
+BUCKET_OTHER = "other"
+
+#: Building-trades terms that put a company in the on_vertical bucket. Mirrors
+#: ``_TARGET_TRADE_DEFAULTS`` so the allow-list and the profile stay aligned.
+_ON_VERTICAL_TERMS = (
+    "general contractor", "construction", "subcontractor", "builder",
+    "building", "commercial", "residential", "roofing", "electrical",
+    "plumbing", "hvac", "mechanical", "masonry", "concrete", "framing",
+    "drywall", "painting", "flooring", "glazing", "landscaping",
+    "site work", "demolition", "steel", "structural",
+)
+
+#: Marine / heavy-civil terms — real construction but a DIFFERENT procurement
+#: rhythm from a building GC, so it keeps its OWN yield key (never merge with
+#: on_vertical, else one class's yield masks the other's). Deliberately disjoint
+#: from the profile's off-vertical list (bridge/highway/road stay OFF-vertical
+#: per company_profile — the exclusion check below wins for those).
+_MARINE_HEAVY_CIVIL_TERMS = (
+    "marine", "maritime", "dredg", "harbor", "port", "dock", "pier",
+    "seawall", "heavy civil", "heavy highway", "heavy construction",
+    "mass earthwork", "bulk excavation", "coastal", "shipyard",
+    "lock", "dam", "levee", "channel", "breakwater", "wetland",
+)
+
+
+def confirmed_bucket(*, company: str = "", domain: str = "", facts: str = "") -> str:
+    """Deterministic 3-way segment bucket for a company (P-C).
+
+    Reads ONLY company/domain/fact text against the profile's relevance term
+    lists — the AI's stored ``industry`` label is never consulted, so a marine
+    firm the AI mislabels "GC" still buckets ``marine_heavycivil`` (kills the
+    mislabel contamination path). Order of checks:
+
+    1. an off-vertical / non-client exclusion match  -> ``other`` (not a deep
+       lead at all; bucketed only so nothing leaks into a real bucket)
+    2. a marine / heavy-civil term                    -> ``marine_heavycivil``
+    3. a building-trades (target) term                -> ``on_vertical``
+    4. otherwise                                      -> ``other``
+    """
+    from app.company_profile import get_profile
+
+    prof = get_profile()
+    blob = " ".join([(company or ""), (domain or ""), (facts or "")]).lower()
+    if prof.is_off_vertical(blob) or any(t in blob for t in prof.non_client_terms):
+        return BUCKET_OTHER
+    if any(t in blob for t in _MARINE_HEAVY_CIVIL_TERMS):
+        return BUCKET_MARINE_HEAVY
+    if any(t in blob for t in _ON_VERTICAL_TERMS):
+        return BUCKET_ON_VERTICAL
+    return BUCKET_OTHER
+
+
+#: The compound-key separator between a template and its segment when rows are
+#: keyed in ``all()`` output / logs (e.g. ``deep:license|on_vertical``).
+_SEGMENT_SEP = "|"
 
 
 class QueryYieldStore:
@@ -58,52 +146,77 @@ class QueryYieldStore:
         conn.execute("PRAGMA busy_timeout = 5000")
         return conn
 
+    _SCHEMA = """
+        CREATE TABLE IF NOT EXISTS query_template_yield (
+            template TEXT NOT NULL,
+            segment TEXT NOT NULL DEFAULT '',
+            trials INTEGER NOT NULL DEFAULT 0,
+            cited INTEGER NOT NULL DEFAULT 0,
+            verified INTEGER NOT NULL DEFAULT 0,
+            last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (template, segment)
+        )
+        """
+
     def _init_db(self) -> None:
         os.makedirs(os.path.dirname(self._db_path), exist_ok=True)
         conn = self._conn()
         try:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS query_template_yield (
-                    template TEXT PRIMARY KEY,
-                    trials INTEGER NOT NULL DEFAULT 0,
-                    cited INTEGER NOT NULL DEFAULT 0,
-                    verified INTEGER NOT NULL DEFAULT 0,
-                    last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            conn.execute(self._SCHEMA)
+            # Phase F migration — live DBs predate the segment column and have a
+            # single-column (template) PK. Additive rebuild: every legacy row
+            # becomes the GLOBAL row (segment=''), and the PK widens to
+            # (template, segment). No historical count is lost or misread.
+            pk = [r[1] for r in conn.execute("PRAGMA table_info(query_template_yield)") if r[5] > 0]
+            if pk != ["template", "segment"]:
+                conn.execute("ALTER TABLE query_template_yield RENAME TO _query_template_yield_old")
+                conn.execute(self._SCHEMA)
+                conn.execute(
+                    "INSERT INTO query_template_yield "
+                    "(template, segment, trials, cited, verified, last_seen) "
+                    "SELECT template, '', trials, cited, verified, last_seen "
+                    "FROM _query_template_yield_old"
                 )
-                """
-            )
+                conn.execute("DROP TABLE _query_template_yield_old")
             conn.commit()
         finally:
             conn.close()
 
-    def upsert(self, template: str, *, trials: int = 1, cited: int = 0, verified: int = 0) -> None:
-        """Add one run's outcome to the template's cumulative counts."""
+    def upsert(
+        self, template: str, *, segment: str = "",
+        trials: int = 1, cited: int = 0, verified: int = 0,
+    ) -> None:
+        """Add one run's outcome to the (template, segment) cumulative counts.
+
+        ``segment=""`` is the GLOBAL row (all buckets aggregated); a non-empty
+        segment is one bucket's independent row (deep templates only).
+        """
         with _write_lock:
             conn = self._conn()
             try:
                 conn.execute(
                     """
-                    INSERT INTO query_template_yield (template, trials, cited, verified, last_seen)
-                    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-                    ON CONFLICT(template) DO UPDATE SET
+                    INSERT INTO query_template_yield (template, segment, trials, cited, verified, last_seen)
+                    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(template, segment) DO UPDATE SET
                         trials = trials + excluded.trials,
                         cited = cited + excluded.cited,
                         verified = verified + excluded.verified,
                         last_seen = CURRENT_TIMESTAMP
                     """,
-                    (template, trials, cited, verified),
+                    (template, segment, trials, cited, verified),
                 )
                 conn.commit()
             finally:
                 conn.close()
 
-    def get(self, template: str) -> dict[str, int] | None:
+    def get(self, template: str, segment: str = "") -> dict[str, int] | None:
         conn = self._conn()
         try:
             row = conn.execute(
-                "SELECT trials, cited, verified FROM query_template_yield WHERE template = ?",
-                (template,),
+                "SELECT trials, cited, verified FROM query_template_yield "
+                "WHERE template = ? AND segment = ?",
+                (template, segment),
             ).fetchone()
         finally:
             conn.close()
@@ -115,22 +228,51 @@ class QueryYieldStore:
         conn = self._conn()
         try:
             rows = conn.execute(
-                "SELECT template, trials, cited, verified FROM query_template_yield"
+                "SELECT template, segment, trials, cited, verified FROM query_template_yield"
             ).fetchall()
         finally:
             conn.close()
-        return {r[0]: {"trials": r[1], "cited": r[2], "verified": r[3]} for r in rows}
+        out: dict[str, dict[str, int]] = {}
+        for tpl, seg, trials, cited, verified in rows:
+            key = tpl if not seg else f"{tpl}{_SEGMENT_SEP}{seg}"
+            out[key] = {"trials": trials, "cited": cited, "verified": verified}
+        return out
 
-    def should_skip(self, template: str) -> bool:
-        """True to drop this template on the next run.
+    def should_skip(self, template: str, segment: str = "") -> bool:
+        """True to drop this template+segment on the next run.
 
-        Dropped only when it has enough real trials AND never once produced a
-        verified citation. No record (template never run) → keep.
+        Segment hierarchy (Phase F, Problem 2 — mandatory):
+          * a GLOBAL drop is authoritative — never overridden, one-way (a dead
+            template never costs another 12 trials per bucket to confirm);
+          * a segment decides for itself only once it has its OWN ``MIN_TRIALS``;
+          * otherwise it falls back to the global decision (KEEP default).
+        Dropped only when the deciding row has enough real trials AND never once
+        produced a verified citation. No record → keep.
         """
-        row = self.get(template)
-        if row is None:
-            return False
-        return row["trials"] >= MIN_TRIALS and row["verified"] == 0
+        global_row = self.get(template, "")
+        if global_row is not None and global_row["trials"] >= MIN_TRIALS and global_row["verified"] == 0:
+            return True  # global DROP — authoritative
+        if segment:
+            seg_row = self.get(template, segment)
+            if seg_row is not None and seg_row["trials"] >= MIN_TRIALS:
+                return seg_row["verified"] == 0
+        return False  # global KEEP default
+
+    def delete_template(self, template: str) -> None:
+        """Manual, logged override — kill a template across ALL segments.
+
+        Resurrection is a HUMAN decision only (P-G: never auto-promote). The
+        one-way global drop stays permanent until the user resets it here.
+        """
+        with _write_lock:
+            conn = self._conn()
+            try:
+                conn.execute(
+                    "DELETE FROM query_template_yield WHERE template = ?", (template,)
+                )
+                conn.commit()
+            finally:
+                conn.close()
 
     def reset(self) -> None:
         """Test helper — clear all yield rows."""
@@ -155,24 +297,32 @@ class QueryYieldPlanner:
 
     def __init__(self, store: QueryYieldStore | None = None) -> None:
         self._store = store
-        self._template_urls: dict[str, list[str]] = {}
+        # Keyed by (template, segment): the SEGMENT is captured at issue time
+        # and never rewritten (P-D immutability — a trial is credited to the
+        # label it was dispatched under, even if the commit-time picture differs).
+        self._template_urls: dict[tuple[str, str], list[str]] = {}
 
     @property
     def enabled(self) -> bool:
         return self._store is not None
 
-    def note(self, template: str, urls: list[str]) -> None:
-        """Record the URLs a search template returned for this lead."""
+    def note(self, template: str, urls: list[str], *, segment: str = "") -> None:
+        """Record the URLs a search template returned for this lead.
+
+        ``segment`` is the CONFIRMED bucket the template was dispatched for
+        (issue-time label — immutable). Screening templates pass ``""`` (global);
+        deep templates pass their confirmed bucket.
+        """
         if not template or not urls:
             return
-        seen = self._template_urls.setdefault(template, [])
+        seen = self._template_urls.setdefault((template, segment), [])
         for u in urls:
             if u and u not in seen:
                 seen.append(u)
 
-    def should_skip(self, template: str) -> bool:
-        """Ask the persistent loop whether to drop this template."""
-        return bool(self._store) and self._store.should_skip(template)
+    def should_skip(self, template: str, segment: str = "") -> bool:
+        """Ask the persistent loop whether to drop this template+segment."""
+        return bool(self._store) and self._store.should_skip(template, segment)
 
     def commit(self, cited_urls: set[str], verified_urls: set[str]) -> None:
         """Persist every observed template's yield against the dossier evidence.
@@ -181,22 +331,44 @@ class QueryYieldPlanner:
         ``verified_urls`` — the subset cited with confidence ``verified``.
         A template is credited when one of its returned URLs appears in the
         cited (or verified) set.
+
+        Two rows per deep template are written: the GLOBAL row (all buckets
+        aggregated — the authoritative DROP signal) and the SEGMENT row (that
+        bucket's independent evidence). Screening templates write only the
+        global row.
         """
         if self._store is None or not self._template_urls:
             return
-        for template, urls in self._template_urls.items():
+        # Global row written ONCE per template (a template dispatched under one
+        # bucket still credits the global row exactly once per run).
+        by_template: dict[str, list[str]] = {}
+        for (tpl, _seg), urls in self._template_urls.items():
+            by_template.setdefault(tpl, []).extend(urls)
+        for template, urls in by_template.items():
             hit_cited = any(u in cited_urls for u in urls)
             hit_verified = any(u in verified_urls for u in urls)
             self._store.upsert(
-                template,
+                template, segment="",
+                trials=1,
+                cited=1 if hit_cited else 0,
+                verified=1 if hit_verified else 0,
+            )
+        # Segment rows for the deep (bucketed) dispatches.
+        for (template, segment), urls in self._template_urls.items():
+            if not segment:
+                continue
+            hit_cited = any(u in cited_urls for u in urls)
+            hit_verified = any(u in verified_urls for u in urls)
+            self._store.upsert(
+                template, segment=segment,
                 trials=1,
                 cited=1 if hit_cited else 0,
                 verified=1 if hit_verified else 0,
             )
         if logger.isEnabledFor(logging.INFO):
-            total = len(self._template_urls)
+            total = len(by_template)
             verified = sum(
-                1 for u in self._template_urls.values() if any(x in verified_urls for x in u)
+                1 for u in by_template.values() if any(x in verified_urls for x in u)
             )
             logger.info(
                 "Query-yield recorded %d template(s), %d with a verified citation",

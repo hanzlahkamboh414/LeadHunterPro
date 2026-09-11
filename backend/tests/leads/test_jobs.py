@@ -51,7 +51,7 @@ def test_job_store_roundtrip(tmp_path):
 # JobManager lifecycle
 # ---------------------------------------------------------------------------
 
-def _fake_run_full_ok(query, emit=None, cancel=None, store=None, paused=None):
+def _fake_run_full_ok(query, emit=None, cancel=None, store=None, paused=None, user_id=""):
     if emit:
         emit("discovery", 1, 1, "pass 1", data={"pass": 1, "new_leads": 2, "total_leads": 2})
         emit("research", 1, 2, "lead 1", email="a@x.com",
@@ -81,7 +81,7 @@ def test_job_completes_with_progress(tmp_path, monkeypatch):
 
 
 def test_job_failure_records_error(tmp_path, monkeypatch):
-    def _boom(query, emit=None, cancel=None, store=None, paused=None):
+    def _boom(query, emit=None, cancel=None, store=None, paused=None, user_id=""):
         raise RuntimeError("pipeline exploded")
 
     monkeypatch.setattr("app.leads.jobs.run_full", _boom)
@@ -93,7 +93,7 @@ def test_job_failure_records_error(tmp_path, monkeypatch):
 
 
 def test_job_cancel_graceful(tmp_path, monkeypatch):
-    def _blocking(query, emit=None, cancel=None, store=None, paused=None):
+    def _blocking(query, emit=None, cancel=None, store=None, paused=None, user_id=""):
         while not (cancel and cancel()):
             time.sleep(0.005)
         return {"leads_found": 0, "discovery_passes": [], "results": []}
@@ -114,7 +114,7 @@ def test_job_cancel_graceful(tmp_path, monkeypatch):
     assert done.state is JobState.cancelled
 
 
-def _block_on_pause(query, emit=None, cancel=None, store=None, paused=None):
+def _block_on_pause(query, emit=None, cancel=None, store=None, paused=None, user_id=""):
     """Emit discovery, then hold until the job is paused, then until resumed/cancelled.
 
     Waiting for the pause to actually be requested makes the test deterministic:
@@ -188,7 +188,7 @@ def test_job_resume_failed_orphan_continues_same_id(tmp_path, monkeypatch):
 
 def test_job_resumed_orphan_can_be_cancelled(tmp_path, monkeypatch):
     """A re-launched (continued) worker re-arms cancel: the user can stop it."""
-    def _hold(query, emit=None, cancel=None, store=None, paused=None):
+    def _hold(query, emit=None, cancel=None, store=None, paused=None, user_id=""):
         while not (cancel and cancel()):
             time.sleep(0.005)
         return {"leads_found": 0, "discovery_passes": [], "results": []}
@@ -305,7 +305,7 @@ def test_sweep_marks_dead_worker_job_failed_on_read(tmp_path):
 
 def test_sweep_leaves_live_worker_jobs_untouched(tmp_path, monkeypatch):
     """A genuinely-running job (worker thread alive) is never swept."""
-    def _hold(query, emit=None, cancel=None, store=None, paused=None):
+    def _hold(query, emit=None, cancel=None, store=None, paused=None, user_id=""):
         while True:
             time.sleep(0.005)
 
@@ -339,3 +339,82 @@ def test_sweep_recovers_via_list_jobs_too(tmp_path):
     got = next(j for j in jobs if j.id == "dead2")
     assert got.state is JobState.failed
     assert "Continue" in got.error
+
+
+# ---------------------------------------------------------------------------
+# Honest accounting on interrupt (§6)
+# ---------------------------------------------------------------------------
+
+def _han_results():
+    """Research results a run accumulates via _append_event before an interrupt
+    lands — 2 contact_now (working), 1 nurture, 1 skip."""
+    return [
+        {"email": "w1@x.com", "recommendation": "contact_now", "working": True},
+        {"email": "w2@x.com", "recommendation": "contact_now", "working": True},
+        {"email": "n1@x.com", "recommendation": "nurture", "working": False},
+        {"email": "s1@x.com", "recommendation": "skip", "working": False},
+    ]
+
+
+def test_recover_orphans_persists_real_delivery_counts(tmp_path):
+    """PROOF (§6 dishonest accounting): an orphaned run that had already
+    researched 4 leads (2 working) must NOT be failed with leads_found=0 /
+    working_leads=0 — the interrupted run's REAL delivery survives the boot
+    sweep, so History shows "4 found / 2 working" not a false zero."""
+    store = JobStore(db_path=str(tmp_path / "jobs.db"))
+    store.save(Job(
+        id="orphan_working",
+        query={"trade": "gc", "location": "Houston TX", "target_emails": 200},
+        state=JobState.running,
+        created_at="2026-09-10T09:06:00",
+        updated_at="2026-09-10T11:09:00",
+        results=_han_results(),
+    ))
+    fresh = JobManager(store=store)
+    assert fresh.recover_orphans() == 1
+    got = fresh.get("orphan_working")
+    assert got.state is JobState.failed
+    assert got.leads_found == 4      # every researched lead counts
+    assert got.working_leads == 2    # contact_now = working
+
+
+def test_sweep_dead_worker_persists_real_delivery_counts(tmp_path):
+    """An on-the-fly dead-worker sweep (thread died mid-run) keeps the run's
+    real counts instead of the DB's zeros."""
+    store = JobStore(db_path=str(tmp_path / "jobs.db"))
+    store.save(Job(
+        id="dead_working",
+        query={"trade": "gc", "location": "TX", "target_emails": 50},
+        state=JobState.running,
+        created_at="2026-09-10T10:00:00",
+        updated_at="2026-09-10T10:01:00",
+        results=_han_results(),
+    ))
+    manager = JobManager(store=store)
+    dead = threading.Thread(target=lambda: None)
+    dead.start()
+    dead.join()
+    manager._workers["dead_working"] = dead
+
+    assert manager.sweep_dead_workers() == 1
+    got = manager.get("dead_working")
+    assert got.state is JobState.failed
+    assert got.leads_found == 4
+    assert got.working_leads == 2
+
+
+def test_exception_mid_run_persists_real_delivery_counts(tmp_path, monkeypatch):
+    """An exception thrown after research has started must not erase what was
+    already delivered — the failed job shows its real partial counts."""
+    def _boom(query, emit=None, cancel=None, paused=None, store=None, user_id=""):
+        emit("research", 1, 1, "lead 1", email="w1@x.com",
+             data={"email": "w1@x.com", "recommendation": "contact_now", "working": True})
+        raise RuntimeError("simulated mid-run failure")
+
+    monkeypatch.setattr("app.leads.jobs.run_full", _boom)
+    manager = JobManager(db_path=str(tmp_path / "jobs.db"))
+    job = manager.submit(ResearchQuery(trade="gc", location="TX", target_emails=1))
+    done = _wait_finished(manager, job.id)
+    assert done.state is JobState.failed
+    assert done.leads_found == 1
+    assert done.working_leads == 1

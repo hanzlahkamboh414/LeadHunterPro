@@ -119,5 +119,43 @@ def _auto_register_providers() -> None:
         logger.info("Auto-registered Tavily Search provider")
 
 
+def re_register_configured_providers() -> dict[str, str]:
+    """Rebuild search provider instances from CURRENT settings (hot-reload).
+
+    Called by the admin key endpoint right after a TAVILY/BRAVE key changes:
+    a FRESH instance carrying the new key replaces the old one in the registry
+    (``register`` also clears a stale down-marker, so a provider that was
+    blacklisted on the dead key gets a clean retry). A key that is now empty
+    UNREGISTERS its provider — the next query must not keep trying a dead key.
+
+    This is a real switch, not a fake one (CLAUDE.md §6): the old instance is
+    genuinely replaced, and only searches already in flight on it complete
+    with the old key. SearXNG is untouched here — it is keyed on SEARXNG_URL
+    (config, not a managed secret).
+
+    Returns:
+        Human-readable action strings (e.g. ``"rebuilt tavily"``,
+        ``"removed brave"``) for the honest admin log line — an empty list
+        means nothing changed.
+    """
+    from app.core.config import settings
+
+    registry = get_registry()
+    actions: list[str] = []
+
+    for name, key, cls in (
+        ("tavily", getattr(settings, "TAVILY_SEARCH_API_KEY", "") or "", TavilySearchProvider),
+        ("brave", getattr(settings, "BRAVE_SEARCH_API_KEY", "") or "", BraveSearchProvider),
+    ):
+        if key:
+            registry.register(cls(api_key=key))
+            actions.append(f"rebuilt {name}")
+        elif registry.get(name) is not None:
+            registry.unregister(name)
+            actions.append(f"removed {name}")
+
+    return actions
+
+
 _auto_register_providers()
 del _auto_register_providers

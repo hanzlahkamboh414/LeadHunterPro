@@ -14,9 +14,13 @@ from app.lead_research.agent import AILeadResearchAgent
 from app.lead_research.company_research import CompanyResearcher
 from app.lead_research.intent_timing import IntentTimingAnalyzer
 from app.lead_research.query_learning import (
+    BUCKET_MARINE_HEAVY,
+    BUCKET_ON_VERTICAL,
+    BUCKET_OTHER,
     MIN_TRIALS,
     QueryYieldPlanner,
     QueryYieldStore,
+    confirmed_bucket,
 )
 from app.lead_research.scoring import LeadScorer
 from tests.lead_research.conftest import (
@@ -188,7 +192,7 @@ def _build_agent(store):
 def test_agent_records_yield_for_dispached_templates(tmp_path):
     store = QueryYieldStore(str(tmp_path / "lead_research.db"))
     agent = _build_agent(store)
-    d = agent.research("jane@example.com", "example.com")
+    d = agent.research("jane@acme.com", "acme.com")
     assert d.person.bound is True  # full pipeline ran
 
     rows = store.all()
@@ -213,10 +217,173 @@ def test_agent_prunes_zero_verified_template(tmp_path):
     store.upsert("screening:email", trials=MIN_TRIALS, cited=0, verified=0)
 
     agent = _build_agent(store)
-    agent.research("jane@example.com", "example.com")
+    agent.research("jane@acme.com", "acme.com")
 
     row = store.get("screening:email")
     assert row is not None
     assert row["trials"] == MIN_TRIALS  # still 12 — no new dispatch happened
     assert row["cited"] == 0
     assert row["verified"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Phase F — segment-level yield keys
+# ---------------------------------------------------------------------------
+
+# -- confirmed_bucket (deterministic, never from the AI label) ---------------
+
+def test_confirmed_bucket_building_trade_is_on_vertical():
+    assert confirmed_bucket(company="Acme Construction LLC", domain="acme.com") == BUCKET_ON_VERTICAL
+
+
+def test_confirmed_bucket_marine_is_other_when_excluded():
+    """The configured profile treats marine/heavy-civil as OFF-vertical (it is
+    in ``excluded_vernaculars``), so P-C's exclusion rule wins → ``other``."""
+    assert confirmed_bucket(company="Acme Marine Dredging", domain="acme-dredge.com") == BUCKET_OTHER
+
+
+def test_confirmed_bucket_marine_branch_fires_when_not_excluded():
+    """The marine_heavycivil bucket fires only for a marine term the profile
+    does NOT exclude. Guarded, profile-driven (one source of truth)."""
+    assert confirmed_bucket(company="Dockwright Contractors", domain="dockwright.com") == BUCKET_MARINE_HEAVY
+
+
+def test_confirmed_bucket_off_vertical_is_other():
+    assert confirmed_bucket(company="FiberWorks Telecom", domain="fiberworks.com") == BUCKET_OTHER
+
+
+def test_confirmed_bucket_non_client_is_other():
+    assert confirmed_bucket(company="Jacobs Consulting Group", domain="jacobs.com") == BUCKET_OTHER
+
+
+def test_confirmed_bucket_ignores_ai_industry_label():
+    """P-C — the bucket comes from company text, NOT the AI-written industry.
+    Even if the AI mislabels this marine firm "GC", the marine text keeps it
+    OUT of on_vertical (it is excluded) — the mislabel never contaminates the
+    GC segment's yield."""
+    assert confirmed_bucket(company="Gulf Marine Contractors", domain="gulfmarine.com") == BUCKET_OTHER
+
+
+# -- store: segment rows + hierarchy -----------------------------------------
+
+def test_store_segment_row_is_distinct_from_global(tmp_path):
+    store = QueryYieldStore(str(tmp_path / "yield.db"))
+    store.upsert("deep:license", segment="", trials=3, verified=0)
+    store.upsert("deep:license", segment=BUCKET_ON_VERTICAL, trials=3, verified=1)
+    # Global and segment rows are independent counts.
+    assert store.get("deep:license", "") == {"trials": 3, "cited": 0, "verified": 0}
+    assert store.get("deep:license", BUCKET_ON_VERTICAL) == {"trials": 3, "cited": 0, "verified": 1}
+    # all() keys a segment row with the | separator; the global row keeps its name.
+    assert store.all()["deep:license"]["trials"] == 3
+    assert store.all()[f"deep:license|{BUCKET_ON_VERTICAL}"]["verified"] == 1
+
+
+def test_should_skip_global_drop_is_authoritative(tmp_path):
+    """Problem 2 — a global drop wins even when a segment has its own verified
+    record: a dead template is never re-confirmed bucket-by-bucket."""
+    store = QueryYieldStore(str(tmp_path / "yield.db"))
+    store.upsert("deep:license", segment="", trials=MIN_TRIALS, verified=0)  # global DROP
+    store.upsert("deep:license", segment=BUCKET_ON_VERTICAL, trials=MIN_TRIALS, verified=5)
+    assert store.should_skip("deep:license", BUCKET_ON_VERTICAL) is True
+
+
+def test_should_skip_segment_decides_after_its_own_min_trials(tmp_path):
+    store = QueryYieldStore(str(tmp_path / "yield.db"))
+    store.upsert("deep:license", segment="", trials=MIN_TRIALS, verified=1)  # global KEEP
+    store.upsert("deep:license", segment=BUCKET_ON_VERTICAL, trials=MIN_TRIALS - 1, verified=0)
+    # Segment has NOT reached its own MIN_TRIALS -> falls back to global KEEP.
+    assert store.should_skip("deep:license", BUCKET_ON_VERTICAL) is False
+    # Once the segment reaches MIN_TRIALS with zero verified, it drops itself.
+    store.upsert("deep:license", segment=BUCKET_ON_VERTICAL, trials=1, verified=0)
+    assert store.should_skip("deep:license", BUCKET_ON_VERTICAL) is True
+
+
+def test_should_skip_screening_stays_global(tmp_path):
+    """Screening templates are gated GLOBALLY forever — no segment row gates them."""
+    store = QueryYieldStore(str(tmp_path / "yield.db"))
+    store.upsert("screening:email", segment="", trials=MIN_TRIALS, verified=0)
+    assert store.should_skip("screening:email", "") is True
+    assert store.should_skip("screening:email", BUCKET_ON_VERTICAL) is True  # global still wins
+
+
+def test_delete_template_kills_all_segments(tmp_path):
+    """P-G — manual resurrection path: deleting a template clears every segment."""
+    store = QueryYieldStore(str(tmp_path / "yield.db"))
+    store.upsert("deep:license", segment="", trials=MIN_TRIALS, verified=0)
+    store.upsert("deep:license", segment=BUCKET_ON_VERTICAL, trials=MIN_TRIALS, verified=0)
+    store.delete_template("deep:license")
+    assert store.all() == {}
+    assert store.should_skip("deep:license") is False
+
+
+def test_legacy_table_migrates_to_segment(tmp_path):
+    """Phase F migration: a live table with the old single-column (template) PK
+    is rebuilt to (template, segment); legacy rows become the global row."""
+    import sqlite3
+
+    db = str(tmp_path / "legacy.db")
+    conn = sqlite3.connect(db)
+    conn.execute(
+        """
+        CREATE TABLE query_template_yield (
+            template TEXT PRIMARY KEY,
+            trials INTEGER NOT NULL DEFAULT 0,
+            cited INTEGER NOT NULL DEFAULT 0,
+            verified INTEGER NOT NULL DEFAULT 0,
+            last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO query_template_yield (template, trials, cited, verified) VALUES (?, ?, ?, ?)",
+        ("deep:news", 7, 2, 0),
+    )
+    conn.commit()
+    conn.close()
+
+    store = QueryYieldStore(db)
+    # Legacy row survived as the GLOBAL row (segment='').
+    assert store.get("deep:news", "") == {"trials": 7, "cited": 2, "verified": 0}
+    # And the widened PK now accepts a segment row.
+    store.upsert("deep:news", segment=BUCKET_ON_VERTICAL, trials=1, verified=0)
+    assert store.get("deep:news", BUCKET_ON_VERTICAL) == {"trials": 1, "cited": 0, "verified": 0}
+
+
+# -- planner: deep writes global + segment rows ------------------------------
+
+def test_planner_deep_note_writes_global_and_segment(tmp_path):
+    store = QueryYieldStore(str(tmp_path / "yield.db"))
+    p = QueryYieldPlanner(store)
+    p.note("deep:license", ["https://a.com"], segment=BUCKET_ON_VERTICAL)
+    p.commit(cited_urls={"https://a.com"}, verified_urls={"https://a.com"})
+    # One run credits BOTH the global row and the on_vertical segment row.
+    assert store.get("deep:license", "") == {"trials": 1, "cited": 1, "verified": 1}
+    assert store.get("deep:license", BUCKET_ON_VERTICAL) == {"trials": 1, "cited": 1, "verified": 1}
+
+
+def test_planner_screening_note_writes_global_only(tmp_path):
+    store = QueryYieldStore(str(tmp_path / "yield.db"))
+    p = QueryYieldPlanner(store)
+    p.note("screening:email", ["https://a.com"])  # segment defaults to "" (global)
+    p.commit(cited_urls={"https://a.com"}, verified_urls=set())
+    assert store.get("screening:email", "") == {"trials": 1, "cited": 1, "verified": 0}
+    # No segment row was created for a screening template.
+    assert BUCKET_ON_VERTICAL not in store.all()
+
+
+# -- agent integration: deep research writes segment rows --------------------
+
+def test_agent_records_segment_rows_for_deep_templates(tmp_path):
+    """A GC deep run credits deep templates under BOTH the global row and the
+    on_vertical segment row — so deep:license's GC yield is measured apart from
+    other buckets (the Phase F point)."""
+    store = QueryYieldStore(str(tmp_path / "lead_research.db"))
+    agent = _build_agent(store)
+    agent.research("jane@acme.com", "acme.com")
+
+    rows = store.all()
+    # The deep templates were dispatched for an on_vertical (GC) company.
+    for tpl in ("deep:license", "deep:news", "deep:hiring", "deep:expansion", "deep:bidaward"):
+        assert f"{tpl}|{BUCKET_ON_VERTICAL}" in rows, f"missing segment row for {tpl}"
+        assert rows[tpl]["trials"] >= 1  # global row credited too
+        assert rows[f"{tpl}|{BUCKET_ON_VERTICAL}"]["trials"] >= 1

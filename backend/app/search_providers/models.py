@@ -37,6 +37,9 @@ class SearchResult:
         snippet: Short description text.
         domain: Extracted hostname (lowercase, no www.).
         position: Rank position in results (1-based).
+        provider: Name of the provider that produced this result — stamped by
+            the manager at merge time (additive; provider-yield learning reads
+            this, the only attribution point that survives aggregation).
     """
 
     title: str
@@ -44,6 +47,7 @@ class SearchResult:
     snippet: str = ""
     domain: str = ""
     position: int = 0
+    provider: str = ""
 
     def __post_init__(self) -> None:
         """Normalize domain after construction."""

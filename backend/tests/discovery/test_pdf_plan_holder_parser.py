@@ -770,6 +770,18 @@ class TestRepeatedValueDetection:
         assert "Pirc-Tobin" in companies
         assert "Rathje Construction Co." in companies
 
+    def test_report_exposes_document_state_codes(self) -> None:
+        """The additive ``state_codes`` surface the SOURCE content-gate reads:
+        the committed fixture is an IOWA list, so its parsed text names IA and
+        nothing else. Guards the parser->source contract (§14)."""
+        if not FIXTURE_PDF.exists():
+            pytest.skip(f"fixture not present at {FIXTURE_PDF}")
+        result = PdfPlanHolderParser().parse(
+            FIXTURE_PDF.read_bytes(),
+            source_url="https://www.hrgreen.com/test.pdf",
+        )
+        assert result.report.state_codes == ["IA"]
+
     def test_person_email_binding_unchanged(self, parser) -> None:
         """Phase C does not alter person or email extraction."""
         roles = _ColumnRoles(company=0, contact=1, phone=None, date=None)

@@ -27,7 +27,7 @@ import time
 from types import TracebackType
 from typing import Any
 
-from app.search_providers.base import BaseSearchProvider
+from app.search_providers.base import BaseSearchProvider, LoopSessionMixin
 from app.search_providers.models import SearchQuery, SearchResponse, SearchResult
 
 logger = logging.getLogger(__name__)
@@ -39,7 +39,7 @@ _EXTRACT_ENDPOINT = "https://api.tavily.com/extract"
 _MAX_RESULTS = 20
 
 
-class TavilySearchProvider(BaseSearchProvider):
+class TavilySearchProvider(BaseSearchProvider, LoopSessionMixin):
     """Search provider backed by the Tavily Search API.
 
     Requires TAVILY_SEARCH_API_KEY environment variable.
@@ -79,27 +79,14 @@ class TavilySearchProvider(BaseSearchProvider):
         self._max_results = min(max(max_results, 1), _MAX_RESULTS)
         self._endpoint = endpoint
         self._extract_endpoint = extract_endpoint
-        self._session: Any = None
+        # LoopSessionMixin: one session per event loop (concurrency fix —
+        # see the mixin docstring in base.py).
+        self._init_sessions()
 
     @staticmethod
     def _load_api_key() -> str | None:
         """Load the API key from the environment."""
         return os.environ.get("TAVILY_SEARCH_API_KEY")
-
-    async def _get_session(self) -> Any:
-        """Get or create an aiohttp session (lazy initialization)."""
-        import aiohttp
-
-        if self._session is None or self._session.closed:
-            timeout = aiohttp.ClientTimeout(total=self._timeout)
-            self._session = aiohttp.ClientSession(timeout=timeout)
-        return self._session
-
-    async def close(self) -> None:
-        """Close the underlying HTTP session."""
-        if self._session is not None and not self._session.closed:
-            await self._session.close()
-            self._session = None
 
     async def __aenter__(self):
         return self

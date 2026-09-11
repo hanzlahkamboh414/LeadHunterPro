@@ -35,12 +35,29 @@ def _dossier(email: str, domain: str, score: float = 8.0,
 
 
 def _setup(tmp_path, monkeypatch):
-    """Point the router's store at a tmp DB (mirrors test_leads_api._setup)."""
-    monkeypatch.setattr(
-        leads_module, "_store",
-        LeadResearchStore(db_path=str(tmp_path / "jobs.db")),
+    """Point the router's store at a tmp DB (mirrors test_leads_api._setup).
+
+    The store's ``save()`` is wrapped so seeded dossiers carry
+    ``user_id=testuser.id`` — under strict isolation the test user only sees
+    rows belonging to them.
+    """
+    from app.auth.jwt import create_access_token
+    from app.auth.models import UserStore
+    import app.auth.dependencies as deps
+    # Create the test user FIRST so we know the user_id for store seeds.
+    user_store = UserStore(db_path=str(tmp_path / "users.db"))
+    monkeypatch.setattr(deps, "_user_store", lambda: user_store)
+    user = user_store.create("testuser", "test@example.com", "password")
+    # Wrap the store so save() auto-injects user_id for seeded dossiers.
+    _real_store = LeadResearchStore(db_path=str(tmp_path / "jobs.db"))
+    _orig_save = _real_store.save
+    _real_store.save = lambda d, **kw: _orig_save(d, user_id=kw.pop("user_id", "") or user.id)
+    monkeypatch.setattr(leads_module, "_store", _real_store)
+    token = create_access_token(user.id, user.is_admin, username=user.username)
+    return TestClient(
+        app,
+        headers={"Authorization": f"Bearer {token}"},
     )
-    return TestClient(app)
 
 
 # ---------------------------------------------------------------------------
@@ -189,14 +206,20 @@ def test_organize_endpoint_sets_and_echoes(tmp_path, monkeypatch):
 def test_list_leads_filters_by_folder_and_tag(tmp_path, monkeypatch):
     client = _setup(tmp_path, monkeypatch)
     store = leads_module._store
+    # Distinct scores on a/b so the folder + tag ORDER is deterministic:
+    # the sort key is (tier, -score), and the store's updated_at is only
+    # SECOND-granularity — two equal-score leads saved in the same second
+    # have no stable tie-break, so a test must not lean on it.
     store.save(_dossier("a@x.com", "x.com"))
-    store.save(_dossier("b@y.com", "y.com"))
+    store.save(_dossier("b@y.com", "y.com", score=7.5))
     store.save(_dossier("c@z.com", "z.com", score=4.0, rec="nurture"))
     store.set_meta("a@x.com", folder="Hot", tags=["TX"])
     store.set_meta("b@y.com", folder="Hot", tags=["Urgent"])
     store.set_meta("c@z.com", folder="Cold", tags=["TX"])
 
     hot = client.get("/api/v1/leads", params={"folder": "Hot"}).json()
+    # Actionable first, then score high-first: a (contact_now @ 8.0) before
+    # b (contact_now @ 7.5). Deterministic, never a coin-flip page.
     assert [l["email"] for l in hot] == ["a@x.com", "b@y.com"]
 
     tx = client.get("/api/v1/leads", params={"tag": "TX"}).json()

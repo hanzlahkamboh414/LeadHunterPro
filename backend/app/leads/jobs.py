@@ -49,6 +49,34 @@ def _elapsed_now(created_at: str) -> float:
     return max(0.0, (datetime.now(timezone.utc) - start).total_seconds())
 
 
+def _honest_counts(job: "Job") -> tuple[int, int]:
+    """Recompute found/working from the results a job ACTUALLY accumulated.
+
+    The pipeline's ``run_full`` returns its delivery counts only on a CLEAN
+    finish. On any interrupt — server restart, dead worker, or an exception
+    inside the run — those counts are never returned, so ``recover_orphans`` /
+    ``sweep_dead_workers`` used to mark the job failed with ``leads_found=0`` /
+    ``working_leads=0`` even though ``job.results`` (appended per-research
+    event by :meth:`JobManager._append_event`) held the real researched leads
+    (§6: a 16-working-lead run read as a dishonest "failed, 0 found").
+
+    This derives the same numbers from what actually landed: leads_found is the
+    full result list; working_leads is the count whose ``recommendation`` is
+    ``contact_now`` (the pipeline's definition of "working", pipeline.py —
+    results are only appended for researched dossiers).
+
+    Returns ``(leads_found, working_leads)``.
+    """
+    results = job.results or []
+    leads_found = len(results)
+    working_leads = sum(
+        1
+        for r in results
+        if isinstance(r, dict) and (r.get("recommendation") or "") == "contact_now"
+    )
+    return leads_found, working_leads
+
+
 class JobStore:
     """SQLite persistence for jobs."""
 
@@ -77,6 +105,23 @@ class JobStore:
                 elapsed_s REAL NOT NULL
             )
         """)
+        # H1: additive outcome columns. Existing DBs gain them via a guarded
+        # ALTER (CREATE TABLE IF NOT EXISTS never adds columns), defaults keep
+        # every pre-H1 row valid on read.
+        add_cols = [
+            ("working_leads", "INTEGER NOT NULL DEFAULT 0"),
+            ("leads_found", "INTEGER NOT NULL DEFAULT 0"),
+            ("shortfall", "INTEGER NOT NULL DEFAULT 0"),
+            ("shortfall_reason", "TEXT NOT NULL DEFAULT ''"),
+            ("user_id", "TEXT NOT NULL DEFAULT ''"),
+        ]
+        have = {r[1] for r in conn.execute("PRAGMA table_info(jobs)")}
+        for name, decl in add_cols:
+            if name not in have:
+                try:
+                    conn.execute(f"ALTER TABLE jobs ADD COLUMN {name} {decl}")
+                except sqlite3.OperationalError:
+                    pass  # raced / already present — harmless
         conn.commit()
         conn.close()
 
@@ -85,8 +130,10 @@ class JobStore:
         conn.execute(
             """
             INSERT INTO jobs (id, query_json, state, events_json, results_json,
-                              pass_log_json, error, created_at, updated_at, elapsed_s)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                              pass_log_json, error, created_at, updated_at,
+                              elapsed_s, working_leads, leads_found, shortfall,
+                              shortfall_reason, user_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 state = excluded.state,
                 events_json = excluded.events_json,
@@ -94,7 +141,12 @@ class JobStore:
                 pass_log_json = excluded.pass_log_json,
                 error = excluded.error,
                 updated_at = excluded.updated_at,
-                elapsed_s = excluded.elapsed_s
+                elapsed_s = excluded.elapsed_s,
+                working_leads = excluded.working_leads,
+                leads_found = excluded.leads_found,
+                shortfall = excluded.shortfall,
+                shortfall_reason = excluded.shortfall_reason,
+                user_id = excluded.user_id
             """,
             (
                 job.id,
@@ -107,6 +159,11 @@ class JobStore:
                 job.created_at,
                 job.updated_at,
                 job.elapsed_s,
+                job.working_leads,
+                job.leads_found,
+                job.shortfall,
+                job.shortfall_reason,
+                job.user_id,
             ),
         )
         conn.commit()
@@ -134,13 +191,26 @@ class JobStore:
             created_at=d["created_at"],
             updated_at=d["updated_at"],
             elapsed_s=d["elapsed_s"],
+            working_leads=int(d.get("working_leads") or 0),
+            leads_found=int(d.get("leads_found") or 0),
+            shortfall=int(d.get("shortfall") or 0),
+            shortfall_reason=d.get("shortfall_reason", "") or "",
+            user_id=d.get("user_id", "") or "",
         )
 
-    def list_all(self) -> list[Job]:
+    def list_all(self, user_id: str | None = None) -> list[Job]:
         conn = sqlite3.connect(self._db_path)
-        cur = conn.execute(
-            "SELECT * FROM jobs ORDER BY created_at DESC"
-        )
+        if user_id:
+            # EXACT match only — a new user must NOT inherit legacy (user_id='')
+            # jobs from the pre-auth era; those belong to the admin alone.
+            cur = conn.execute(
+                "SELECT * FROM jobs WHERE user_id = ? ORDER BY created_at DESC",
+                (user_id,),
+            )
+        else:
+            cur = conn.execute(
+                "SELECT * FROM jobs ORDER BY created_at DESC"
+            )
         rows = cur.fetchall()
         cols = [d[0] for d in cur.description] if rows else []
         conn.close()
@@ -158,6 +228,11 @@ class JobStore:
                 created_at=dict(zip(cols, r))["created_at"],
                 updated_at=dict(zip(cols, r))["updated_at"],
                 elapsed_s=dict(zip(cols, r))["elapsed_s"],
+                working_leads=int(dict(zip(cols, r)).get("working_leads") or 0),
+                leads_found=int(dict(zip(cols, r)).get("leads_found") or 0),
+                shortfall=int(dict(zip(cols, r)).get("shortfall") or 0),
+                shortfall_reason=dict(zip(cols, r)).get("shortfall_reason", "") or "",
+                user_id=dict(zip(cols, r)).get("user_id", "") or "",
             )
             for r in rows
         ]
@@ -201,6 +276,10 @@ class JobManager:
             prev_state = job.state.value
             job.state = JobState.failed
             job.error = "interrupted by server restart; re-run to continue"
+            # Persist what the job ACTUALLY delivered before it was interrupted
+            # (§6 honest accounting): results accumulated per-research by
+            # _append_event are the truth, not the zeros left by an interrupt.
+            job.leads_found, job.working_leads = _honest_counts(job)
             job.elapsed_s = _elapsed_now(job.created_at)
             job.updated_at = _now()
             self._store.save(job)
@@ -216,7 +295,7 @@ class JobManager:
 
     # -- lifecycle ----
 
-    def submit(self, query: ResearchQuery) -> Job:
+    def submit(self, query: ResearchQuery, user_id: str = "") -> Job:
         """Validate, persist a queued job, and start its worker thread."""
         query.validate()
         job = Job(
@@ -225,6 +304,7 @@ class JobManager:
             state=JobState.queued,
             created_at=_now(),
             updated_at=_now(),
+            user_id=user_id,
         )
         self._store.save(job)
         self._cancel_flags[job.id] = False
@@ -341,6 +421,10 @@ class JobManager:
                     "worker thread interrupted (server busy/restart); "
                     "click Continue to resume"
                 )
+                # Honest accounting (§6): the interrupted run still delivered
+                # whatever it already researched; keep the real counts, the
+                # DB's stale zeros are NOT the truth.
+                job.leads_found, job.working_leads = _honest_counts(job)
                 job.elapsed_s += _elapsed_now(job.updated_at)
                 job.updated_at = _now()
                 self._store.save(job)
@@ -355,9 +439,9 @@ class JobManager:
         self.sweep_dead_workers()
         return self._store.get(job_id)
 
-    def list_jobs(self) -> list[Job]:
+    def list_jobs(self, user_id: str | None = None) -> list[Job]:
         self.sweep_dead_workers()
-        return self._store.list_all()
+        return self._store.list_all(user_id=user_id)
 
     # -- worker ----
 
@@ -393,10 +477,14 @@ class JobManager:
         lead_store = LeadResearchStore(db_path=self._store._db_path)
 
         try:
-            run_full(query, emit=emit, cancel=cancel, paused=paused, store=lead_store)
+            outcome = run_full(
+                query, emit=emit, cancel=cancel, paused=paused, store=lead_store,
+                user_id=job.user_id,
+            ) or {}
             with self._lock:
                 job = self._store.get(job_id)
-                if self._cancel_flags.get(job_id):
+                cancelled = self._cancel_flags.get(job_id)
+                if cancelled:
                     job.state = JobState.cancelled
                     logger.info("Job %s cancelled", job_id)
                 else:
@@ -404,11 +492,48 @@ class JobManager:
                     # done, so it is completed, not left paused forever.
                     self._pause_events[job_id].set()
                     job.state = JobState.completed
-                    logger.info("Job %s completed (%d leads)", job_id, len(job.results))
+                    # H1: persist the run's real delivery from run_full's return
+                    # (which was silently discarded before — a 4/500 run read as
+                    # a clean "Completed"). Additive, honest telemetry (§6).
+                    job.working_leads = int(outcome.get("working_leads") or 0)
+                    job.leads_found = int(outcome.get("leads_found")
+                                          or len(job.results))
+                    job.shortfall = int(outcome.get("shortfall") or 0)
+                    job.shortfall_reason = (
+                        outcome.get("shortfall_reason") or ""
+                    )
+                    target = int((job.query or {}).get("target_emails") or 0)
                 # Accumulate: a resumed (continued) job sums its active segments
                 # instead of overwriting the earlier run's elapsed time.
                 job.elapsed_s += (datetime.now(timezone.utc) - t0).total_seconds()
                 job.updated_at = _now()
+                # Honest terminal event: a finished run shows its REAL outcome,
+                # never a stale mid-run "step X/target" (§6 / H3's data source).
+                # The event is built into job.events and persisted in the SAME
+                # save as the completed state, so a reader that sees "completed"
+                # ALWAYS sees the terminal event too — the old order saved the
+                # completed state first and emitted the event after, leaving a
+                # window where a GET saw "completed" but the honest event was
+                # still being appended, and the outcome was silently lost (§12).
+                if not cancelled and job.shortfall_reason:
+                    job.events.append(JobEvent(
+                        phase="result", step=job.working_leads,
+                        total=max(target, job.working_leads),
+                        message=f"completed — {job.working_leads} of {target} "
+                                f"working · {job.shortfall_reason}",
+                        data={"working_leads": job.working_leads,
+                              "leads_found": job.leads_found,
+                              "shortfall": job.shortfall,
+                              "shortfall_reason": job.shortfall_reason},
+                        ts=_now(),
+                    ))
+                    logger.info(
+                        "Job %s completed (%d working / %d target, shortfall=%d %s)",
+                        job_id, job.working_leads, target, job.shortfall,
+                        job.shortfall_reason,
+                    )
+                # Persist completed/cancelled state + outcome + terminal event
+                # together — one atomic save (§12).
                 self._store.save(job)
         except Exception as exc:  # noqa: BLE001 - record, don't kill the server
             logger.error("Job %s failed: %s", job_id, exc)
@@ -416,6 +541,10 @@ class JobManager:
                 job = self._store.get(job_id)
                 job.state = JobState.failed
                 job.error = str(exc)
+                # Honest accounting (§6): a run that raised mid-pipeline still
+                # delivered every lead it had already researched; the failed
+                # state must show the real partial delivery, not zeros.
+                job.leads_found, job.working_leads = _honest_counts(job)
                 job.elapsed_s += (datetime.now(timezone.utc) - t0).total_seconds()
                 job.updated_at = _now()
                 self._store.save(job)

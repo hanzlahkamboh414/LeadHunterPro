@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import json
 
-from app.lead_research.agent import AILeadResearchAgent, _is_free_mail, _is_generic_local_part
+from app.lead_research.agent import (
+    AILeadResearchAgent,
+    _is_free_mail,
+    _is_generic_local_part,
+    _is_placeholder_or_fake_domain,
+)
 
 # Deterministic test stub — never a real MX lookup offline.
 _MX_OK = lambda d: True  # noqa: E731
@@ -30,6 +35,36 @@ def test_is_generic_local_part():
     assert _is_generic_local_part("info@acme.com") is True
     assert _is_generic_local_part("office@acme.com") is True
     assert _is_generic_local_part("john@acme.com") is False
+
+
+def test_is_placeholder_or_fake_domain_catches_reserved_placeholders():
+    """Reserved/placeholder domains (RFC 2606 + common scraped junk) are junk."""
+    assert _is_placeholder_or_fake_domain("example.com") is True
+    assert _is_placeholder_or_fake_domain("example.org") is True
+    assert _is_placeholder_or_fake_domain("test.com") is True
+    assert _is_placeholder_or_fake_domain("invalid") is True
+    assert _is_placeholder_or_fake_domain("localhost") is True
+
+
+def test_is_placeholder_or_fake_domain_catches_file_extension_artifacts():
+    """The observed 'logo@3x-1-236x60.png' class — a filename, not a mailbox."""
+    assert _is_placeholder_or_fake_domain("3x-1-236x60.png") is True
+    assert _is_placeholder_or_fake_domain("about_us.pdf") is True
+    assert _is_placeholder_or_fake_domain("team-logo.svg") is True
+    assert _is_placeholder_or_fake_domain("documents.zip") is True
+
+
+def test_is_placeholder_or_fake_domain_allows_real_domains():
+    """A real TLD with a file-extension-looking sub-label is NOT caught:
+    only the LAST label counts as the TLD."""
+    assert _is_placeholder_or_fake_domain("png.com") is False
+    assert _is_placeholder_or_fake_domain("examp1e.com") is False
+    assert _is_placeholder_or_fake_domain("redhawkservices.us") is False
+
+
+def test_is_placeholder_or_fake_domain_empty_is_junk():
+    assert _is_placeholder_or_fake_domain("") is True
+    assert _is_placeholder_or_fake_domain("   ") is True
 
 
 # ---------------------------------------------------------------------------
@@ -120,12 +155,90 @@ def test_triage_free_mail_goes_to_nurture():
     assert dossier.sources_checked == []
 
 
-def test_triage_generic_email_goes_to_generic_section():
+def test_triage_generic_email_runs_company_research_skips_person():
+    """info@ on a REAL business domain runs company research (the company may
+    be a valid construction firm) but skips person research (no specific
+    individual to find).  Scoring treats it as 'generic company contact' and
+    the construction company reaches nurture tier."""
     agent = _make_agent()
     dossier = agent.research("info@acme.com", "acme.com")
-    assert dossier.recommendation == "generic"
-    assert "generic" in dossier.fit.lower()
+    # Company research ran — we identified the company
+    assert dossier.company.name == "Acme Construction"
+    assert "company_research" in dossier.sources_checked
+    # Person research was skipped (generic email, no specific person)
+    assert "person_research" not in dossier.sources_checked
+    assert dossier.person.name == ""  # default — no person research
+    # Scoring: construction 2.0 + generic_company_contact 0.5 + facts 0.5 = 3.0 → nurture
+    assert dossier.recommendation == "nurture"
+    assert dossier.potential_score >= 3.0
+
+
+def test_junk_placeholder_domain_rejected_before_any_research():
+    """yourname@example.com (observed in a live run) is rejected outright: the
+    AI pipeline never runs for it, even when the caller passes a plausible
+    registered-domain (the extractor may set that from a nearby company)."""
+    calls = {"research": 0}
+
+    company = CompanyResearcher(
+        ai_ask=make_fake_ai({}),
+        search=make_fake_search(),
+        fetch_page=make_fake_fetch(),
+        refine_domain=make_fake_refine("example.com"),
+    )
+    company.research_with_domain = lambda *a, **k: calls.__setitem__("research", calls["research"] + 1)
+
+    person = PersonResearcherAI(
+        deterministic=None,
+        ai_ask=make_fake_ai({}),
+        search=make_fake_search(),
+        fetch_page=make_fake_fetch(),
+    )
+    intent = IntentTimingAnalyzer(ai_ask=make_fake_ai({}))
+    agent = AILeadResearchAgent(
+        company_researcher=company, person_researcher=person,
+        intent_analyzer=intent, scorer=LeadScorer(),
+        domain_delivers_email=_MX_OK,
+    )
+    # registered-domain is a plausible "example.com" — the junk is in the EMAIL.
+    dossier = agent.research("yourname@example.com", "example.com")
+    assert dossier.recommendation == "skip"
+    assert "junk" in dossier.fit.lower()
     assert dossier.sources_checked == []
+    assert calls["research"] == 0  # AI pipeline never started
+
+
+def test_junk_file_extension_domain_rejected_before_any_research():
+    """logo@3x-1-236x60.png (observed: an image filename parsed as an email,
+    which previously got a nurture recommendation) is rejected outright, even
+    when the caller passes a real company registered-domain like hittcontracting
+    — the junk is the address's own @-domain."""
+    calls = {"research": 0}
+
+    company = CompanyResearcher(
+        ai_ask=make_fake_ai({}),
+        search=make_fake_search(),
+        fetch_page=make_fake_fetch(),
+        refine_domain=make_fake_refine("hittcontracting.com"),
+    )
+    company.research_with_domain = lambda *a, **k: calls.__setitem__("research", calls["research"] + 1)
+
+    person = PersonResearcherAI(
+        deterministic=None,
+        ai_ask=make_fake_ai({}),
+        search=make_fake_search(),
+        fetch_page=make_fake_fetch(),
+    )
+    intent = IntentTimingAnalyzer(ai_ask=make_fake_ai({}))
+    agent = AILeadResearchAgent(
+        company_researcher=company, person_researcher=person,
+        intent_analyzer=intent, scorer=LeadScorer(),
+        domain_delivers_email=_MX_OK,
+    )
+    dossier = agent.research("logo@3x-1-236x60.png", "hittcontracting.com")
+    assert dossier.recommendation == "skip"
+    assert "junk" in dossier.fit.lower()
+    assert dossier.sources_checked == []
+    assert calls["research"] == 0
 
 
 def test_empty_domain_free_mail_is_derived_and_triaged():
@@ -338,3 +451,106 @@ def test_deep_research_recorded_even_when_empty():
     # Deep lane was attempted and recorded, even though it found nothing
     assert "deep_research" in dossier.sources_checked
     assert dossier.source_errors.get("deep_research") is None
+
+
+def test_deep_research_fires_without_bound_person():
+    """Opened gate: deep research examines the COMPANY (licence/news/hiring),
+    so it must run for an on-vertical construction company with a name even when
+    no decision-maker is bound (person.bound False). This closes the 'sirf ek AI
+    chala' gap — runs where discovery surfaced a company but no person no longer
+    starve the second AI key."""
+    company = CompanyResearcher(
+        ai_ask=make_fake_ai({
+            "company_name": "Acme Construction",
+            "industry": "General Contractor",
+            "location": "Dallas, TX",
+            "website": "https://acme.com",
+            "facts": [{"claim": "GC", "source_url": "https://acme.com/about", "source_type": "about_page", "confidence": "verified"}],
+        }),
+        search=make_fake_search(),
+        fetch_page=make_fake_fetch(),
+        refine_domain=make_fake_refine("acme.com"),
+    )
+    deep_calls = {"n": 0}
+    original = company.research_deep
+    assert original is not None  # sanity
+    company.research_deep = lambda domain, company_name, **kwargs: (
+        deep_calls.__setitem__("n", deep_calls["n"] + 1) or []
+    )
+    # Person stage returns NO decision-maker (bound=False) — the old gate would
+    # have skipped deep research here.
+    person = PersonResearcherAI(
+        deterministic=None,
+        ai_ask=make_fake_ai({
+            "person_name": "", "person_role": "", "role_relevance": False,
+            "bound": False,
+            "evidence": [],
+        }),
+        search=make_fake_search(),
+        fetch_page=make_fake_fetch(),
+    )
+    intent = IntentTimingAnalyzer(ai_ask=make_fake_ai({
+        "needs_estimation": "no", "signal": "", "reason": "", "evidence": [],
+        "timing_window": "unknown", "timing_reason": "", "timing_events": [],
+    }))
+    scorer = LeadScorer(ai_ask=make_fake_ai({
+        "fit": "partial", "potential_score": 5.0, "recommendation": "nurture", "reasoning": "",
+    }))
+
+    agent = AILeadResearchAgent(
+        company_researcher=company, person_researcher=person,
+        intent_analyzer=intent, scorer=scorer, domain_delivers_email=_MX_OK,
+    )
+    dossier = agent.research("jane@acme.com", "acme.com")
+    assert dossier.company.name == "Acme Construction"
+    assert dossier.person.bound is False          # no decision-maker bound
+    assert deep_calls["n"] == 1                    # deep lane STILL fired
+    assert "deep_research" in dossier.sources_checked
+
+
+def test_deep_research_still_gated_off_on_off_vertical():
+    """Opening the person gate must NOT remove the client-fit gate: an
+    off-vertical company (e.g. fiber/telecom, never our client) still never
+    spends deep-research credits."""
+    company = CompanyResearcher(
+        ai_ask=make_fake_ai({
+            "company_name": "Acme Fiber",
+            "industry": "Telecommunications",
+            "location": "Dallas, TX",
+            "website": "https://acme.com",
+            "facts": [],
+        }),
+        search=make_fake_search(),
+        fetch_page=make_fake_fetch(),
+        refine_domain=make_fake_refine("acme.com"),
+    )
+    deep_calls = {"n": 0}
+    original = company.research_deep
+    assert original is not None
+    company.research_deep = lambda domain, company_name, **kwargs: (
+        deep_calls.__setitem__("n", deep_calls["n"] + 1) or []
+    )
+    person = PersonResearcherAI(
+        deterministic=None,
+        ai_ask=make_fake_ai({
+            "person_name": "Jane Doe", "person_role": "Owner", "role_relevance": True, "bound": True,
+            "evidence": [{"claim": "Owner", "source_url": "https://acme.com/about", "source_type": "about_page", "confidence": "verified"}],
+        }),
+        search=make_fake_search(),
+        fetch_page=make_fake_fetch(),
+    )
+    intent = IntentTimingAnalyzer(ai_ask=make_fake_ai({
+        "needs_estimation": "no", "signal": "", "reason": "", "evidence": [],
+        "timing_window": "unknown", "timing_reason": "", "timing_events": [],
+    }))
+    scorer = LeadScorer(ai_ask=make_fake_ai({
+        "fit": "partial", "potential_score": 5.0, "recommendation": "nurture", "reasoning": "",
+    }))
+
+    agent = AILeadResearchAgent(
+        company_researcher=company, person_researcher=person,
+        intent_analyzer=intent, scorer=scorer, domain_delivers_email=_MX_OK,
+    )
+    dossier = agent.research("jane@acme.com", "acme.com")
+    assert deep_calls["n"] == 0
+    assert "deep_research" not in dossier.sources_checked

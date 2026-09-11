@@ -93,18 +93,18 @@ def test_store_list_all(tmp_path):
 
 def test_service_research_persists(tmp_path):
     svc = _service(tmp_path)
-    dossier = svc.research("bob@test.com", "test.com")
+    dossier = svc.research("bob@acme.com", "acme.com")
     assert dossier.potential_score >= 6.0  # deterministic score for strong-fit lead
     # Verify persisted
-    got = svc.get("bob@test.com")
+    got = svc.get("bob@acme.com")
     assert got is not None
     assert got.potential_score >= 6.0  # deterministic score for strong-fit lead
 
 
 def test_service_list_leads(tmp_path):
     svc = _service(tmp_path)
-    svc.research("bob@test.com", "test.com")
-    svc.research("alice@test.com", "test.com")
+    svc.research("bob@acme.com", "acme.com")
+    svc.research("alice@acme.com", "acme.com")
     leads = svc.list_leads()
     assert len(leads) == 2
 

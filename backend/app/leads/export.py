@@ -105,27 +105,52 @@ def export_csv(
     recommendation: str | None = None,
     emails: list[str] | None = None,
     full: bool = False,
+    *,
+    folder: str | None = None,
+    tag: str | None = None,
+    date: str | None = None,
+    source_emails: set[str] | None = None,
+    bound: bool | None = None,
+    min_score: float | None = None,
+    q: str | None = None,
 ) -> str:
     """Export persisted leads to CSV.
 
-    ``store`` is a LeadResearchStore (its ``list_all`` returns dossiers).
-    ``emails`` — if provided, only export these specific emails.
-    ``full`` — if True, export all columns; if False, email+name only.
+    ``store`` is a LeadResearchStore. The user-view filters (folder/tag/date/
+    source/bound/min_score/q) run IN SQL via :meth:`all_matching`, so export
+    honours exactly the same set the Companies list shows — hidden rows excluded,
+    default = the Unfiled actionable inbox (``folder=*`` for every place, and
+    an explicit ``recommendation`` / ``emails`` for the junk / selected paths).
+    ``emails`` — only export these specific emails (selected rows). ``full`` —
+    all columns (default: email+name only).
+
+    The recommendation / skip decisions are re-gated with TODAY'S deterministic
+    gate (never a stale AI-era label) — row-level, after the SQL subset.
     """
     from app.lead_research.scoring import regate_recommendation
 
-    dossiers = store.list_all()
-    rec_map: dict[str, str] = {}
-    for d in dossiers:
-        rec_map[d.email] = regate_recommendation(d)
+    # When the user picked specific emails, export EXACTLY those (incl. any in
+    # the skip/junk set they might have inspected) — hidden=0 still applies (a
+    # hidden lead is not a user-facing lead). Otherwise the default SQL subset
+    # already excludes skip/junk.
+    # SQL subset recommendation: an explicit tier (e.g. "skip") must NOT be
+    # gated out — the row-level filter below picks it; "emails" wants every
+    # tier; otherwise the actionable-only default (skip/junk excluded).
+    matched = store.all_matching(
+        recommendation="*" if emails else (recommendation if recommendation else None),
+        folder=folder, tag=tag, date=date, source_emails=source_emails,
+        bound=bound, min_score=min_score, q=q,
+    )
+    dossiers = [m["dossier"] for m in matched]
+    rec_map = {d.email: regate_recommendation(d) for d in dossiers}
     if emails:
         email_set = {e.lower() for e in emails}
         dossiers = [d for d in dossiers if d.email.lower() in email_set]
-    elif recommendation:
+    if recommendation:
         dossiers = [
             d for d in dossiers if rec_map.get(d.email, d.recommendation) == recommendation
         ]
-    else:
+    elif not emails:
         # Honest default — mirror the leads list: skip/junk is NOT exported
         # unless explicitly requested (a dead domain is not a lead, and its
         # row inflates the outreach list). `?recommendation=skip` still gets

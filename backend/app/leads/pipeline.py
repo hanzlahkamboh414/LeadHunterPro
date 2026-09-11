@@ -24,6 +24,7 @@ passes, allows a graceful stop.
 from __future__ import annotations
 
 import logging
+import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -33,8 +34,15 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
+from app.discovery.query_expansion import (
+    _METRO_FALLBACK,
+    _fold,
+    generate_query_expansion,
+    merge_locations,
+)
 from app.discovery.sources.plan_holder_source import PlanHolderSource
 from app.discovery.sources.status import SourceStatus
+from app.discovery.yield_learning import segment_key
 from app.company_profile import get_profile
 
 EmitFn = Callable[[str, int, int, str, str, dict | None], None]
@@ -149,8 +157,14 @@ class _SkipAwarePlanHolder(PlanHolderSource):
     instead of re-parsing the same ones (the 15/50 stall root cause).
     """
 
-    def __init__(self, skip_pdfs: set[str] | None = None, **kw: Any) -> None:
-        super().__init__(**kw)
+    def __init__(
+        self,
+        skip_pdfs: set[str] | None = None,
+        yield_store: Any | None = None,
+        candidate_store: Any | None = None,
+        **kw: Any,
+    ) -> None:
+        super().__init__(yield_store=yield_store, candidate_store=candidate_store, **kw)
         self._skip = set(skip_pdfs or ())
 
     def discover(
@@ -162,14 +176,20 @@ class _SkipAwarePlanHolder(PlanHolderSource):
         )
 
 
-def _build_discovery_orchestrator(skip_pdfs: set[str] | None = None) -> Any:
+def _build_discovery_orchestrator(
+    skip_pdfs: set[str] | None = None,
+    yield_store: Any | None = None,
+    candidate_store: Any | None = None,
+) -> Any:
     """Build the multi-source discovery orchestrator (CLAUDE.md §8).
 
     EVERY live discovery source is registered and tried in priority order —
     the leads pipeline never depends on a single source. The fixture bridge
     is deliberately NOT registered: this pipeline researches real emails, and
     a fixture fallback would silently trade live discovery for synthetic
-    companies (CLAUDE.md §1, §12).
+    companies (CLAUDE.md §1, §12). ``yield_store`` (Phase G) and
+    ``candidate_store`` (Phase H) are threaded into the plan-holder lane so
+    dork dispatch is learned and LLM-generated dorks are consumed.
     """
     from app.discovery.source_orchestrator import SourceOrchestrator
     from app.discovery.sources.directory_crawl_source import DirectoryCrawlSource
@@ -177,8 +197,15 @@ def _build_discovery_orchestrator(skip_pdfs: set[str] | None = None) -> Any:
 
     orch = SourceOrchestrator()
     orch.register(DirectoryCrawlSource())
-    orch.register(_SkipAwarePlanHolder(skip_pdfs))
-    orch.register(SearchProviderSource())
+    orch.register(_SkipAwarePlanHolder(
+        skip_pdfs, yield_store=yield_store, candidate_store=candidate_store,
+    ))
+    # Inc 2: the SAME learning stores ride the web-search lane so LLM-invented
+    # web angles (layer 'web') dispatch, rotate, and earn/die in the Phase G
+    # yield loop exactly like the plan-holder dorks.
+    orch.register(SearchProviderSource(
+        yield_store=yield_store, candidate_store=candidate_store,
+    ))
     return orch
 
 
@@ -226,6 +253,8 @@ def run_discovery(
     location: str,
     limit: int,
     skip_pdfs: set[str] | None = None,
+    yield_store: Any | None = None,
+    candidate_store: Any | None = None,
 ) -> tuple[SourceStatus, list[dict], dict]:
     """One multi-source live discovery pass for trade+location.
 
@@ -234,9 +263,18 @@ def run_discovery(
     parsed this run, exactly as before — the difference is the crawler and
     search lanes now contribute alongside it, so a re-run of the same query
     surfaces genuinely NEW companies instead of the same pool (the user's
-    "same result every time" complaint).
+    "same result every time" complaint). ``yield_store`` (Phase G) drives the
+    plan-holder lane's learned-dork gate; ``candidate_store`` (Phase H) feeds
+    LLM-generated dorks not proven dead into the same lane.
     """
-    orch = _build_discovery_orchestrator(skip_pdfs)
+    # Phase H add-side now LIVE: propose NEW dorks into the yield loop once per
+    # run (bounded), so discovery can exceed the 8 static templates as the 3rd
+    # AI learns phrasings the hand-written set misses. Staged candidates
+    # dispatch through the SAME proof/drop loop (never injected as proven — §12);
+    # the cold-start guard holds until real trial evidence exists.
+    _run_discovery_generation(yield_store, candidate_store)
+
+    orch = _build_discovery_orchestrator(skip_pdfs, yield_store, candidate_store)
     companies, meta = orch.discover(
         industry=trade, location=location, limit=limit,
     )
@@ -261,6 +299,115 @@ def run_discovery(
     return status, companies, meta
 
 
+#: Phase H bound — how many live, non-dropped candidate dorks may be staged
+#: before the add-side AI pauses. One generation call proposes up to ~5 new
+#: angles and generation pauses once the queue is full, so the yield loop gets
+#: to prove/drop them before the AI invents more — never an unbounded pile of
+#: unproven queries flooding the plan-holder lane (CLAUDE.md §7/§12). The
+#: dead-dork drop gate still prunes zero-working candidates at MIN_TRIALS.
+_DISCOVERY_GEN_CAP = 6
+
+
+def _run_discovery_generation(
+    yield_store: Any | None,
+    candidate_store: Any | None,
+    *,
+    segment: str = "",
+) -> dict[str, Any] | None:
+    """One bounded add-side generation pass — 3rd AI proposes NEW dorks.
+
+    The Phase H add-side, no longer maintenance-script-only: wired into LIVE
+    discovery via :func:`run_discovery`. Runs BOTH lanes independently — the
+    Layer-1 dork pass (:func:`generate_dork_candidates`) and the Inc 2 Layer-2
+    web-angle pass (:func:`generate_web_angle_candidates`), each paused by its
+    OWN cap. Returns None when the feature is off (either store missing) or
+    BOTH lanes are at cap; otherwise the honest merged result dict (§6 — a
+    guard hold or no-useful-proposals is a LOUD zero, never a silent skip).
+    Bounded: never fires while ``>= _DISCOVERY_GEN_CAP`` candidates of a lane
+    are staged, so a run stages a handful and later runs wait for the yield
+    loop to prove/drop before proposing more.
+    """
+    if yield_store is None or candidate_store is None:
+        return None
+    try:
+        active = [
+            r for r in candidate_store.all() if r.get("status") != "dropped"
+        ]
+        active_web = [r for r in active if r.get("layer") == "web"]
+        active = [r for r in active if r.get("layer") != "web"]
+    except Exception:  # noqa: BLE001 — a broken store must not crash discovery
+        logger.debug("discovery gen: candidate count unavailable", exc_info=True)
+        active = []
+        active_web = []
+    from app.discovery.template_generation import (
+        generate_dork_candidates,
+        generate_web_angle_candidates,
+    )
+
+    # Layer-1 dork pass — pauses alone at its own cap. It must NOT abort the
+    # whole add-side: a full dork queue says nothing about the web-angle lane
+    # (live proof 2026-09-11: 9 dorks staged -> web angles never generated).
+    result: dict[str, Any] | None = None
+    if len(active) >= _DISCOVERY_GEN_CAP:
+        logger.info(
+            "discovery gen: %d dork candidate(s) staged (cap %d) — dork add-side paused",
+            len(active), _DISCOVERY_GEN_CAP,
+        )
+    else:
+        try:
+            result = generate_dork_candidates(
+                yield_store, candidate_store=candidate_store, segment=segment,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("discovery gen: failed: %s", exc)
+            result = {"generated": [], "rejected": [],
+                      "reason": f"generation error: {exc}"}
+        if result.get("reason"):
+            logger.info("discovery gen: held — %s", result["reason"])
+        elif result.get("generated"):
+            logger.info(
+                "discovery gen: staged %d new dork(s): %s",
+                len(result["generated"]), ", ".join(result["generated"]),
+            )
+        else:
+            logger.info("discovery gen: LLM returned no usable new dork")
+
+    # Inc 2 — Layer-2 web angles: the AI invents NEW discovery METHODS (member
+    # directories, license rosters, bid boards…), same earn-or-die lifecycle.
+    # Separate cap so a full dork queue never blocks method invention.
+    web_result: dict[str, Any] | None = None
+    if len(active_web) < _DISCOVERY_GEN_CAP:
+        try:
+            web_result = generate_web_angle_candidates(
+                yield_store, candidate_store=candidate_store, segment=segment,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("web-angle gen: failed: %s", exc)
+            web_result = {"generated": [], "rejected": [],
+                          "reason": f"generation error: {exc}"}
+        if web_result.get("reason"):
+            logger.info("web-angle gen: held — %s", web_result["reason"])
+        elif web_result.get("generated"):
+            logger.info(
+                "web-angle gen: staged %d new angle(s): %s",
+                len(web_result["generated"]), ", ".join(web_result["generated"]),
+            )
+        else:
+            logger.info("web-angle gen: LLM returned no usable new angle")
+    if web_result is not None:
+        # Merge both layers' outcomes into ONE honest result dict (§6): the
+        # caller logs/surfaces the add-side pass as a whole.
+        result = {
+            "generated": list((result or {}).get("generated") or [])
+            + list(web_result.get("generated") or []),
+            "rejected": list((result or {}).get("rejected") or [])
+            + list(web_result.get("rejected") or []),
+            "reason": (result or {}).get("reason") or web_result.get("reason") or "",
+            "web_generated": web_result.get("generated") or [],
+        }
+    return result
+
+
 def _domain_from_website(website: str) -> str:
     """Company domain from a website URL, or '' when none is derivable."""
     text = website.strip() if website else ""
@@ -274,11 +421,26 @@ def _domain_from_website(website: str) -> str:
         return ""
 
 
-#: Bounded website email-hunt per pass. A search/crawl batch can carry dozens
-#: of companies; probing every site would explode into hundreds of fetches.
-#: A small working set is probed per pass and the rest is honestly counted as
-#: "no public email (not probed)" — CLAUDE.md §10 real discovery, bounded.
-_MAX_EMAIL_PROBES_PER_PASS = 12
+#: Base website email-hunt per pass. Scales dynamically with remaining demand
+#: (see _email_probes_for_demand); this is the floor so small runs don't waste
+#: probes on a handful of companies.
+_BASE_EMAIL_PROBES_PER_PASS = 12
+
+
+def _email_probes_for_demand(remaining: int, n_locs: int = 1) -> int:
+    """Scale website probes per pass with remaining demand.
+
+    Small runs (≤20 remaining) use the base cap — a handful of companies per
+    pass is enough.  Large runs (100+) need a wider probe set per pass to
+    surface enough emails; the formula doubles the base at ~100 remaining and
+    plateaus at 4× the base (~48) to avoid runaway fetch volume.  The loc
+    count divides the budget so multi-market sweeps don't over-probe in each
+    metro.
+    """
+    base = _BASE_EMAIL_PROBES_PER_PASS
+    scale = max(1.0, min(4.0, remaining / 50.0))
+    return max(base, int(base * scale)) // max(1, n_locs)
+
 
 #: Generic mailboxes are a real company email but a poor research start —
 #: prefer a named address (john@acme.com) over info@acme.com when the site
@@ -310,7 +472,7 @@ def company_records_to_leads(
     records: list[dict],
     *,
     email_discover: Callable[[str], Any] | None = None,
-    max_probes: int = _MAX_EMAIL_PROBES_PER_PASS,
+    max_probes: int = _BASE_EMAIL_PROBES_PER_PASS,
 ) -> tuple[list[dict], dict[str, int]]:
     """Convert discovery records (ANY source) into ``(email, domain)`` leads.
 
@@ -361,6 +523,8 @@ def company_records_to_leads(
             "company": record.get("company_name", ""),
             "person": "",
             "source_url": record.get("source_url") or website,
+            # Layer-1 dork attribution (Phase G), passed through for credit.
+            "_discovery_dork": record.get("_discovery_dork", ""),
         }
 
     if candidates:
@@ -407,6 +571,9 @@ def extract_email_leads(records: list[dict]) -> list[dict]:
                     "company": rec.get("company_name", ""),
                     "person": (ph.get("person") or {}).get("name", ""),
                     "source_url": rec.get("source_url", ""),
+                    # Layer-1 dork attribution (Phase G): the dork template that
+                    # surfaced this lead's PDF, for working-lead credit.
+                    "_discovery_dork": rec.get("_discovery_dork", ""),
                 }
             )
     return leads
@@ -503,6 +670,33 @@ def discover_until_target(
             logger.debug("fit-learning source prune unavailable", exc_info=True)
             _fit_learning = None
 
+    # Layer-1 dork-yield store (Phase G): same db as the research verdicts, so
+    # the dispatch recorded here and the working-lead credit committed at
+    # research time read one consistent record. Unavailable (stub store, no db
+    # path) -> None -> no learned-dork gate, discovery unchanged.
+    _discovery_yield = None
+    if _fit_db is not None:
+        try:
+            from app.discovery.yield_learning import DiscoveryYieldStore
+
+            _discovery_yield = DiscoveryYieldStore(_fit_db)
+        except Exception:
+            logger.debug("discovery dork-yield store unavailable", exc_info=True)
+            _discovery_yield = None
+
+    # Phase H — generated-dork candidates (LLM loop). Same db as the yield
+    # store: the proposal lifecycle lives beside the evidence that promotes or
+    # drops it. Unavailable -> None -> static dorks only, feature off.
+    _discovery_candidates = None
+    if _fit_db is not None:
+        try:
+            from app.discovery.template_candidates import TemplateCandidateStore
+
+            _discovery_candidates = TemplateCandidateStore(_fit_db)
+        except Exception:
+            logger.debug("discovery candidate store unavailable", exc_info=True)
+            _discovery_candidates = None
+
     # Phase A — serve the discovery cache first (free, no search).
     if pending_store is not None:
         # Take a wider window than the target: purging happens from the oldest
@@ -543,8 +737,21 @@ def discover_until_target(
         trade = variants[pass_idx % len(variants)]
         loc = query.location
         t0 = time.monotonic()
+        # Report the search BEFORE the (often slow) first pass: run_discovery
+        # does real network work — search + directory crawl + plan-holder PDF
+        # fetches (each +25s) — and emits nothing until it returns, so a
+        # long first pass used to sit at "running, 0 results" and read as
+        # "searching never started" (§6: report in-flight work, not just
+        # completed work).
+        if emit:
+            emit(
+                "discovery", pass_idx + 1, max_passes,
+                f"pass {pass_idx + 1}: searching {trade!r} in {loc!r}…",
+                data={"trade": trade, "location": loc, "phase": "searching"},
+            )
         status, records, meta = run_discovery(
-            trade, loc, max(target * 4, 4), skip_pdfs=pdfs_seen
+            trade, loc, max(target * 4, 4), skip_pdfs=pdfs_seen,
+            yield_store=_discovery_yield, candidate_store=_discovery_candidates,
         )
         pass_urls = meta.get("pdf_urls") or []
         pdfs_seen.update(pass_urls)
@@ -561,13 +768,20 @@ def discover_until_target(
         unseen_records: list[dict] = []
         seen_domain_count = 0
         for rec in records:
+            # Plan-holder records carry real emails DIRECTLY and are deduped at
+            # the EMAIL level (extract_email_leads + dup_plan), so their derived
+            # website must NEVER put them through the seen_domains gate — a
+            # later PDF re-listing a firm from pass 1 surfaces that firm's OTHER
+            # real contacts, which are worth researching (the code's own comment
+            # below: "one company can have many real contacts"). Without this a
+            # run tops out after its first +N wave and the market's remaining
+            # working contacts are silently dropped (CLAUDE.md §7 root cause).
+            if rec.get("plan_holder"):
+                unseen_records.append(rec)
+                continue
             # Only WEBSITE-bearing records (the search/crawl lanes) are domain-
             # deduped: they are the ones PROBED for an email, so re-serving the
             # same company website pass after pass is the wasteful re-crawl.
-            # Plan-holder records carry emails directly and are deduped at the
-            # EMAIL level (extract_email_leads + the dup_plan check), so they
-            # must NOT be collapsed by domain — one company can have many real
-            # contacts (john@acme.com, jane@acme.com) all worth researching.
             website = (rec.get("website") or "").strip()
             if not website:
                 unseen_records.append(rec)
@@ -616,11 +830,26 @@ def discover_until_target(
         fresh: list[dict] = []
         for l in raw_fresh:
             src = l.get("source_url", "")
-            if get_profile().lead_is_non_client(
-                company=l.get("company", ""),
-                domain=l.get("domain", ""),
-                source_url=src,
-            ) or (_fit_learning is not None and _fit_learning.should_skip_source(src)):
+            # Learned skip (Phase E): a source host that never produced a lead
+            # (MIN_TRIALS) OR a company/domain the USER deleted as not-a-client
+            # (one rejection is decisive). Same drop-at-intake cost discipline:
+            # a rejected company never re-spends a research credit.
+            learning_skip = (
+                _fit_learning is not None
+                and (
+                    _fit_learning.should_skip_source(src)
+                    or _fit_learning.should_skip_company(l.get("company", ""))
+                    or _fit_learning.should_skip_domain(l.get("domain", ""))
+                )
+            )
+            if (
+                get_profile().lead_is_non_client(
+                    company=l.get("company", ""),
+                    domain=l.get("domain", ""),
+                    source_url=src,
+                )
+                or learning_skip
+            ):
                 non_client_drops += 1
                 logger.info(
                     "Discovery drop (not our client): %s%s%s from %s",
@@ -697,6 +926,18 @@ def discover_until_target(
 #: would burn credits searching the same pool without adding working leads.
 _MAX_WORKING_ROUNDS = 6
 
+#: Streaming (Phase D) plateau guard — the async equivalent of Fix C. In the
+#: serial loop a "round that added no working leads" is easy to count; in the
+#: streaming pipeline the producer adds continuously while consumers research
+#: asynchronously, so the honest no-progress signal is the CONSECUTIVE number
+#: of researched leads that produced nothing visibly working (skip-score or
+#: dead domain). Two thresholds: after ``_STREAM_PLATEAU_NONWORKING`` non-
+#: working results in a row the run is clearly grinding against a skip pool
+#: (non-clients slip past intake, dead domains, score-skips) — the producer
+#: STOPS honestly instead of streaming the same dead end forever ("data
+#: hamesha milna chahye" never means "keep piling up worthless rows").
+_STREAM_PLATEAU_NONWORKING = 8
+
 
 def _is_visible(dossier: Any) -> bool:
     """True when a researched dossier will actually SHOW in the leads list.
@@ -731,6 +972,7 @@ def run_research(
     location: str = "",
     search_name: str = "",
     folder: str = "",
+    user_id: str = "",
 ) -> list[dict]:
     """Run the full AI research pipeline for each lead.
 
@@ -780,6 +1022,16 @@ def run_research(
         agent.enable_query_yield(_yield_db)
     if _yield_db is not None and hasattr(agent, "enable_fit_learning"):
         agent.enable_fit_learning(_yield_db)
+    # Layer-1 dork-yield store (Phase G): same db as the query/fit learning.
+    _discovery_yield = None
+    if _yield_db is not None:
+        try:
+            from app.discovery.yield_learning import DiscoveryYieldStore
+
+            _discovery_yield = DiscoveryYieldStore(_yield_db)
+        except Exception:  # noqa: BLE001 - learning is best-effort
+            logger.debug("discovery dork-yield store unavailable", exc_info=True)
+            _discovery_yield = None
     total = len(leads)
 
     # SQLite write serialization. Research (network/LLM) runs concurrently, but
@@ -871,7 +1123,7 @@ def run_research(
                 return None
             if store is not None:
                 with write_lock:
-                    store.save(d)
+                    store.save(d, user_id=user_id)
                     if folder or search_name:
                         # AUTO-FILE AT SAVE TIME (Phase C): the run named a
                         # folder and/or search — apply them to this lead RIGHT
@@ -888,6 +1140,14 @@ def run_research(
                         pending_store.remove([email])
             elapsed = time.monotonic() - t0
             working = _is_visible(d)
+            # Layer-1 dork-yield credit (Phase G): a dork-attributed company
+            # that becomes a WORKING lead credits its producing dork. Only
+            # with a dork label — an unattributable lead credits nothing
+            # (silence is not evidence).
+            if working and _discovery_yield is not None and lead.get("_discovery_dork"):
+                _discovery_yield.record_working(
+                    lead["_discovery_dork"], segment_key(trade, location)
+                )
             entry = {
                 "email": email,
                 "domain": domain,
@@ -968,6 +1228,7 @@ def run_full(
     pending_store: Any | None = None,
     *,
     cooldown_seconds: int | None = None,
+    user_id: str = "",
 ) -> dict[str, Any]:
     """Run discovery (looped to target) then AI research, in one call.
 
@@ -1041,6 +1302,25 @@ def run_full(
             "working_leads": 0,
         }
 
+    # PHASE D — streaming producer/consumer. When a real persistence store AND a
+    # real discovery cache are present AND research runs concurrently, run_full
+    # switches to the continuous pipeline: a producer thread streams freshly
+    # discovered leads into the pending buffer while N consumer threads research
+    # directly out of it (never idling between batches), the producer stops once
+    # the working target is met, and the leftover buffer is DRAINED so surplus
+    # data is researched and shown on the frontend instead of skipped (the
+    # user's "data hamesha milna chahye / kabi khatam na ho / jo bacha ho wo bhi
+    # research ho k dikhe" requirement). The serial round-loop below stays for
+    # the CLI / concurrency=1 / no-cache paths — identical behavior, no overlap.
+    from app.core.config import settings as _cfg
+    if (pending_store is not None and store is not None
+            and max(1, _cfg.LEADS_CONCURRENCY) > 1):
+        return _run_full_streaming(
+            query, emit=emit, cancel=cancel, store=store, paused=paused,
+            pending_store=pending_store, cooldown_seconds=cooldown_seconds,
+            user_id=user_id,
+        )
+
     pass_log: list[dict] = []
     results: list[dict] = []
     working = 0
@@ -1072,6 +1352,7 @@ def run_full(
             pending_store=pending_store,
             trade=query.trade, location=query.location,
             search_name=query.search_name, folder=query.folder,
+            user_id=user_id,
         )
         working = sum(1 for e in results if e.get("working"))
         if working <= prev_working:
@@ -1097,5 +1378,610 @@ def run_full(
         "working_leads": working,
         "requested": query.target_emails,
         "shortfall": max(0, query.target_emails - working),
+        "shortfall_reason": shortfall_reason,
+    }
+
+
+def _run_full_streaming(
+    query: ResearchQuery,
+    emit: EmitFn | None = None,
+    cancel: CancelFn | None = None,
+    store: Any | None = None,
+    paused: PauseFn | None = None,
+    pending_store: Any | None = None,
+    *,
+    cooldown_seconds: int | None = None,
+    user_id: str = "",
+) -> dict[str, Any]:
+    """Streaming producer/consumer run_full (Phase D).
+
+    The user's architecture — "1st AI keeps finding data and storing it in ONE
+    place while the 2nd/3rd research without stopping" — is exactly this: the
+    pending buffer IS the one place.
+
+      * PRODUCER thread: runs live discovery passes (directory crawl + plan-
+        holder PDFs + web search) and stocks every fresh lead into
+        ``pending_store`` (the buffer). It stops when the WORKING target is
+        met, the user cancels/pauses, or discovery is genuinely exhausted.
+      * CONSUMER threads (settings.LEADS_CONCURRENCY): pull DISTINCT pending
+        leads out of the buffer and research them (triage -> company -> person
+        -> intent -> scoring -> save). A consumer only exits when the producer
+        is DONE and the buffer is empty — so leftover buffered data is drained
+        and shown on the frontend, never skipped ("jo bacha ho wo bhi research
+        ho k dikhe"). Between batches a consumer idle-waits ~0.3s, it never
+        stops working while the producer is still filling.
+      * The ``working`` count is the shared demand signal: the producer watches
+        it to know when the user's quantity is met; consumers bump it whenever
+        a newly-researched dossier will SHOW in the leads list.
+
+    This overlaps discovery and research (the true speedup — more agents in
+    series would only be slower; real speed is parallelism). The result dict
+    keeps the same contract as :func:`run_full`, so the job runner / API are
+    unchanged.
+    """
+    from app.core.config import settings
+    from app.lead_research.agent import AILeadResearchAgent
+    from app.lead_research.fit_learning import FitLearningStore
+    from app.lead_research.service import is_dead_domain_dossier
+
+    if cooldown_seconds is None:
+        cooldown_seconds = settings.LEAD_REENRICHMENT_COOLDOWN_SECONDS
+    concurrency = max(1, settings.LEADS_CONCURRENCY)
+    target_emails = query.target_emails
+
+    # ONE agent shared across consumer threads — the same sharing model as
+    # run_research's pool. Query/fit learning persist to the dossiers file.
+    agent = AILeadResearchAgent()
+    _yield_db = getattr(store, "_db_path", None) if store is not None else None
+    if _yield_db is not None:
+        if hasattr(agent, "enable_query_yield"):
+            agent.enable_query_yield(_yield_db)
+        if hasattr(agent, "enable_fit_learning"):
+            agent.enable_fit_learning(_yield_db)
+    _fit_learning = None
+    if _yield_db is not None:
+        try:
+            _fit_learning = FitLearningStore(_yield_db)
+        except Exception:  # noqa: BLE001 - learning is best-effort
+            logger.debug("fit-learning source prune unavailable", exc_info=True)
+            _fit_learning = None
+    # Layer-1 dork-yield store (Phase G) — same db, one consistent record.
+    _discovery_yield = None
+    if _yield_db is not None:
+        try:
+            from app.discovery.yield_learning import DiscoveryYieldStore
+
+            _discovery_yield = DiscoveryYieldStore(_yield_db)
+        except Exception:  # noqa: BLE001 - learning is best-effort
+            logger.debug("discovery dork-yield store unavailable", exc_info=True)
+            _discovery_yield = None
+    # Phase H — LLM-generated dork candidates (same db, one consistent record).
+    _discovery_candidates = None
+    if _yield_db is not None:
+        try:
+            from app.discovery.template_candidates import TemplateCandidateStore
+            _discovery_candidates = TemplateCandidateStore(_yield_db)
+        except Exception:  # noqa: BLE001
+            logger.debug("discovery candidate store unavailable", exc_info=True)
+            _discovery_candidates = None
+
+    # Shared run state. ``claimed`` guards pending_store's peek-not-pop take()
+    # so two consumers never research the same buffered row; ``write_lock``
+    # serializes ALL SQLite writes (producer add + consumer save/remove/mark).
+    write_lock = threading.Lock()
+    state_lock = threading.Lock()
+    claimed: set[str] = set()
+    attempted: set[tuple[str, str]] = set()
+    seen_domains: set[str] = set()
+    seen_pdfs: set[str] = set()
+    producer_done = False
+    shortfall_reason = ""
+    working = 0
+    results: list[dict] = []
+    pass_log: list[dict] = []
+    consecutive_nonworking = 0
+    plateau_flag = False
+
+    # Dead / cooling pools snapshot once — same exclusion the serial pipeline
+    # applies to FRESH discovery (a dead or recently-failed address never
+    # re-enters the buffer through a later pass).
+    with write_lock:
+        dead_pool = pending_store.dead_emails()
+        cooling_pool = (
+            pending_store.cooling_emails(cooldown_seconds)
+            if cooldown_seconds else set()
+        )
+
+    def _claim_next(batch: int) -> dict | None:
+        """Return one NOT-already-claimed pending lead (peek-not-pop guarded).
+
+        ``pending_store.take`` leaves rows in pending until ``remove``, so two
+        consumers could grab the SAME row; ``claimed`` (per-run, in-memory)
+        makes each claim exclusive. Takes a window of ``batch`` and returns the
+        first row no other consumer has claimed, or None when every row in the
+        window is already in flight (or the buffer is empty).
+        """
+        with write_lock:
+            rows = pending_store.take(
+                batch, location=query.location,
+                cooldown_seconds=cooldown_seconds,
+            )
+        for r in rows:
+            if r["email"] not in claimed:
+                claimed.add(r["email"])
+                return r
+        return None
+
+    def _produce() -> None:
+        """Fill the buffer with fresh discovery until demand is met / drained."""
+        nonlocal shortfall_reason, plateau_flag, consecutive_nonworking
+        variants = _trade_variants(query.trade)
+        loc_variants = [query.location]
+        # Phase J — AI-expand the query surface ONCE per job so discovery never
+        # exhausts a fixed (trade, location) point: each pass then rotates a
+        # genuinely different trade/location wording, surfacing a different PDF
+        # set. On no key / LLM failure this degrades to the literal trade +
+        # location (exact pre-Phase-J behavior), logged honestly (§6).
+        try:
+            qe = generate_query_expansion(query.trade, query.location)
+        except Exception as exc:  # noqa: BLE001 - expansion never breaks a run
+            logger.info("query-expansion: disabled for this run: %s", exc)
+            qe = {"trade_variants": [], "location_variants": [],
+                  "reason": f"expansion error: {exc}"}
+        if qe.get("trade_variants"):
+            variants = qe["trade_variants"]
+        if qe.get("location_variants"):
+            # Geo breadth (Phase K): never let an AI rewrite replace or narrow
+            # the user's OWN market out of the run. The literal location is
+            # always searched first, then every distinct AI metro variant — so a
+            # run covers "San Antonio TX" AND its surrounding counties / cities
+            # instead of grinding one county (the discovery_exhausted starve).
+            loc_variants = merge_locations(query.location, qe["location_variants"])
+        if qe.get("reason"):
+            logger.info("query-expansion: %s", qe["reason"])
+        # Phase K2 telemetry: surface WHAT the AI actually returned (raw replies
+        # included) into the job event stream. A weak/blank expansion — the
+        # literal-only starvation — is then diagnosable from History instead of
+        # being a silent run (§6): the honest surface AND every raw AI reply
+        # the expansion consumed (retries and all).
+        if emit:
+            emit(
+                "expansion", 1, 1,
+                f"query surface: {len(variants)} trade wording(s) "
+                f"× {len(loc_variants)} location wording(s)"
+                f"{' · retried' if qe.get('retried') else ''}"
+                f"{' · ' + qe.get('reason', '') if qe.get('reason') else ''}",
+                data={
+                    "trade_variants": variants,
+                    "location_variants": loc_variants,
+                    "retried": bool(qe.get("retried")),
+                    "reason": qe.get("reason") or "",
+                    "raw_replies": qe.get("raw_replies") or [],
+                },
+            )
+        n_trades = max(1, len(variants))
+        n_locs = max(1, len(loc_variants))
+        # ONE round = ONE systematic sweep over the WHOLE trade × location
+        # surface (Phase K pass-rotation fix). The old rotation capped each
+        # round at 6 passes — fewer than n_trades=8 — so pass_idx // n_trades
+        # never reached 1: locations NEVER advanced past loc_variants[0], the
+        # later trade wordings (6-7) were never searched, and a dry first
+        # location killed the whole run while 7 metro markets sat untouched.
+        # The live 100-target San Antonio run proved it: 12 passes, every
+        # event location='San Antonio TX', the 7 expanded locations never
+        # searched, shortfall 98 discovery_exhausted. THIS sweep consumes the
+        # WHOLE surface; a round ends only once every location × trade wording
+        # has actually been searched.
+        sweep = n_trades * n_locs
+        # Scale rounds with target: a 1000-lead run needs many more full-surface
+        # sweeps than a 50-lead run.  Each round covers every trade × location
+        # pair (sweep passes), so the round count governs how many times the
+        # ENTIRE geo surface is re-searched.
+        #
+        # The FLOOR is 8, not 3: the research plateau needs
+        # _STREAM_PLATEAU_NONWORKING (8) consecutive non-working results BEFORE
+        # it can be read at round end.  On a tiny sweep (a 2-pass grid) that
+        # needs ~4-5 rounds just to manifest; capping rounds below that would
+        # exhaust the loop and fling the run into the "discovery_exhausted"
+        # fallback BEFORE the true stop condition (no_progress_plateau) is ever
+        # observed.  8 rounds is still fast for small targets and lets the REAL
+        # guards (plateau / dry-sweep exhaustion) decide when discovery is
+        # genuinely spent.
+        #
+        # The CEILING (80) prevents runaway search on huge targets (80 rounds ×
+        # 64-pass sweep = 5120 discovery passes worst-case); the plateau and
+        # exhaustion guards stop honest runs far earlier.
+        base_rounds = max(8, min(target_emails // 25, 80))
+        rounds = 0
+
+        def _expandable_markets() -> list[str]:
+            """Known metro markets NOT yet in the rotation (Surface Expansion).
+
+            Draws from the deterministic :data:`_METRO_FALLBACK` table only —
+            Inc 1 keeps expansion cheap and predictable (no extra AI call on
+            the hot path). Returns [] when every known market is already in
+            the surface, which is the honest "nothing left to expand" signal.
+            """
+            fallback = _METRO_FALLBACK.get(_fold(query.location)) or []
+            have = {_fold(v) for v in loc_variants}
+            out: list[str] = []
+            for m in fallback:
+                key = _fold(m)
+                if key not in have and key not in {_fold(x) for x in out}:
+                    out.append(m)
+            return out
+
+        while rounds < base_rounds:
+            if not _wait_if_paused(paused, cancel):
+                break
+            with state_lock:
+                if working >= target_emails:
+                    break
+                w = working
+            got_new = False
+            for pass_idx in range(max(2, min(sweep, target_emails))):
+                if not _wait_if_paused(paused, cancel):
+                    return
+                with state_lock:
+                    w = working
+                if w >= target_emails:
+                    return
+                # Trade advances every pass; the location advances every
+                # n_trades passes — pass_idx really reaches n_trades now, so
+                # the geo surface is consumed, not dead code. The STREAMING
+                # plateau is checked at END of round (below), never per-pass:
+                # consumers report consecutive non-working research, and a bad
+                # sample from loc_variants[0] must not pre-empt the 7 other
+                # markets the rest of this sweep will still search.
+                trade = variants[pass_idx % n_trades]
+                loc = loc_variants[(pass_idx // n_trades) % n_locs]
+                limit = max(10, (target_emails - w) * 2)
+                try:
+                    # Same pre-search report as the serial loop: the moment a
+                    # pass begins the user sees "searching…", never a silent
+                    # "running, 0 results" while the first discovery call is
+                    # in flight (§6).
+                    if emit:
+                        emit(
+                            "discovery", pass_idx + 1, 1,
+                            f"searching {trade!r} in {loc!r}…",
+                            data={"trade": trade, "location": loc,
+                                  "phase": "searching"},
+                        )
+                    status, records, meta = run_discovery(
+                        trade, loc, limit, skip_pdfs=seen_pdfs,
+                        yield_store=_discovery_yield,
+                        candidate_store=_discovery_candidates,
+                    )
+                except Exception as exc:  # noqa: BLE001 - a bad pass never kills the run
+                    logger.info("streaming discovery pass %d failed: %s",
+                                pass_idx + 1, exc)
+                    continue
+                seen_pdfs.update(meta.get("pdf_urls") or [])
+                # Domain dedup BEFORE the website email-probe (Fix A) — advance
+                # the search/crawl lanes, never re-probe the same companies.
+                unseen_records: list[dict] = []
+                for rec in records:
+                    # Plan-holder rows carry real emails DIRECTLY — their derived
+                    # website must not put them through the seen_domains gate
+                    # (the serial twin: later PDFs re-list firms and surface
+                    # their OTHER real contacts; see the comment in discover_until_target).
+                    if rec.get("plan_holder"):
+                        unseen_records.append(rec)
+                        continue
+                    website = (rec.get("website") or "").strip()
+                    if not website:
+                        unseen_records.append(rec)
+                        continue
+                    dom = _domain_from_website(website)
+                    if dom:
+                        if dom in seen_domains:
+                            continue
+                        seen_domains.add(dom)
+                    unseen_records.append(rec)
+                new_leads, _stats = company_records_to_leads(
+                    unseen_records,
+                    max_probes=_email_probes_for_demand(target_emails - w, n_locs),
+                )
+                fresh: list[dict] = []
+                for l in new_leads:
+                    if (l["email"], l["domain"]) in attempted:
+                        continue
+                    if store is not None and store.get(l["email"]) is not None:
+                        continue
+                    if dead_pool and l["email"] in dead_pool:
+                        continue
+                    if cooling_pool and l["email"] in cooling_pool:
+                        continue
+                    # Learned skip (Phase E) — mirrors the serial intake gate:
+                    # a source that never produced a lead (MIN_TRIALS) or a
+                    # company/domain the USER rejected stays out of the buffer.
+                    learning_skip = (
+                        _fit_learning is not None
+                        and (
+                            _fit_learning.should_skip_source(l.get("source_url", ""))
+                            or _fit_learning.should_skip_company(l.get("company", ""))
+                            or _fit_learning.should_skip_domain(l.get("domain", ""))
+                        )
+                    )
+                    if (
+                        get_profile().lead_is_non_client(
+                            company=l.get("company", ""),
+                            domain=l.get("domain", ""),
+                            source_url=l.get("source_url", ""),
+                        )
+                        or learning_skip
+                    ):
+                        continue
+                    fresh.append(l)
+                    attempted.add((l["email"], l["domain"]))
+                # Stamp the run's location on every buffered lead — the consumer
+                # pulls with ``location=query.location`` (so surplus from OTHER
+                # locations is never drained into this run), and freshly added
+                # leads MUST carry the location or they are invisible to that
+                # same filter (a plan-holder record carries none by itself).
+                for l in fresh:
+                    l["location"] = l.get("location") or query.location
+                if fresh:
+                    got_new = True
+                    with write_lock:
+                        pending_store.add(fresh)  # -> the buffer
+                    if emit:
+                        emit(
+                            "discovery", pass_idx + 1, 1,
+                            f"+{len(fresh)} lead(s) buffered",
+                            data={"fresh": len(fresh), "trade": trade,
+                                  "location": loc,
+                                  "status": status.value,
+                                  "pass": pass_idx + 1, "round": rounds + 1},
+                        )
+                pass_log.append({
+                    "pass": pass_idx + 1, "round": rounds + 1,
+                    "trade": trade, "location": loc,
+                    "status": status.value, "records": len(records),
+                    "fresh": len(fresh),
+                })
+                # Give consumers a beat to research the just-buffered wave
+                # before the plateau check reads their verdicts — this makes
+                # the guard observe settled state, not mid-flight state.
+                time.sleep(0.05)
+            if not got_new:
+                # A full metro-wide sweep surfaced nothing NEW anywhere — the
+                # pool is honestly drained. Unlike the old per-round break this
+                # fires only after EVERY trade×location combo was tried, so a
+                # dry first city can no longer kill a run while 7 other markets
+                # are untouched.
+                shortfall_reason = "discovery_exhausted"
+                break
+            if plateau_flag:
+                # RESEARCH-side plateau (async Fix C): the consumers crossed
+                # _STREAM_PLATEAU_NONWORKING consecutive non-working results.
+                # Checked only at END of a full sweep — a bad sample from one
+                # market must never pre-empt the other markets this round is
+                # still searching, but a pool grinding skips everywhere is a
+                # genuine dead end: stopping is the honest outcome. "working"
+                # resets consecutive_nonworking, so a productive market in the
+                # same sweep keeps the run alive.
+                #
+                # SURFACE EXPANSION (Inc 1): a plateau on the CURRENT surface
+                # is not proof the metro is dry — it is proof THESE markets
+                # are. Before declaring no_progress_plateau, pull the next
+                # batch of known metro markets (fallback entries not yet
+                # searched) into the rotation, reset the plateau counter, and
+                # keep hunting. Only when the expanded surface is ALSO dry is
+                # stopping honest. Live proof: the 2026-09-11 Fort Worth run
+                # stopped at 5/20 with 3 markets searched while 6 more sat in
+                # the fallback table untouched.
+                more = _expandable_markets()
+                if more:
+                    loc_variants.extend(more)
+                    n_locs = len(loc_variants)
+                    # The sweep size is trade×location — expansion grew the
+                    # location axis, so the per-round pass count must follow
+                    # (a stale sweep would re-search only the first markets).
+                    sweep = n_trades * n_locs
+                    plateau_flag = False
+                    consecutive_nonworking = 0
+                    if emit:
+                        emit(
+                            "expansion", 1, 1,
+                            f"plateau on {n_locs - len(more)} markets — "
+                            f"expanding surface: +{len(more)} new market(s) "
+                            f"({', '.join(more[:4])}"
+                            f"{'…' if len(more) > 4 else ''})",
+                            data={
+                                "new_markets": more,
+                                "total_markets": n_locs,
+                                "trigger": "plateau",
+                            },
+                        )
+                    continue
+                shortfall_reason = "no_progress_plateau"
+                break
+            rounds += 1
+
+    def _producer() -> None:
+        nonlocal producer_done, shortfall_reason
+        try:
+            _produce()
+        finally:
+            with state_lock:
+                producer_done = True
+                if working < target_emails:
+                    shortfall_reason = shortfall_reason or "discovery_exhausted"
+
+    def _research_one(email: str, domain: str, source_url: str, dork: str,
+                      t0: float) -> dict | None:
+        """Single buffered-lead research — same logic as run_research._work.
+
+        ``dork`` is the Layer-1 dork attribution (Phase G) persisted on the
+        pending row, used to credit a WORKING lead back to its producing dork.
+        """
+        if store is not None:
+            existing = store.get(email)
+            if existing is not None:
+                with write_lock:
+                    pending_store.remove([email])
+                return {
+                    "email": email, "domain": domain,
+                    "company": existing.company.name,
+                    "person": existing.person.name,
+                    "bound": existing.person.bound,
+                    "score": existing.potential_score,
+                    "recommendation": existing.recommendation,
+                    "intent": existing.intent.needs_estimation if existing.intent else "",
+                    "timing": existing.timing.window if existing.timing else "",
+                    "sources_checked": existing.sources_checked,
+                    "elapsed_s": 0.0, "cached": True, "working": False,
+                    "message": f"{email} -> CACHED (already researched)",
+                }
+        try:
+            d = agent.research(
+                email, domain, trade=query.trade, location=query.location,
+                source_url=source_url,
+            )
+            if is_dead_domain_dossier(d):
+                with write_lock:
+                    pending_store.mark_dead([email])
+                return {
+                    "email": email, "domain": domain, "working": False,
+                    "recommendation": "skip", "reason": "dead_domain",
+                    "message": f"{email} -> SKIPPED (dead/expired domain)",
+                }
+            if store is not None:
+                with write_lock:
+                    store.save(d, user_id=user_id)
+                    if query.folder or query.search_name:
+                        store.set_meta(
+                            email,
+                            folder=query.folder,
+                            tags=[query.search_name] if query.search_name else [],
+                        )
+                    pending_store.remove([email])
+            elapsed = time.monotonic() - t0
+            vis = _is_visible(d)
+            # Layer-1 dork-yield credit (Phase G + I) — same as run_research._work,
+            # now segment-tagged so the trial lands on the (dork, trade|location)
+            # row and coverage is targeted per segment.
+            if vis and _discovery_yield is not None and dork:
+                _discovery_yield.record_working(
+                    dork, segment_key(query.trade, query.location)
+                )
+            return {
+                "email": email, "domain": domain,
+                "company": d.company.name,
+                "person": d.person.name,
+                "bound": d.person.bound,
+                "score": d.potential_score,
+                "recommendation": d.recommendation,
+                "intent": d.intent.needs_estimation if d.intent else "",
+                "timing": d.timing.window if d.timing else "",
+                "sources_checked": d.sources_checked,
+                "elapsed_s": round(elapsed, 1),
+                "working": vis,
+                "message": (
+                    f"{email} -> company={d.company.name[:30]!r} person="
+                    f"{d.person.name!r} bound={d.person.bound} "
+                    f"score={d.potential_score} rec={d.recommendation}"
+                ),
+            }
+        except Exception as exc:  # noqa: BLE001 - one lead never kills a run
+            with write_lock:
+                pending_store.mark_attempt([email])
+            return {
+                "email": email, "domain": domain, "error": str(exc),
+                "working": False, "message": f"{email} -> ERROR: {exc}",
+            }
+
+    def _consumer() -> None:
+        """Drain the buffer, researching every row, until producer is done."""
+        nonlocal working, consecutive_nonworking, plateau_flag
+        batch = max(concurrency * 2, 5)
+        while True:
+            if not _wait_if_paused(paused, cancel):
+                return
+            try:
+                lead = _claim_next(batch)
+            except sqlite3.OperationalError as exc:
+                # Guard (Galti #1 root-cause): the busy_timeout on service.py
+                # stores makes lock-waits resolve, but a rare "disk I/O error" can
+                # still surface here. A research worker must NEVER die from a
+                # transient DB fault — back off briefly and retry the claim.
+                logger.warning("claim: transient sqlite error %s; retrying", exc)
+                time.sleep(0.5)
+                continue
+            if lead is None:
+                with state_lock:
+                    done = producer_done
+                if done:
+                    return
+                # Buffer momentarily empty while the producer still fills it —
+                # idle-wait briefly, NEVER exit (the "baghair ruke" contract:
+                # research continues the moment data lands).
+                time.sleep(0.3)
+                continue
+            email = lead["email"]
+            domain = lead["domain"]
+            t0 = time.monotonic()
+            entry = _research_one(
+                email, domain, lead.get("source_url", ""), lead.get("dork", ""), t0,
+            )
+            if entry is None:
+                continue
+            vis = bool(entry.get("working"))
+            with state_lock:
+                results.append(entry)
+                if entry.get("cached"):
+                    # Already-researched dedup is NOT "no progress" — the row
+                    # was legitimately done, just cleaned from the buffer.
+                    pass
+                elif vis:
+                    working += 1
+                    consecutive_nonworking = 0
+                else:
+                    consecutive_nonworking += 1
+                    if consecutive_nonworking >= _STREAM_PLATEAU_NONWORKING:
+                        plateau_flag = True
+                step = len(results)
+            if emit:
+                emit(
+                    "research", step, target_emails,
+                    entry.get("message", f"{email} done"),
+                    email=email, data=entry,
+                )
+
+    producer = threading.Thread(target=_producer, daemon=True)
+    producer.start()
+    consumers = [
+        threading.Thread(target=_consumer, daemon=True)
+        for _ in range(concurrency)
+    ]
+    for t in consumers:
+        t.start()
+
+    producer.join()
+    for t in consumers:
+        t.join()
+
+    with state_lock:
+        final_results = list(results)
+        final_working = working
+    logger.info(
+        "run_full[streaming]: %d leads researched, %d working, "
+        "target=%d shortfall=%d producer_done=%s",
+        len(final_results), final_working, target_emails,
+        max(0, target_emails - final_working), producer_done,
+    )
+    return {
+        "query": query.describe(),
+        "trade": query.trade,
+        "location": query.location,
+        "target_emails": target_emails,
+        "leads_found": len(final_results),
+        "discovery_passes": list(pass_log),
+        "results": final_results,
+        "working_leads": final_working,
+        "requested": target_emails,
+        "shortfall": max(0, target_emails - final_working),
         "shortfall_reason": shortfall_reason,
     }

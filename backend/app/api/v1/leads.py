@@ -26,6 +26,8 @@ from typing import Any
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import Response
 
+from app.auth.dependencies import get_current_user
+from app.auth.models import User
 from app.core.config import settings
 from app.lead_research.service import LeadResearchStore, _email_hash
 from app.leads.export import export_csv
@@ -103,6 +105,10 @@ def _job_out(job: Job) -> JobOut:
         created_at=job.created_at,
         updated_at=job.updated_at,
         elapsed_s=_live_elapsed(job),
+        working_leads=job.working_leads,
+        leads_found=job.leads_found,
+        shortfall=job.shortfall,
+        shortfall_reason=job.shortfall_reason,
     )
 
 
@@ -115,6 +121,10 @@ def _job_summary(job: Job) -> JobSummary:
         created_at=job.created_at,
         updated_at=job.updated_at,
         elapsed_s=_live_elapsed(job),
+        working_leads=job.working_leads,
+        leads_found=job.leads_found,
+        shortfall=job.shortfall,
+        shortfall_reason=job.shortfall_reason,
     )
 
 
@@ -158,15 +168,40 @@ def _lead_summary(
     )
 
 
-def _job_source_by_email() -> dict[str, str]:
+def _user_owns_dossier(email: str, user: User) -> bool:
+    """True when the user may access this dossier.
+
+    Admin may touch any dossier. A non-admin may only touch a dossier whose
+    ``user_id`` matches their own — never another user's, and never a legacy
+    pre-auth row (those belong to the admin alone).
+    """
+    if user.is_admin:
+        return True
+    if not user.id:
+        return False
+    from app.lead_research.service import _email_hash
+
+    conn = _store._conn()
+    row = conn.execute(
+        "SELECT user_id FROM dossiers WHERE email_hash = ?", (_email_hash(email),)
+    ).fetchone()
+    conn.close()
+    return row is not None and row[0] == user.id
+
+
+def _job_source_by_email(user_id: str = "", is_admin: bool = False) -> dict[str, str]:
     """Map email -> the query run that produced it, from persisted job results.
 
     Lets the leads list name each row's source run (``trade · location``) so a
     fresh search's leads are visibly separated from older runs — no more mixed,
     unlabeled data.
+
+    When ``user_id`` is provided and the user is not admin, only the caller's
+    own jobs are scanned — so source labels respect data isolation.
     """
     out: dict[str, str] = {}
-    for job in _manager.list_jobs():
+    uid = user_id if user_id and not is_admin else None
+    for job in _manager.list_jobs(user_id=uid):
         q = job.query or {}
         label = " · ".join(
             [str(q.get("trade", "")).strip(), str(q.get("location", "")).strip()]
@@ -185,7 +220,7 @@ def _job_source_by_email() -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 @router.post("/jobs", response_model=JobOut, status_code=201, dependencies=[Depends(require_api_key)])
-def create_job(body: JobCreate) -> JobOut:
+def create_job(body: JobCreate, user: User = Depends(get_current_user)) -> JobOut:
     """Submit a query run; it executes in the background."""
     query = ResearchQuery(
         trade=body.trade,
@@ -199,14 +234,15 @@ def create_job(body: JobCreate) -> JobOut:
         query.validate()
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    job = _manager.submit(query)
+    job = _manager.submit(query, user_id=user.id)
     logger.info("POST /leads/jobs -> %s (%s)", job.id, query.describe())
     return _job_out(job)
 
 
 @router.get("/jobs", response_model=list[JobSummary], dependencies=[Depends(require_api_key)])
-def list_jobs() -> list[JobSummary]:
-    return [_job_summary(j) for j in _manager.list_jobs()]
+def list_jobs(user: User = Depends(get_current_user)) -> list[JobSummary]:
+    uid = None if user.is_admin else user.id
+    return [_job_summary(j) for j in _manager.list_jobs(user_id=uid)]
 
 
 @router.get("/jobs/{job_id}", response_model=JobOut, dependencies=[Depends(require_api_key)])
@@ -255,9 +291,6 @@ def resume_job(job_id: str) -> dict[str, Any]:
 #: Deterministic lead ordering — "actionable first, junk last, phir score,
 #: phir naya." Saved order (newest-first from the store) is the tie-breaker, so
 #: the sort is STABLE over rec precedence, never scrambled.
-_REC_PRECEDENCE = {"contact_now": 0, "nurture": 1, "skip": 2}
-
-
 @router.get("", response_model=list[LeadSummary], dependencies=[Depends(require_api_key)])
 def list_leads(
     recommendation: str | None = Query(default=None, description="filter by recommendation (contact_now/nurture/skip)"),
@@ -267,8 +300,11 @@ def list_leads(
     folder: str | None = Query(default=None, description="only leads in this folder"),
     tag: str | None = Query(default=None, description="only leads carrying this tag"),
     date: str | None = Query(default=None, description="only leads extracted on this date (YYYY-MM-DD)"),
+    q: str | None = Query(default=None, description="identity text search (company/email/person/role)"),
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
+    response: Response = None,
+    user: User = Depends(get_current_user),
 ) -> list[LeadSummary]:
     """List leads with deterministic ordering + honest defaults.
 
@@ -294,70 +330,66 @@ def list_leads(
     AI-era dossiers are re-gated, never served stale), and ``source`` names the
     query run that produced it — so a fresh search's leads are separated from
     older runs instead of mixing.
+
+    ``q`` is an identity text search (company / refined company / email /
+    person / role), matched as a substring — the exact filter the old client
+    did in the browser, now answered server-side.
+
+    FILTERING/PAGING IN THE DATABASE (Phase 2) — the old endpoint materialized
+    EVERY dossier (full JSON) + re-gated + paginated last, so a request scanned
+    the whole store. Now :meth:`LeadResearchStore.query_leads` filters, sorts and
+    paginates in SQL on persisted verdict columns. Only the PAGE is returned; the
+    honest count for the SAME filters rides in the ``X-Total-Count`` header so
+    the frontend can page without ever downloading the store. The returned page
+    is RE-GATED as a freshness backstop (a verdict that drifted since the row was
+    written heals its column so the NEXT request filters it correctly).
     """
     from app.lead_research.scoring import regate_recommendation
 
-    source_by_email = _job_source_by_email()
-    meta_by_email = _store.all_meta()
-    date_by_hash = _store.research_dates()
-    dossiers = _store.list_all()
-    filtered = []
-    for d in dossiers:
-        rec = regate_recommendation(d)
-        if recommendation is None:
-            # Default view: ACTIONABLE ONLY. Junk/skip is hidden unless the
-            # user explicitly asks for it (?recommendation=skip).
-            if rec == "skip":
-                continue
-        elif rec != recommendation:
-            continue
-        if bound is not None and d.person.bound != bound:
-            continue
-        if min_score is not None and d.potential_score < min_score:
-            continue
-        src = source_by_email.get(d.email, "")
-        if source is not None and src != source:
-            continue
-        eh = _email_hash(d.email)
-        meta = meta_by_email.get(eh)
-        folder_value = meta.folder if meta else ""
-        if folder is not None:
-            # A folder view? Only that folder — `folder="*"` = EVERY place
-            # (Dashboard "All" links + Contacts outreach list), no scoping.
-            if folder != "*" and folder_value != folder:
-                continue
-        elif date is None and tag is None:
-            # DEFAULT = the UNFILED inbox (mailbox model). A lead you moved
-            # into a folder LEAVES the Companies list ("folder ma dalane par
-            # companies section ma nahi dikhta"); it lives inside that folder
-            # now. Date + tag are the GLOBAL recall tools — they bypass this
-            # scoping so a folderized lead's extraction day / tag stays
-            # findable ("kis tareekh ko kya nikla", "tag wali saari leads").
-            if folder_value != "":
-                continue
-        if tag is not None and (meta is None or tag not in meta.tags):
-            continue
-        created = date_by_hash.get(eh, "")
-        if date is not None and created != date:
-            continue
-        filtered.append((d, rec, src, meta, created))
-    # Priority: tier (actionable first) -> score (high first) -> newest (stable
-    # tie-break from the store's updated_at DESC base). Deterministic, honest.
-    filtered.sort(
-        key=lambda item: (_REC_PRECEDENCE.get(item[1], 9), -item[0].potential_score)
+    source_by_email = _job_source_by_email(user_id=user.id, is_admin=user.is_admin)
+    source_emails = (
+        {e for e, s in source_by_email.items() if s == source} if source else None
     )
-    page = filtered[offset:offset + limit]
-    return [
-        _lead_summary(
+    page, total = _store.query_leads(
+        user_id=user.id if not user.is_admin else None,
+        is_admin=user.is_admin,
+        recommendation=recommendation,
+        bound=bound,
+        min_score=min_score,
+        folder=folder,
+        tag=tag,
+        date=date,
+        source_emails=source_emails,
+        q=q,
+        global_scope=(date is not None or tag is not None),
+        limit=limit,
+        offset=offset,
+    )
+    out: list[LeadSummary] = []
+    for item in page:
+        d = item["dossier"]
+        # Freshness backstop: TODAY'S gate is re-applied to the page (cheap — a
+        # page, not the store) and any drift heals the column, so a rule change
+        # corrects the next request up-front.
+        fresh = regate_recommendation(d)
+        if fresh != item["recommendation"]:
+            _store.set_filter_columns(
+                item["email_hash"], fresh, d.potential_score, bool(d.person.bound)
+            )
+        if recommendation is not None and fresh != recommendation:
+            continue  # drifted out of an explicit filter — healed above
+        if recommendation is None and fresh == "skip":
+            continue  # drifted to junk under the default actionable view
+        out.append(_lead_summary(
             d,
-            recommendation=rec,
-            source=src,
-            folder=meta.folder if meta else "",
-            tags=meta.tags if meta else [],
-            created_at=created,
-        )
-        for d, rec, src, meta, created in page
-    ]
+            recommendation=fresh,
+            source=source_by_email.get(d.email, ""),
+            folder=item["folder"],
+            tags=item["tags"],
+            created_at=item["created_at"],
+        ))
+    response.headers["X-Total-Count"] = str(total)
+    return out
 
 
 @router.get("/export.csv", dependencies=[Depends(require_api_key)])
@@ -365,15 +397,42 @@ def export_leads(
     recommendation: str | None = Query(default=None, description="export only this recommendation"),
     emails: str | None = Query(default=None, description="comma-separated emails to export (selected only)"),
     full: bool = Query(default=False, description="export all columns (default: email+name only)"),
+    folder: str | None = Query(default=None, description="only leads in this folder"),
+    tag: str | None = Query(default=None, description="only leads carrying this tag"),
+    date: str | None = Query(default=None, description="only leads extracted on this date (YYYY-MM-DD)"),
+    source: str | None = Query(default=None, description="only leads from this query run"),
+    bound: bool | None = Query(default=None, description="only bound/unbound leads"),
+    min_score: float | None = Query(default=None, ge=0, le=10, description="minimum potential score"),
+    q: str | None = Query(default=None, description="identity text search (company/email/person/role)"),
+    user: User = Depends(get_current_user),
 ) -> Response:
     """Download researched leads as CSV (openable in Excel/Sheets).
 
-    Default: email + name + company only.
-    ?full=true: all columns.
-    ?emails=a@b.com,c@d.com: only selected emails.
+    Default: email + name + company only, ACTIONABLE only (``skip``/junk is not
+    exported unless asked for — a dead domain is not an outreach lead).
+    ?full=true: all columns. ?emails=a@b.com,c@d.com: only selected emails.
+    folder/tag/date/source/bound/min_score/q run the SAME user-view filters the
+    Companies list applies (in SQL), so export always matches what the screen
+    shows. Default selects what the DEFAULT Companies list shows (unfiled inbox
+    + actionable only); pass ``folder=*`` for every place.
     """
     email_list = [e.strip() for e in emails.split(",") if e.strip()] if emails else None
-    csv_data = export_csv(_store, recommendation=recommendation, emails=email_list, full=full)
+    source_emails = (
+        {e for e, s in _job_source_by_email(user_id=user.id, is_admin=user.is_admin).items() if s == source} if source else None
+    )
+    csv_data = export_csv(
+        _store,
+        recommendation=recommendation,
+        emails=email_list,
+        full=full,
+        folder=folder,
+        tag=tag,
+        date=date,
+        source_emails=source_emails,
+        bound=bound,
+        min_score=min_score,
+        q=q,
+    )
     return Response(
         content=csv_data,
         media_type="text/csv",
@@ -382,7 +441,7 @@ def export_leads(
 
 
 @router.post("/clear-junk", dependencies=[Depends(require_api_key)])
-def clear_junk() -> dict[str, Any]:
+def clear_junk(user: User = Depends(get_current_user)) -> dict[str, Any]:
     """Bulk-remove every dossier the list HIDES by default — re-gated ``skip``
     junk (dead/expired domain, non-construction, sub-threshold, generic mail).
 
@@ -391,11 +450,14 @@ def clear_junk() -> dict[str, Any]:
     Returns exactly how many were removed (never silent — CLAUDE.md §6). The
     same emails are dropped from the discovery cache so a future run does not
     re-discover them.
+
+    Per-user isolation: a non-admin's clear only purges their OWN junk.
     """
     from app.lead_research.scoring import regate_recommendation
 
     removed: list[str] = []
-    for d in _store.list_all():
+    for d in _store.list_all(user_id=user.id if not user.is_admin else "",
+                             is_admin=user.is_admin):
         if regate_recommendation(d) == "skip":
             if _store.delete(d.email, reason="junk"):
                 removed.append(d.email)
@@ -428,13 +490,19 @@ def sweep_pending() -> dict[str, Any]:
 
 
 @router.put("/{email}/organize", dependencies=[Depends(require_api_key)])
-def organize_lead(email: str, body: OrganizeIn) -> LeadSummary:
+def organize_lead(email: str, body: OrganizeIn,
+                  user: User = Depends(get_current_user)) -> LeadSummary:
     """Set ONE lead's folder + tags (user organization metadata, Phase B).
 
     Pure metadata — the researched dossier is untouched. The row delete paths
     (delete / clear-junk / dead-domain cleanup) clear it automatically with
     the row. Returns the updated lead row.
+
+    Per-user isolation: a non-admin can only organize their OWN dossier; the
+    source label (which run produced it) comes from their own jobs only.
     """
+    if not _user_owns_dossier(email, user):
+        raise HTTPException(status_code=404, detail=f"no dossier for {email}")
     if not _store.set_meta(email, folder=body.folder, tags=body.tags):
         raise HTTPException(status_code=404, detail=f"no dossier for {email}")
     dossier = _store.get(email)
@@ -446,7 +514,7 @@ def organize_lead(email: str, body: OrganizeIn) -> LeadSummary:
     return _lead_summary(
         dossier,
         recommendation=rec,
-        source=_job_source_by_email().get(email, ""),
+        source=_job_source_by_email(user_id=user.id, is_admin=user.is_admin).get(email, ""),
         folder=meta.folder if meta else "",
         tags=meta.tags if meta else [],
         created_at=_store.research_dates().get(_email_hash(email), ""),
@@ -454,35 +522,51 @@ def organize_lead(email: str, body: OrganizeIn) -> LeadSummary:
 
 
 @router.post("/organize/rename", dependencies=[Depends(require_api_key)])
-def organize_rename(body: OrganizeRenameIn) -> dict[str, Any]:
-    """Rename a folder or tag across EVERY dossier; honest count (not silent)."""
+def organize_rename(body: OrganizeRenameIn,
+                    user: User = Depends(get_current_user)) -> dict[str, Any]:
+    """Rename a folder or tag across EVERY dossier; honest count (not silent).
+
+    Per-user isolation: a non-admin's rename only touches their own dossiers.
+    """
     if body.kind not in ("folder", "tag"):
         raise HTTPException(status_code=422, detail="kind must be 'folder' or 'tag'")
     updated = (
-        _store.rename_folder(body.from_, body.to)
+        _store.rename_folder(body.from_, body.to,
+                             user_id=user.id if not user.is_admin else "",
+                             is_admin=user.is_admin)
         if body.kind == "folder"
-        else _store.rename_tag(body.from_, body.to)
+        else _store.rename_tag(body.from_, body.to,
+                               user_id=user.id if not user.is_admin else "",
+                               is_admin=user.is_admin)
     )
     logger.info("POST /leads/organize/rename %s %r->%r updated=%d", body.kind, body.from_, body.to, updated)
     return {"kind": body.kind, "from": body.from_, "to": body.to, "updated": updated}
 
 
 @router.post("/organize/clear", dependencies=[Depends(require_api_key)])
-def organize_clear(body: OrganizeClearIn) -> dict[str, Any]:
-    """Remove a folder or tag value from EVERY dossier; honest count."""
+def organize_clear(body: OrganizeClearIn,
+                   user: User = Depends(get_current_user)) -> dict[str, Any]:
+    """Remove a folder or tag value from EVERY dossier; honest count.
+
+    Per-user isolation: a non-admin's clear only touches their own dossiers.
+    """
     if body.kind not in ("folder", "tag"):
         raise HTTPException(status_code=422, detail="kind must be 'folder' or 'tag'")
     updated = (
-        _store.clear_folder(body.value)
+        _store.clear_folder(body.value,
+                            user_id=user.id if not user.is_admin else "",
+                            is_admin=user.is_admin)
         if body.kind == "folder"
-        else _store.clear_tag(body.value)
+        else _store.clear_tag(body.value,
+                              user_id=user.id if not user.is_admin else "",
+                              is_admin=user.is_admin)
     )
     logger.info("POST /leads/organize/clear %s %r -> %d", body.kind, body.value, updated)
     return {"kind": body.kind, "value": body.value, "updated": updated}
 
 
 @router.get("/folders", response_model=FoldersOut, dependencies=[Depends(require_api_key)])
-def list_folders() -> dict[str, Any]:
+def list_folders(user: User = Depends(get_current_user)) -> dict[str, Any]:
     """The organization mailbox overview for the Companies rail.
 
     Returns ``{folders: [...], unfiled, total}`` — the persisted (possibly
@@ -490,21 +574,52 @@ def list_folders() -> dict[str, Any]:
     vs every dossier in the store. ``unfiled`` is the DEFAULT Companies view;
     ``total`` feeds the "All" chip + Dashboard. The catalog self-heals names
     that only ever rode on leads, so nothing is lost.
+
+    Per-user isolation: a non-admin sees only their OWN folders/counts.
     """
-    return _store.folder_catalog()
+    return _store.folder_catalog(user_id=user.id if not user.is_admin else "",
+                                 is_admin=user.is_admin)
 
 
 @router.get("/dates", response_model=list[str], dependencies=[Depends(require_api_key)])
-def list_dates() -> list[str]:
-    """Every extraction date (``YYYY-MM-DD``) present on ANY dossier, newest first.
+def list_dates(user: User = Depends(get_current_user)) -> list[str]:
+    """Every extraction date (``YYYY-MM-DD``) present on a VISIBLE dossier, newest
+    first.
 
     Date is the GLOBAL recall dimension ("kis tareekh ko kya nikla") — it sees
-    leads inside folders too, unlike the default Companies view. The dropdown
-    options come from here (not the current page) so a folderized lead's date
-    stays findable.
+    leads inside folders too, unlike the default Companies view. Computed in SQL
+    (one DISTINCT GROUP, no full-store scan); a date whose only rows are
+    admin-hidden drops out of the dropdown.
+
+    Per-user isolation: a non-admin sees only dates from their OWN dossiers.
     """
-    dates = {d for d in _store.research_dates().values() if d}
-    return sorted(dates, reverse=True)
+    return _store.distinct_dates(user_id=user.id if not user.is_admin else "",
+                                 is_admin=user.is_admin)
+
+
+@router.get("/tags", response_model=list[dict[str, Any]], dependencies=[Depends(require_api_key)])
+def list_tags(user: User = Depends(get_current_user)) -> list[dict[str, Any]]:
+    """Global tag counts for the USER views (hidden + skip/ungated excluded).
+
+    One SQL GROUP BY over ``json_each`` — the Companies screen's tag chip bar
+    counts tags without downloading the whole list just to tally them.
+
+    Per-user isolation: a non-admin only counts their OWN dossiers' tags.
+    """
+    return _store.tag_counts(user_id=user.id if not user.is_admin else "",
+                             is_admin=user.is_admin)
+
+
+@router.get("/sources", response_model=list[str], dependencies=[Depends(require_api_key)])
+def list_sources(user: User = Depends(get_current_user)) -> list[str]:
+    """Every query-run source label, for the Run/source dropdown.
+
+    Derived from the persisted job results, so the dropdown stays complete even
+    when the current page only shows a few rows.
+
+    Per-user isolation: a non-admin sees only labels from their OWN jobs.
+    """
+    return sorted({s for s in _job_source_by_email(user_id=user.id, is_admin=user.is_admin).values() if s})
 
 
 @router.post("/folders", response_model=FolderOut, status_code=201,
@@ -534,10 +649,14 @@ def create_folder(body: FolderCreate) -> dict[str, Any]:
 
 
 @router.delete("/{email}", dependencies=[Depends(require_api_key)])
-def delete_lead(email: str) -> dict[str, Any]:
+def delete_lead(email: str, user: User = Depends(get_current_user)) -> dict[str, Any]:
     """Delete ONE lead (dossier + discovery cache) — the user's per-lead data
     management. A dismissed lead is gone and will not be re-researched.
+
+    Per-user isolation: a non-admin can only delete their OWN dossier.
     """
+    if not _user_owns_dossier(email, user):
+        raise HTTPException(status_code=404, detail=f"no dossier for {email}")
     if not _store.delete(email):
         raise HTTPException(status_code=404, detail=f"no dossier for {email}")
     # Also drop it from the discovery cache so a future run does not re-discover
@@ -550,8 +669,13 @@ def delete_lead(email: str) -> dict[str, Any]:
 
 
 @router.get("/{email}", response_model=LeadDetail, dependencies=[Depends(require_api_key)])
-def get_lead(email: str) -> dict[str, Any]:
-    """Full researched dossier for one lead (evidence + user metadata)."""
+def get_lead(email: str, user: User = Depends(get_current_user)) -> dict[str, Any]:
+    """Full researched dossier for one lead (evidence + user metadata).
+
+    Per-user isolation: a non-admin can only open their OWN dossier.
+    """
+    if not _user_owns_dossier(email, user):
+        raise HTTPException(status_code=404, detail=f"no dossier for {email}")
     dossier = _store.get(email)
     if dossier is None:
         raise HTTPException(status_code=404, detail=f"no dossier for {email}")

@@ -86,6 +86,13 @@ class Settings(BaseSettings):
     # Optional: falls back to AI_API_KEY when unset.
     AI_API_KEY_2: str = Field(default="", repr=False)  # secret
 
+    # Third AI key for the discovery dork/TEMPLATE-GENERATION lane (Phase H,
+    # wired into live runs by Sprint2.11). A separate key lets the 3rd AI
+    # propose new search angles while the main and deep lanes run, without
+    # sharing their rate limit. Falls back to AI_API_KEY_2, then AI_API_KEY,
+    # when unset — so an old .env without it keeps working unchanged.
+    AI_API_KEY_3: str = Field(default="", repr=False)  # secret
+
     # Hard per-request cap for the AI transport. Without it the OpenAI SDK's
     # default is 600s (10 min): a slow router window or a congested model host
     # makes EVERY LLM call block ~10 min, and each lead makes 3 calls (company,
@@ -139,6 +146,15 @@ class Settings(BaseSettings):
     LEADS_API_KEY: str = Field(default="", repr=False)  # secret
 
     # ------------------------------------------------------------------
+    # Auth (JWT-based user authentication).
+    # ------------------------------------------------------------------
+    AUTH_SECRET_KEY: str = Field(
+        default="leadhunter-dev-secret-change-in-production",
+        repr=False,  # secret — production must override via .env
+    )
+    AUTH_TOKEN_EXPIRE_HOURS: int = 24
+
+    # ------------------------------------------------------------------
     # Pending-lead re-enrichment cooldown.
     #
     # Root cause it fixes: a lead whose AI research raises (transient AI/router
@@ -163,3 +179,29 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+# Env-only snapshot of the managed secret keys, taken BEFORE the runtime overlay
+# is merged — this is the fallback the HOT-RELOAD path (admin PUT /keys) reverts
+# a key to when its overlay entry is cleared, so "clear" means back to .env,
+# matching what a restart would produce.
+try:
+    from app.core.runtime_keys import KNOWN_KEY_NAMES
+
+    _ENV_KEY_VALUES: dict[str, str] = {
+        name: getattr(settings, name, "") for name in KNOWN_KEY_NAMES
+    }
+except Exception:  # noqa: BLE001 — the snapshot is an optimization, never fatal
+    _ENV_KEY_VALUES = {}
+
+# Runtime key overlay (admin API-key management). A key the admin screen sets
+# in backend/output/runtime_keys.json overrides .env for this process WITHOUT
+# touching .env and WITHOUT ever echoing a secret — merged here, before any
+# provider imports, so every registration/read sees the overlay transparently.
+# Changes made at RUNTIME are applied live (RuntimeKeyStore.apply_live +
+# search-provider re-registration in the admin endpoint) — no restart needed.
+try:
+    from app.core.runtime_keys import RuntimeKeyStore
+
+    settings = RuntimeKeyStore().apply(settings)
+except Exception:  # noqa: BLE001 — a broken overlay must never block startup
+    pass

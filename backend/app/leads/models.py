@@ -88,6 +88,15 @@ class Job:
     created_at: str = ""
     updated_at: str = ""
     elapsed_s: float = 0.0
+    # Run outcome (H1): how many researched leads are working vs the target,
+    # and the honest reason when the run under-delivered. Computed by run_full
+    # and persisted here so the API/UI can surface real delivery instead of a
+    # bare "Completed" (CLAUDE.md §6 honest outcome telemetry).
+    working_leads: int = 0
+    leads_found: int = 0
+    shortfall: int = 0
+    shortfall_reason: str = ""
+    user_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -101,6 +110,11 @@ class Job:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "elapsed_s": round(self.elapsed_s, 1),
+            "working_leads": self.working_leads,
+            "leads_found": self.leads_found,
+            "shortfall": self.shortfall,
+            "shortfall_reason": self.shortfall_reason,
+            "user_id": self.user_id,
         }
 
     @staticmethod
@@ -116,4 +130,9 @@ class Job:
             created_at=d.get("created_at", ""),
             updated_at=d.get("updated_at", ""),
             elapsed_s=d.get("elapsed_s", 0.0),
+            working_leads=d.get("working_leads", 0),
+            leads_found=d.get("leads_found", 0),
+            shortfall=d.get("shortfall", 0),
+            shortfall_reason=d.get("shortfall_reason", ""),
+            user_id=d.get("user_id", ""),
         )

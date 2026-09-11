@@ -35,9 +35,18 @@
     "tolling", "environmental", "compliance", "recruiting", "staffing",
     "insurance", "trucking", "logistics", "warehousing",
     "conglomerate", "aerospace",
-    "brand management", "brand asset"
+    "brand management", "brand asset",
+    "newspaper", "media publishing", "news publication",
+    "real estate", "realty", "property management",
+    "junk removal", "hauling",
+    "medical", "healthcare", "dental", "chiropractic",
+    "legal", "law firm", "attorney",
+    "funeral",
+    "marketing", "advertising", "digital agency",
+    "education", "publishing"
   ],
   "non_client_source_hosts": [
-    "dcta.net", "tjpa.org", "trideltatransit.com", "sfport.com"
+    "dcta.net", "tjpa.org", "trideltatransit.com", "sfport.com",
+    "thepaperboy.news", "piercecountyjournal.news", "carmelpinecone.com"
   ]
 }

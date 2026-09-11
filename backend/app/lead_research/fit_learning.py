@@ -21,6 +21,16 @@ extra AI call or provider credit:
   the general, self-correcting form of the hand-seeded non-client-source list
   (root cause of the 54-lead DCTA transit-vendor flood).
 
+* ``company`` / ``domain`` — USER verdicts, not research outcomes. When the
+  user deletes a dossier as ``irrelevant`` / ``not our client``, the company
+  name and mail domain are recorded as USER-REJECTED. This is DECISIVE: one
+  human rejection outweighs any number of AI scores, so ``user_rejects >= 1``
+  skips that company/domain on the next discovery pass — the concrete fix for
+  the 2026-09-08 purge (24 confirmed-irrelevant dossiers whose companies would
+  otherwise resurface and burn credit again). Unlike ``industry``/``source``
+  there is NO ``MIN_TRIALS`` and NO AI self-served credit on these namespaces:
+  only the user's own delete verdict teaches them.
+
 Default-KEEP is the safe choice everywhere: a label/host with too little data,
 or any single real lead in its history, is never skipped. Pruning starts only
 once there is enough evidence for it — exactly like the query-yield loop this
@@ -45,9 +55,14 @@ _DEFAULT_DB = os.path.join(os.path.dirname(__file__), "..", "..", "output", "lea
 #: Serializes writes across concurrent research threads (LEADS_CONCURRENCY).
 _write_lock = threading.Lock()
 
-#: The two learning namespaces. A namespaced key keeps one table honest for both.
+#: The four learning namespaces. A namespaced key keeps one table honest for all.
+#: ``industry`` and ``source`` learn from the pipeline's own research verdicts
+#: (credit after MIN_TRIALS); ``company``/``domain`` learn ONLY from explicit
+#: user rejections (one verdict is decisive — no trial count applies).
 KIND_INDUSTRY = "industry"
 KIND_SOURCE = "source"
+KIND_COMPANY = "company"
+KIND_DOMAIN = "domain"
 
 
 def normalize_industry(industry: str) -> str:
@@ -73,6 +88,34 @@ def source_host(source_url: str) -> str:
     m = re.match(r"[a-z][a-z0-9+.\-]*://([^/]+)", s)
     host = (m.group(1) if m else s.split("/")[0]).split("@")[-1].split(":")[0]
     return host[4:] if host.startswith("www.") else host
+
+
+def normalize_company(company_name: str) -> str:
+    """Collapse a company name to a stable learning key.
+
+    Lower-cased, whitespace-collapsed, boundary punctuation trimmed, capped.
+    Legal-suffix words (LLC / Inc / Corp ...) are NOT stripped: "Acme" and
+    "Acme Construction" stay distinct keys so one firm's rejection can never
+    silently hide a different, valid lead that merely shares a first word.
+    Empty stays empty (never learned).
+    """
+    s = re.sub(r"\s+", " ", (company_name or "").strip().lower())
+    s = s.strip(" .,-#/\\&'\"()%")
+    return s[:120]
+
+
+def mail_domain(domain: str) -> str:
+    """The bare lowercase mail domain — the learning key for a rejected domain.
+
+    ``WWW.Acme.Com`` / ``acme.com`` / ``@acme.com`` -> ``acme.com``. A leading
+    ``www.`` and stray ``@``/dots are dropped so one host is never learned as
+    several spellings. Empty stays empty (never learned).
+    """
+    d = (domain or "").strip().lower()
+    d = d.lstrip("@").strip()
+    if d.startswith("www."):
+        d = d[4:]
+    return d.rstrip(".").strip()
 
 
 class FitLearningStore:
@@ -106,11 +149,21 @@ class FitLearningStore:
                     key TEXT NOT NULL,
                     trials INTEGER NOT NULL DEFAULT 0,
                     kept INTEGER NOT NULL DEFAULT 0,
+                    user_rejects INTEGER NOT NULL DEFAULT 0,
                     last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (kind, key)
                 )
                 """
             )
+            # Additive migration — live DBs predate user_rejects. A company/domain
+            # row rejected BEFORE this column existed is impossible (the namespaces
+            # and the column ship together), so a plain default-0 ADD is safe: no
+            # historical data is misread as a user verdict.
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(fit_learning)")}
+            if "user_rejects" not in cols:
+                conn.execute(
+                    "ALTER TABLE fit_learning ADD COLUMN user_rejects INTEGER NOT NULL DEFAULT 0"
+                )
             conn.commit()
         finally:
             conn.close()
@@ -145,43 +198,85 @@ class FitLearningStore:
         conn = self._conn()
         try:
             row = conn.execute(
-                "SELECT trials, kept FROM fit_learning WHERE kind = ? AND key = ?",
+                "SELECT trials, kept, user_rejects FROM fit_learning WHERE kind = ? AND key = ?",
                 (kind, key),
             ).fetchone()
         finally:
             conn.close()
         if row is None:
             return None
-        return {"trials": row[0], "kept": row[1]}
+        return {"trials": row[0], "kept": row[1], "user_rejects": row[2]}
 
     def all(self, kind: str | None = None) -> dict[str, dict[str, int]]:
         conn = self._conn()
         try:
             if kind:
                 rows = conn.execute(
-                    "SELECT kind, key, trials, kept FROM fit_learning WHERE kind = ?",
+                    "SELECT kind, key, trials, kept, user_rejects FROM fit_learning WHERE kind = ?",
                     (kind,),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT kind, key, trials, kept FROM fit_learning"
+                    "SELECT kind, key, trials, kept, user_rejects FROM fit_learning"
                 ).fetchall()
         finally:
             conn.close()
-        return {f"{r[0]}:{r[1]}": {"trials": r[2], "kept": r[3]} for r in rows}
+        return {
+            f"{r[0]}:{r[1]}": {
+                "trials": r[2],
+                "kept": r[3],
+                "user_rejects": r[4],
+            }
+            for r in rows
+        }
 
     def should_skip(self, kind: str, key: str) -> bool:
         """True to auto-skip this (kind,key) on the next run.
 
-        Skipped only when it has enough completed trials AND never once became a
-        real lead. No record (never seen) -> keep. Empty key -> keep.
+        Dispatches by namespace: ``company``/``domain`` are skipped on a single
+        USER rejection (``user_rejects >= 1``) — one human "not our client"
+        verdict outweighs any AI score and needs no trial count, so a purged
+        company stays purged. ``industry``/``source`` keep the old contract:
+        skipped only once they have enough completed trials AND never once
+        became a real lead. No record (never seen) -> keep. Empty key -> keep.
         """
         if not key:
             return False
         row = self.get(kind, key)
         if row is None:
             return False
+        if kind in (KIND_COMPANY, KIND_DOMAIN):
+            return row["user_rejects"] >= 1
         return row["trials"] >= MIN_TRIALS and row["kept"] == 0
+
+    def reject(self, kind: str, key: str) -> None:
+        """Record an explicit USER verdict that this (kind,key) is not a client.
+
+        Unlike :meth:`record`, this is decisive and not gated by trials: a human
+        rejection of a real company/domain is treated as ground truth. Repeated
+        rejections accumulate (auditable), and existing research counts on the
+        row ride along untouched — but the first rejection already wins, because
+        :meth:`should_skip` reads ``user_rejects`` and ignores trials/kept for
+        the company/domain namespaces. Empty key -> no-op (never learned).
+        """
+        if not kind or not key:
+            return
+        with _write_lock:
+            conn = self._conn()
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO fit_learning (kind, key, trials, kept, user_rejects, last_seen)
+                    VALUES (?, ?, 0, 0, 1, CURRENT_TIMESTAMP)
+                    ON CONFLICT(kind, key) DO UPDATE SET
+                        user_rejects = user_rejects + 1,
+                        last_seen = CURRENT_TIMESTAMP
+                    """,
+                    (kind, key),
+                )
+                conn.commit()
+            finally:
+                conn.close()
 
     def reset(self) -> None:
         """Test helper — clear all learning rows."""
@@ -206,3 +301,15 @@ class FitLearningStore:
 
     def should_skip_source(self, source_url: str) -> bool:
         return self.should_skip(KIND_SOURCE, source_host(source_url))
+
+    def reject_company(self, company_name: str) -> None:
+        self.reject(KIND_COMPANY, normalize_company(company_name))
+
+    def should_skip_company(self, company_name: str) -> bool:
+        return self.should_skip(KIND_COMPANY, normalize_company(company_name))
+
+    def reject_domain(self, domain: str) -> None:
+        self.reject(KIND_DOMAIN, mail_domain(domain))
+
+    def should_skip_domain(self, domain: str) -> bool:
+        return self.should_skip(KIND_DOMAIN, mail_domain(domain))

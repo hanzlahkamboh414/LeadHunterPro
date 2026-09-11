@@ -183,23 +183,33 @@ function ReasonProof({
               {open ? "▲ hide proof" : `▼ show proof (${links.length})`}
             </button>
           )}
-          {open && (
-            <ul className="mt-2 flex flex-col gap-1.5 border-t border-white/5 pt-2">
-              {links.map((f, i) => (
-                <li key={i}>
-                  <a
-                    href={f.source_url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="inline-flex items-center gap-1 text-[12px] text-indigo-400 hover:underline break-all"
-                  >
-                    {f.source_url} <ExternalLink className="w-3 h-3 shrink-0" />
-                  </a>
-                  {f.claim && <p className="text-[11px] text-slate-500 mt-0.5">{f.claim}</p>}
-                </li>
-              ))}
-            </ul>
-          )}
+          {open && (() => {
+            // Dedupe by URL so many facts from the same page show the link once.
+            const byUrl = new Map<string, string[]>();
+            for (const f of links) {
+              if (!byUrl.has(f.source_url)) byUrl.set(f.source_url, []);
+              byUrl.get(f.source_url)!.push(f.claim);
+            }
+            return (
+              <ul className="mt-2 flex flex-col gap-1.5 border-t border-white/5 pt-2">
+                {Array.from(byUrl.entries()).map(([url, claims], i) => (
+                  <li key={i}>
+                    <a
+                      href={url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-1 text-[12px] text-indigo-400 hover:underline break-all"
+                    >
+                      {url} <ExternalLink className="w-3 h-3 shrink-0" />
+                    </a>
+                    {claims.filter(Boolean).map((c, j) => (
+                      <p key={j} className="text-[11px] text-slate-500 mt-0.5">{c}</p>
+                    ))}
+                  </li>
+                ))}
+              </ul>
+            );
+          })()}
         </div>
       </div>
     </div>
@@ -246,42 +256,51 @@ function KV({ k, v }: { k: string; v: string }) {
 }
 
 function FactsList({ facts }: { facts: EvidenceFact[] }) {
-  const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
+  if (facts.length === 0)
+    return <p className="text-[12px] text-slate-500">No evidence recorded.</p>;
 
-  if (facts.length === 0) return <p className="text-[12px] text-slate-500">No evidence recorded.</p>;
+  // Group facts by source_url so a shared source (e.g. one LinkedIn profile)
+  // shows its link ONCE with all claims beneath it — no per-line "▼ proof"
+  // toggle repeating the same URL when many facts cite one page.
+  const groups = new Map<string, EvidenceFact[]>();
+  for (const f of facts) {
+    const key = f.source_url || "(no source)";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key)!.push(f);
+  }
+
   return (
-    <ul className="mt-3 space-y-2 border-t border-white/5 pt-3">
-      {facts.map((f, i) => {
-        const isOpen = expandedIdx === i;
+    <ul className="mt-3 space-y-3 border-t border-white/5 pt-3">
+      {Array.from(groups.entries()).map(([url, group], gi) => {
+        const hasUrl = url !== "(no source)";
         return (
-          <li key={i} className="text-[13.5px]">
-            <button
-              onClick={() => setExpandedIdx(isOpen ? null : i)}
-              className="text-left w-full"
-            >
-              <p className="text-slate-100">{f.claim}</p>
-              <div className="mt-0.5 flex items-center gap-2 text-[12px]">
-                <ConfidenceTag conf={f.confidence} />
-                <span className="text-slate-500">{f.source_type}</span>
-                {f.source_url && (
-                  <span className="text-indigo-400 text-[11px]">
-                    {isOpen ? "▲ hide" : "▼ proof"}
-                  </span>
-                )}
-              </div>
-            </button>
-            {isOpen && f.source_url && (
-              <div className="mt-1.5 border-t border-white/5 pt-1.5">
-                <a
-                  href={f.source_url}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex items-center gap-1 text-[12px] text-indigo-400 hover:underline break-all"
-                >
-                  {f.source_url} <ExternalLink className="w-3 h-3 shrink-0" />
-                </a>
-              </div>
+          <li key={gi} className="text-[13.5px]">
+            {hasUrl ? (
+              <a
+                href={url}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1 text-[12px] text-indigo-400 hover:underline break-all"
+              >
+                {url} <ExternalLink className="w-3 h-3 shrink-0" />
+              </a>
+            ) : (
+              <span className="text-[12px] text-slate-500">No source</span>
             )}
+            <ul className="mt-1.5 space-y-1.5 pl-3 border-l border-white/5">
+              {group.map((f, j) => (
+                <li key={j}>
+                  <p className="text-slate-100">{f.claim}</p>
+                  <div className="mt-0.5 flex items-center gap-2 text-[12px]">
+                    <ConfidenceTag conf={f.confidence} />
+                    <span className="text-slate-500">{f.source_type}</span>
+                    {f.source_note && (
+                      <span className="text-slate-400 text-[11px]">{f.source_note}</span>
+                    )}
+                  </div>
+                </li>
+              ))}
+            </ul>
           </li>
         );
       })}

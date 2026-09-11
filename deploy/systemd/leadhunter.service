@@ -1,0 +1,35 @@
+# LeadHunter Pro — FastAPI backend systemd unit (Hostinger VPS / Ubuntu)
+#
+# Install:  sudo cp deploy/systemd/leadhunter.service /etc/systemd/system/
+#           sudo systemctl daemon-reload
+#           sudo systemctl enable --now leadhunter
+#
+# The pipeline is thread-based (a job = a worker thread; LEADS_CONCURRENCY=3
+# research threads inside), so ONE uvicorn worker is correct — do not raise
+# --workers. FastAPI's async main loop serves the frontend's polling requests
+# while the job worker threads run in the background.
+
+[Unit]
+Description=LeadHunter Pro FastAPI backend
+After=network.target
+
+[Service]
+Type=simple
+# The backend is cwd-independent (every path derives from __file__), but a
+# fixed home keeps runtime_keys.json / SQLite / logs under one tree.
+WorkingDirectory=/opt/leadhunter/backend
+EnvironmentFile=/opt/leadhunter/.env
+# Leash the daemon against runaway runs. The biggest-picture bound: a single
+# produced run is credit-bounded and thread-capped; 4 GiB catches leaks.
+MemoryMax=4G
+ExecStart=/opt/leadhunter/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=3
+# Logs go to journald (never a jammed console — stdout is a pipe here), so
+# journalctl -u leadhunter -f is the live tail. The QueueHandler file sink
+# (backend/output/backend.log) also writes regardless.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

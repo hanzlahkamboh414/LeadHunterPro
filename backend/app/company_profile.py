@@ -109,6 +109,14 @@ _NON_CLIENT_TERMS_DEFAULTS = (
     "tolling", "environmental", "compliance", "recruiting", "staffing",
     "insurance", "trucking", "logistics", "warehousing",
     "conglomerate", "aerospace",
+    "newspaper", "media publishing", "news publication",
+    "real estate", "realty", "property management",
+    "junk removal", "hauling",
+    "medical", "healthcare", "dental", "chiropractic",
+    "legal", "law firm", "attorney",
+    "funeral",
+    "marketing", "advertising", "digital agency",
+    "education", "publishing",
 )
 
 #: Discovery-source hosts that publish NON-construction procurement — transit /
@@ -119,6 +127,7 @@ _NON_CLIENT_TERMS_DEFAULTS = (
 #: extends it from live verdicts (CLAUDE.md §10 — never a hidden hardcode).
 _NON_CLIENT_SOURCE_HOSTS_DEFAULTS = (
     "dcta.net", "tjpa.org", "trideltatransit.com", "sfport.com",
+    "thepaperboy.news", "piercecountyjournal.news", "carmelpinecone.com",
 )
 
 

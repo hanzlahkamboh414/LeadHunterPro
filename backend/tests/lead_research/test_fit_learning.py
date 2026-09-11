@@ -17,10 +17,14 @@ from app.company_profile import get_profile
 from app.lead_research.agent import AILeadResearchAgent
 from app.lead_research.company_research import CompanyResearcher
 from app.lead_research.fit_learning import (
+    KIND_COMPANY,
+    KIND_DOMAIN,
     KIND_INDUSTRY,
     KIND_SOURCE,
     MIN_TRIALS,
     FitLearningStore,
+    mail_domain,
+    normalize_company,
     normalize_industry,
     source_host,
 )
@@ -37,6 +41,11 @@ from tests.lead_research.conftest import (
 
 # Deterministic MX stub — never a real lookup offline.
 _MX_OK = lambda d: True  # noqa: E731
+
+
+#: A full store row — get()/all() now carry user_rejects too.
+def _row(trials, kept, user_rejects=0):
+    return {"trials": trials, "kept": kept, "user_rejects": user_rejects}
 
 
 # ---------------------------------------------------------------------------
@@ -78,7 +87,7 @@ def test_record_accumulates_and_get(tmp_path):
     s = FitLearningStore(str(tmp_path / "f.db"))
     s.record(KIND_INDUSTRY, "gc", kept=True)
     s.record(KIND_INDUSTRY, "gc", kept=False)
-    assert s.get(KIND_INDUSTRY, "gc") == {"trials": 2, "kept": 1}
+    assert s.get(KIND_INDUSTRY, "gc") == _row(2, 1)
     assert s.get(KIND_INDUSTRY, "unknown") is None
 
 
@@ -95,7 +104,7 @@ def test_all_filters_by_kind(tmp_path):
     s = FitLearningStore(str(tmp_path / "f.db"))
     s.record(KIND_INDUSTRY, "gc", kept=False)
     s.record(KIND_SOURCE, "dcta.net", kept=False)
-    assert s.all(KIND_INDUSTRY) == {"industry:gc": {"trials": 1, "kept": 0}}
+    assert s.all(KIND_INDUSTRY) == {"industry:gc": _row(1, 0)}
     assert set(s.all()) == {"industry:gc", "source:dcta.net"}
 
 
@@ -111,7 +120,7 @@ def test_persists_across_instances(tmp_path):
     prior learning (durability: research keeps teaching the gate over time)."""
     db = str(tmp_path / "f.db")
     FitLearningStore(db).record_industry("gc", kept=True)
-    assert FitLearningStore(db).get(KIND_INDUSTRY, "gc") == {"trials": 1, "kept": 1}
+    assert FitLearningStore(db).get(KIND_INDUSTRY, "gc") == _row(1, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +143,7 @@ def test_should_skip_keeps_when_ever_converted(tmp_path):
     for _ in range(MIN_TRIALS - 1):
         s.record(KIND_INDUSTRY, "mixed", kept=False)
     s.record(KIND_INDUSTRY, "mixed", kept=True)
-    assert s.get(KIND_INDUSTRY, "mixed") == {"trials": MIN_TRIALS, "kept": 1}
+    assert s.get(KIND_INDUSTRY, "mixed") == _row(MIN_TRIALS, 1)
     assert s.should_skip(KIND_INDUSTRY, "mixed") is False
 
 
@@ -147,7 +156,7 @@ def test_industry_wrappers_normalize(tmp_path):
     s = FitLearningStore(str(tmp_path / "f.db"))
     for _ in range(MIN_TRIALS):
         s.record_industry("  Fiber   Optics ", kept=False)
-    assert s.get(KIND_INDUSTRY, "fiber optics") == {"trials": MIN_TRIALS, "kept": 0}
+    assert s.get(KIND_INDUSTRY, "fiber optics") == _row(MIN_TRIALS, 0)
     assert s.should_skip_industry("Fiber Optics") is True
     assert s.should_skip_industry("fiber   optics") is True  # ws collapses to same key
 
@@ -156,7 +165,7 @@ def test_source_wrappers_normalize(tmp_path):
     s = FitLearningStore(str(tmp_path / "f.db"))
     for _ in range(MIN_TRIALS):
         s.record_source("https://www.dcta.net/list.pdf", kept=False)
-    assert s.get(KIND_SOURCE, "dcta.net") == {"trials": MIN_TRIALS, "kept": 0}
+    assert s.get(KIND_SOURCE, "dcta.net") == _row(MIN_TRIALS, 0)
     assert s.should_skip_source("http://dcta.net/other-list") is True
 
 
@@ -267,8 +276,8 @@ def test_ai_verdict_no_skips_pipeline_and_records(tmp_path):
     assert "self-estimate" in dossier.fit.lower()  # the AI's grounded reason is surfaced
     assert person_calls["n"] == 0  # person/deep/intent/scoring never started
     # Outcome recorded for both learning namespaces (kept=0 → a non-lead).
-    assert store.get(KIND_INDUSTRY, "general contractor") == {"trials": 1, "kept": 0}
-    assert store.get(KIND_SOURCE, "plancenter.example") == {"trials": 1, "kept": 0}
+    assert store.get(KIND_INDUSTRY, "general contractor") == _row(1, 0)
+    assert store.get(KIND_SOURCE, "plancenter.example") == _row(1, 0)
 
 
 def test_ai_verdict_yes_runs_full_pipeline_and_records_kept(tmp_path):
@@ -280,7 +289,7 @@ def test_ai_verdict_yes_runs_full_pipeline_and_records_kept(tmp_path):
 
     assert dossier.recommendation == "contact_now"
     assert "person_research" in dossier.sources_checked
-    assert store.get(KIND_INDUSTRY, "general contractor") == {"trials": 1, "kept": 1}
+    assert store.get(KIND_INDUSTRY, "general contractor") == _row(1, 1)
 
 
 def test_learned_industry_short_circuits_before_person(tmp_path):
@@ -301,7 +310,7 @@ def test_learned_industry_short_circuits_before_person(tmp_path):
     assert "auto-skipped" in dossier.fit.lower()
     assert person_calls["n"] == 0
     # The skip itself recorded one further non-lead trial.
-    assert store.get(KIND_INDUSTRY, "general contractor") == {"trials": MIN_TRIALS + 1, "kept": 0}
+    assert store.get(KIND_INDUSTRY, "general contractor") == _row(MIN_TRIALS + 1, 0)
 
 
 def test_learning_disabled_never_skips_on_learned_signal(tmp_path):
@@ -339,3 +348,163 @@ def test_learning_disabled_never_skips_on_learned_signal(tmp_path):
     )
     dossier = agent.research("jane@acme.com", "acme.com")
     assert dossier.recommendation == "contact_now"  # no learning → no short-circuit
+
+
+# ---------------------------------------------------------------------------
+# Phase E — company/domain USER-verdict namespaces
+# ---------------------------------------------------------------------------
+
+def test_normalize_company_collapses_and_lowercases():
+    assert normalize_company("  Acme   Construction LLC ") == "acme construction llc"
+
+
+def test_normalize_company_keeps_legal_suffixes_distinct():
+    """A legal suffix is NOT stripped — "Acme" and "Acme Construction LLC" stay
+    distinct keys so one firm's rejection never hides a different valid lead."""
+    assert normalize_company("Acme LLC") != normalize_company("Acme Construction LLC")
+    assert normalize_company("ACME INC") == "acme inc"
+
+
+def test_normalize_company_caps_length():
+    assert len(normalize_company("x" * 500)) == 120
+
+
+def test_mail_domain_normalizes_case_www_at_and_dots():
+    assert mail_domain("WWW.Acme.Com") == "acme.com"
+    assert mail_domain("@acme.com") == "acme.com"
+    assert mail_domain("acme.com.") == "acme.com"
+    assert mail_domain("") == ""
+
+
+def test_reject_company_is_decisive_with_zero_trials(tmp_path):
+    """ONE human rejection skips a company immediately — no MIN_TRIALS, no AI
+    self-credit needed (Phase E: the user's delete verdict is ground truth)."""
+    s = FitLearningStore(str(tmp_path / "f.db"))
+    assert s.should_skip_company("Acme Construction") is False
+    s.reject_company("  ACME   CONSTRUCTION LLC ")
+    assert s.get(KIND_COMPANY, "acme construction llc") == _row(0, 0, user_rejects=1)
+    assert s.should_skip_company("Acme Construction LLC") is True
+
+
+def test_reject_accumulates_and_persists_across_instances(tmp_path):
+    """Repeated rejections accumulate the audit counter (user_rejects=2) and a
+    fresh store on the same path still sees the decisive verdict."""
+    db = str(tmp_path / "f.db")
+    FitLearningStore(db).reject_company("Acme Construction")
+    FitLearningStore(db).reject_company("Acme Construction")
+    s = FitLearningStore(db)
+    assert s.get(KIND_COMPANY, "acme construction") == _row(0, 0, user_rejects=2)
+    assert s.should_skip_company("Acme Construction") is True
+
+
+def test_reject_domain_decisive_case_and_www_insensitive(tmp_path):
+    s = FitLearningStore(str(tmp_path / "f.db"))
+    s.reject_domain("WWW.Acme.Com.")
+    assert s.should_skip_domain("acme.com") is True
+    assert s.should_skip_domain("@Acme.Com") is True
+
+
+def test_record_on_company_namespace_does_not_skip(tmp_path):
+    """An AI self-reported 'kept' outcome on the company namespace must NOT be
+    treated as a user rejection — only record() learns it, not reject(), and
+    should_skip ignores trials/kept for company/domain (no AI self-credit)."""
+    s = FitLearningStore(str(tmp_path / "f.db"))
+    s.record(KIND_COMPANY, "acme construction", kept=True)
+    s.record(KIND_COMPANY, "acme construction", kept=False)
+    assert s.get(KIND_COMPANY, "acme construction") == _row(2, 1)
+    assert s.should_skip_company("Acme Construction") is False
+
+
+def test_domain_rejection_isolated_from_industry_and_source(tmp_path):
+    """A rejected domain prunes only that domain — the industry and source it
+    belongs to are untouched (never over-prune the funnel on one verdict)."""
+    s = FitLearningStore(str(tmp_path / "f.db"))
+    s.record_industry("General Contractor", kept=True)
+    s.record_source("https://dcta.net/list.pdf", kept=True)
+    s.reject_domain("acme.com")
+    assert s.should_skip_domain("acme.com") is True
+    assert s.should_skip_industry("General Contractor") is False
+    assert s.should_skip_source("https://dcta.net/") is False
+
+
+def test_company_rejection_isolated_from_domain(tmp_path):
+    """Rejecting a company name prunes that name only — the domain stays alive
+    (a different firm may legitimately sit on the same mail host)."""
+    s = FitLearningStore(str(tmp_path / "f.db"))
+    s.reject_company("Acme Construction")
+    assert s.should_skip_company("Acme Construction") is True
+    assert s.should_skip_domain("acme.com") is False
+
+
+def test_migration_adds_user_rejects_to_old_table(tmp_path):
+    """A live DB whose fit_learning table predates user_rejects must gain the
+    column on init, and reject() must then work (Phase E ships additive)."""
+    import sqlite3
+
+    db = str(tmp_path / "old.db")
+    conn = sqlite3.connect(db)
+    conn.execute(
+        """
+        CREATE TABLE fit_learning (
+            kind TEXT NOT NULL,
+            key TEXT NOT NULL,
+            trials INTEGER NOT NULL DEFAULT 0,
+            kept INTEGER NOT NULL DEFAULT 0,
+            last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (kind, key)
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO fit_learning (kind, key, trials, kept) VALUES (?, ?, ?, ?)",
+        (KIND_INDUSTRY, "gc", 5, 0),
+    )
+    conn.commit()
+    conn.close()
+
+    s = FitLearningStore(db)
+    # Legacy research row survived with user_rejects defaulting to 0 (not a verdict).
+    assert s.get(KIND_INDUSTRY, "gc") == _row(5, 0)
+    assert s.should_skip_industry("gc") is False  # 5 trials < MIN_TRIALS, no verdict
+    # The migrated column now accepts a decisive user verdict.
+    s.reject_company("Acme Construction")
+    assert s.should_skip_company("Acme Construction") is True
+
+
+# ---------------------------------------------------------------------------
+# Phase E — agent Stage 1c short-circuits on the user-rejection signal
+# ---------------------------------------------------------------------------
+
+def test_user_rejected_company_short_circuits_before_person(tmp_path):
+    """A company the user already deleted as not-a-client is auto-skipped at
+    Stage 1c — before person research — and the reason names the purge."""
+    store = FitLearningStore(str(tmp_path / "f.db"))
+    store.reject_company("Acme Construction")
+    assert store.should_skip_company("Acme Construction") is True
+
+    person_calls = {"n": 0}
+    # No is_our_client / no learned-industry — the ONLY skip signal is the
+    # user's own rejection (isolating the Phase E path).
+    agent = _build_agent(store, company_response=_gc_response(), person_spy=person_calls)
+    dossier = agent.research("jane@acme.com", "acme.com")
+
+    assert dossier.recommendation == "skip"
+    assert "You marked this company" in dossier.fit
+    assert "not-a-client" in dossier.fit
+    assert person_calls["n"] == 0  # person/deep/intent/scoring never started
+
+
+def test_user_rejected_domain_short_circuits_before_person(tmp_path):
+    """A rejected mail domain auto-skips on the next pass even when the company
+    name differs slightly — the domain is the durable purge key."""
+    store = FitLearningStore(str(tmp_path / "f.db"))
+    store.reject_domain("acme.com")
+    assert store.should_skip_domain("acme.com") is True
+
+    person_calls = {"n": 0}
+    agent = _build_agent(store, company_response=_gc_response(), person_spy=person_calls)
+    dossier = agent.research("jane@acme.com", "acme.com")
+
+    assert dossier.recommendation == "skip"
+    assert "auto-skipped" in dossier.fit.lower()
+    assert person_calls["n"] == 0

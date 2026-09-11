@@ -15,13 +15,13 @@ import logging
 import time
 from typing import Any
 
-from app.search_providers.base import BaseSearchProvider
+from app.search_providers.base import BaseSearchProvider, LoopSessionMixin
 from app.search_providers.models import SearchQuery, SearchResponse, SearchResult
 
 logger = logging.getLogger(__name__)
 
 
-class SearXNGProvider(BaseSearchProvider):
+class SearXNGProvider(BaseSearchProvider, LoopSessionMixin):
     """Search provider backed by a SearXNG instance.
 
     SearXNG returns JSON-formatted results when queried with the right
@@ -58,28 +58,9 @@ class SearXNGProvider(BaseSearchProvider):
         self.timeout_s = float(timeout)  # manager hard-gate matches the aiohttp cap
         self._max_results = max_results
         self._safe_search = 1 if safe_search else 0
-        self._session: Any = None  # Set on first use via _get_session
-
-    async def _get_session(self) -> Any:
-        """Get or create an aiohttp session (lazy initialization)."""
-        import aiohttp
-
-        if self._session is None or self._session.closed:
-            timeout = aiohttp.ClientTimeout(total=self._timeout)
-            self._session = aiohttp.ClientSession(timeout=timeout)
-        return self._session
-
-    async def close(self) -> None:
-        """Close the underlying HTTP session."""
-        if self._session is not None and not self._session.closed:
-            # Session.close() may be sync or async depending on implementation
-            import asyncio
-
-            if asyncio.iscoroutinefunction(self._session.close):
-                await self._session.close()
-            else:
-                self._session.close()
-            self._session = None
+        # LoopSessionMixin: one session per event loop (concurrency fix —
+        # see the mixin docstring in base.py).
+        self._init_sessions()
 
     async def __aenter__(self) -> SearXNGProvider:
         return self

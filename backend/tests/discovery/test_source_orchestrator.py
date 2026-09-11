@@ -96,6 +96,26 @@ class TestSourceOrchestrator:
         assert metadata["data_source"] == "empty"
         assert metadata["total_deduped"] == 0
 
+    def test_all_sources_empty_reports_per_source_reason(self):
+        """All sources EMPTY + no fixture -> data_source='empty' with an honest
+        per-source fallback_reason, NEVER the misleading 'no_sources_registered'
+        (the Houston zero-result diagnosis: providers WERE registered, they
+        just returned nothing — the reason must say what each source did)."""
+        orch = SourceOrchestrator()
+        orch.register(FakeSource("directory_crawl", priority=20, status=SourceStatus.EMPTY))
+        orch.register(FakeSource("plan_holder", priority=25, status=SourceStatus.EMPTY))
+        orch.register(FakeSource("search", priority=50, status=SourceStatus.EMPTY))
+        companies, meta = orch.discover(industry="Roofing", location="TX", limit=10)
+        assert meta["data_source"] == "empty"
+        assert companies == []
+        assert "no_sources_registered" not in meta["fallback_reason"]
+        assert "directory_crawl: empty" in meta["fallback_reason"]
+        assert "plan_holder: empty" in meta["fallback_reason"]
+        assert "search: empty" in meta["fallback_reason"]
+        # Per-source statuses are JSON-safe strings, not enums.
+        for name in ("directory_crawl", "plan_holder", "search"):
+            assert meta["source_stats"][name]["status"] == "empty"
+
     def test_register_adds_source(self):
         """Registering a source makes it available."""
         orch = SourceOrchestrator()

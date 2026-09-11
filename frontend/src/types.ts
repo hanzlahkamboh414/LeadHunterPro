@@ -54,6 +54,11 @@ export interface Job {
   created_at: string;
   updated_at: string;
   elapsed_s: number;
+  /** Run outcome (H1): honest delivery vs target. */
+  working_leads?: number;
+  leads_found?: number;
+  shortfall?: number;
+  shortfall_reason?: string;
 }
 
 export interface JobSummary {
@@ -64,6 +69,10 @@ export interface JobSummary {
   created_at: string;
   updated_at: string;
   elapsed_s: number;
+  working_leads?: number;
+  leads_found?: number;
+  shortfall?: number;
+  shortfall_reason?: string;
 }
 
 export interface LeadSummary {
@@ -125,6 +134,7 @@ export interface EvidenceFact {
   claim: string;
   source_url: string;
   source_type: string;
+  source_note?: string;
   confidence: string;
 }
 
@@ -246,4 +256,29 @@ export interface AdminSearchCache {
   extract_ttl_days: number;
   hit_rate: number;
   top_queries: Array<{ query: string; max_results: number; fetched_at: string }>;
+}
+
+/** Admin — Dashboard data control (hide / show / delete user-facing leads). */
+export type AdminLeadScopeKind = "date" | "source" | "email";
+
+export interface AdminLeadScope {
+  scope: AdminLeadScopeKind;
+  value: string;
+}
+
+export interface AdminLeadAction {
+  affected: number;
+  emails: string[];
+}
+
+export interface AdminVisibilityDate {
+  date: string;
+  total: number;
+  hidden: number;
+}
+
+export interface AdminVisibility {
+  total: number;
+  hidden: number;
+  by_date: AdminVisibilityDate[];
 }

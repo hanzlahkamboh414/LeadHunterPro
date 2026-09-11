@@ -41,12 +41,37 @@ def _dossier(email: str, domain: str, score: float = 8.0,
 
 
 def _setup(tmp_path, monkeypatch):
-    """Point the router's store at a tmp DB (mirrors test_leads_api._setup)."""
-    monkeypatch.setattr(
-        leads_module, "_store",
-        LeadResearchStore(db_path=str(tmp_path / "jobs.db")),
-    )
-    return TestClient(app)
+    """Point the router's store at a tmp DB (mirrors test_leads_api._setup).
+
+    The store's ``save()`` is wrapped so seeded dossiers carry
+    ``user_id=testuser.id`` — under strict isolation the test user only sees
+    rows belonging to them.
+    """
+    client, uid = _authed_client(tmp_path, monkeypatch)
+    _real_store = LeadResearchStore(db_path=str(tmp_path / "jobs.db"))
+    _orig_save = _real_store.save
+    _real_store.save = lambda d, **kw: _orig_save(d, user_id=kw.pop("user_id", "") or uid)
+    monkeypatch.setattr(leads_module, "_store", _real_store)
+    return client
+
+
+def _authed_client(tmp_path, monkeypatch):
+    """TestClient sending a real JWT (leads endpoints require auth now).
+
+    Returns ``(client, user_id)`` so ``_setup`` can scope seeded dossiers to
+    this user.
+    """
+    from app.auth.jwt import create_access_token
+    from app.auth.models import UserStore
+    import app.auth.dependencies as deps
+    user_store = UserStore(db_path=str(tmp_path / "users.db"))
+    monkeypatch.setattr(deps, "_user_store", lambda: user_store)
+    user = user_store.create("testuser", "test@example.com", "password")
+    token = create_access_token(user.id, user.is_admin, username=user.username)
+    return TestClient(
+        app,
+        headers={"Authorization": f"Bearer {token}"},
+    ), user.id
 
 
 def _force_created_at(store: LeadResearchStore, email: str, ts: str) -> None:
@@ -237,6 +262,16 @@ def test_folder_filters_drive_http_and_echo_created_at(tmp_path, monkeypatch):
                        json={"folder": "Monday data", "tags": []})
         assert r.status_code == 200
         assert r.json()["created_at"] == "2026-09-01"  # organize echoes date
+
+    # Pin updated_at EQUAL so the equal-score order is the deterministic saved
+    # (rowid) order. Without this the two saves / two organizes can straddle a
+    # second boundary (slow machines), flipping the updated_at-DESC tie and
+    # making the folder-list order a timing flake.
+    conn = sqlite3.connect(store._db_path)
+    conn.execute("UPDATE dossiers SET updated_at = '2026-09-01 11:00:00' WHERE email_hash IN (?, ?)",
+                 (_email_hash("a@x.com"), _email_hash("b@y.com")))
+    conn.commit()
+    conn.close()
 
     # Folder filter shows only the moved leads; combined with date it still does.
     moved = client.get("/api/v1/leads", params={"folder": "Monday data"}).json()

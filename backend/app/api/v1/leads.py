@@ -668,17 +668,23 @@ def list_sources(user: User = Depends(get_current_user)) -> list[str]:
 
 @router.post("/folders", response_model=FolderOut, status_code=201,
              dependencies=[Depends(require_api_key)])
-def create_folder(body: FolderCreate) -> dict[str, Any]:
+def create_folder(body: FolderCreate, user: User = Depends(get_current_user)) -> dict[str, Any]:
     """Create a persisted (possibly empty) folder, e.g. ``Monday data``.
 
     Idempotent: a duplicate name returns ``created=False`` with the existing
     row — the user's "make a folder, click it, then move leads in" flow.
+    The folder is OWNED by the creating account (same isolation as data):
+    it appears on their dashboard and the admin panel's drill-down, never on
+    another account's Companies rail.
     """
     name = (body.name or "").strip()
     if not name:
         raise HTTPException(status_code=422, detail="folder name required")
-    created = _store.create_folder(name)
-    item = next((f for f in _store.list_folders() if f["name"] == name), None)
+    created = _store.create_folder(name, user_id=user.id)
+    item = next(
+        (f for f in _store.list_folders(**_view_scope(user)) if f["name"] == name),
+        None,
+    )
     if item is None:  # should be impossible after create — never silent
         raise HTTPException(status_code=500, detail="folder created but not listed")
     logger.info(

@@ -242,12 +242,13 @@ def test_assign_folder_pushes_leads_to_user_dashboard(tmp_path, monkeypatch):
     store.save(_dossier("b@beta.test", "beta.test"), user_id=admin.id)
     store.set_meta("b@beta.test", folder="Q3 Outreach")
 
-    # Before: the user's dashboard is empty — no unfiled leads, nothing in any
-    # folder (the catalog is global; a user's counts are their own).
+    # Before: the user's dashboard is completely empty — no unfiled leads, and
+    # NOT even the admin's folder NAME (the catalog is per-account now: a
+    # folder belongs to the account that created/uses it, exactly like data).
     assert user_client.get("/api/v1/leads").json() == []
     before = {f["name"]: f["count"]
               for f in user_client.get("/api/v1/leads/folders").json()["folders"]}
-    assert before == {"Q3 Outreach": 0}
+    assert before == {}
 
     # Push the folder — one click, one call.
     r = admin_client.post("/api/v1/admin/leads/assign", json={

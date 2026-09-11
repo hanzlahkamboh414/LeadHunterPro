@@ -148,12 +148,40 @@ class LeadResearchStore:
         # group (empty folders included — "create the folder first, then move leads").
         # Names are also backfilled from dossiers on read, so folders that only ever
         # existed as values on leads self-heal into the catalog (no data loss).
+        #
+        # Multi-user fix (2026-09-12): the catalog used to key on name ALONE, so a
+        # folder one account created showed in EVERY account — data was isolated
+        # but its organization was not. The key is now (user_id, name): each
+        # account owns its own folder rows, exactly like its dossier rows.
+        # user_id='' = pre-auth/legacy rows (visible on the admin's own dashboard,
+        # same rule as legacy dossiers).
         conn.execute("""
             CREATE TABLE IF NOT EXISTS folders (
-                name TEXT PRIMARY KEY,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                user_id TEXT NOT NULL DEFAULT '',
+                name TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, name)
             )
         """)
+        # Guarded REBUILD (not a bare ALTER — the primary key itself changes):
+        # an existing single-tenant catalog (name PRIMARY KEY, no user_id) is
+        # copied into the per-owner table with its rows kept as legacy ('').
+        fcols = {row[1] for row in conn.execute("PRAGMA table_info(folders)")}
+        if "user_id" not in fcols:
+            conn.execute("ALTER TABLE folders RENAME TO folders_old_singleuser")
+            conn.execute("""
+                CREATE TABLE folders (
+                    user_id TEXT NOT NULL DEFAULT '',
+                    name TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (user_id, name)
+                )
+            """)
+            conn.execute(
+                "INSERT INTO folders (user_id, name, created_at) "
+                "SELECT '', name, created_at FROM folders_old_singleuser"
+            )
+            conn.execute("DROP TABLE folders_old_singleuser")
         # Admin audit trail — which emails the user deleted and why (manual vs
         # Junk sweep). Append-only, never purged by a re-research. Admin reads it
         # (GET /admin/deleted); a re-delete updates the timestamp ("deleted
@@ -843,44 +871,71 @@ class LeadResearchStore:
         Keeps the store consistent for legacy leads (folder values that pre-date
         the catalog) AND for a rename/clear that moves leads — every real folder
         name ends up present as a clickable group, empty or not.
+
+        Multi-user: the row is attributed to the DOSSIER'S owner, so a folder
+        name files itself into the account that actually uses it — never into
+        everyone's catalog.
         """
         conn.execute(
-            "INSERT OR IGNORE INTO folders(name) "
-            "SELECT DISTINCT folder FROM dossiers WHERE folder <> ''"
+            "INSERT OR IGNORE INTO folders(user_id, name) "
+            "SELECT DISTINCT user_id, folder FROM dossiers WHERE folder <> ''"
         )
 
-    def create_folder(self, name: str) -> bool:
+    def create_folder(self, name: str, user_id: str = "") -> bool:
         """Create a persisted (possibly empty) folder; True when newly created.
 
         The Phase B.2 contract: a folder exists FIRST (``"Monday data"``), is
         clickable in the filter even with zero leads, and fills as the user
         moves leads into it. Duplicate names are ignored (idempotent).
+
+        Multi-user: the row is OWNED by ``user_id`` ("" = legacy/admin own
+        view) — two accounts may each have a folder of the same name without
+        ever seeing each other's group.
         """
         name = (name or "").strip()
         if not name:
             return False
         conn = self._conn()
         cur = conn.execute(
-            "INSERT OR IGNORE INTO folders(name) VALUES (?)", (name,)
+            "INSERT OR IGNORE INTO folders(user_id, name) VALUES (?, ?)",
+            (user_id, name),
         )
         conn.commit()
         conn.close()
         return cur.rowcount == 1
 
-    def list_folders(self) -> list[dict[str, Any]]:
-        """Every catalog folder with its live lead count, newest first.
+    def list_folders(self, user_id: str = "", is_admin: bool = False,
+                     include_legacy: bool = False) -> list[dict[str, Any]]:
+        """Every OWNED catalog folder with its live lead count, newest first.
 
         Returns ``[{name, created_at, count}]`` — empty folders included (that
         is the point of the catalog). ``_backfill_folders`` makes sure a folder
         name that only rides on leads (legacy or post-rename) is never missing.
+
+        Multi-user: rows are owned. A non-admin lists only THEIR folder rows
+        (+ the legacy '' rows on the admin's own dashboard); ``is_admin=True``
+        (admin panel) lists every account's rows.
         """
         conn = self._conn()
         self._backfill_folders(conn)
+        if is_admin:
+            owner_sql, owner_args = "", []
+        elif include_legacy:
+            owner_sql, owner_args = "WHERE f.user_id IN (?, '')", [user_id]
+        else:
+            owner_sql, owner_args = "WHERE f.user_id = ?", [user_id]
+        args: list[Any] = []
+        conds = "d.hidden = 0 AND d.recommendation NOT IN ('skip', '')"
+        if user_id and not is_admin:
+            shared = self._shared_visible()
+            conds += f" AND (d.user_id = ? OR d.user_id = '' OR {shared})" if include_legacy else f" AND (d.user_id = ? OR {shared})"
+            args = [user_id, user_id]
         rows = conn.execute(
-            "SELECT f.name, f.created_at, "
-            "(SELECT COUNT(*) FROM dossiers d WHERE d.folder = f.name AND d.hidden = 0) AS cnt "
-            "FROM folders f "
-            "ORDER BY f.created_at DESC, f.name COLLATE NOCASE ASC"
+            f"SELECT f.name, f.created_at, "
+            f"(SELECT COUNT(*) FROM dossiers d WHERE d.folder = f.name AND {conds}) AS cnt "
+            f"FROM folders f {owner_sql} "
+            f"ORDER BY f.created_at DESC, f.name COLLATE NOCASE ASC",
+            owner_args + args,
         ).fetchall()
         conn.commit()  # backfill may have inserted rows
         conn.close()
@@ -914,10 +969,23 @@ class LeadResearchStore:
         """
         conn = self._conn()
         self._backfill_folders(conn)
-        rows = conn.execute(
-            "SELECT f.name, f.created_at FROM folders f "
-            "ORDER BY f.created_at DESC, f.name COLLATE NOCASE ASC"
-        ).fetchall()
+        if is_admin:
+            rows = conn.execute(
+                "SELECT name, created_at FROM folders "
+                "ORDER BY created_at DESC, name COLLATE NOCASE ASC"
+            ).fetchall()
+        elif include_legacy:
+            rows = conn.execute(
+                "SELECT name, created_at FROM folders WHERE user_id IN (?, '') "
+                "ORDER BY created_at DESC, name COLLATE NOCASE ASC",
+                (user_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT name, created_at FROM folders WHERE user_id = ? "
+                "ORDER BY created_at DESC, name COLLATE NOCASE ASC",
+                (user_id,),
+            ).fetchall()
         args: list[Any] = []
         conds = "WHERE hidden = 0 AND recommendation NOT IN ('skip', '')"
         if user_id and not is_admin:
@@ -934,12 +1002,23 @@ class LeadResearchStore:
         by_folder = {r[0]: r[1] for r in count_rows}
         total = sum(by_folder.values())
         unfiled = by_folder.get("", 0)
+        listed = {name for name, _ in rows}
+        # Honesty union: a folder name on a VISIBLE dossier (own OR shared)
+        # must appear with its count even when this user owns no catalog row
+        # for it — a shared lead filed by another account still needs its
+        # place in THIS view, and the chips must always sum to ``total``
+        # (the "chip says 313 but the view shows 38" class of bug).
+        extra = [
+            {"name": name, "created_at": "", "count": count}
+            for name, count in sorted(by_folder.items(), key=lambda kv: kv[0].lower())
+            if name and name not in listed
+        ]
         return {
             "folders": [
                 {"name": name, "created_at": (created or "")[:19],
                  "count": by_folder.get(name, 0)}
                 for name, created in rows
-            ],
+            ] + extra,
             "unfiled": unfiled,
             "total": total,
         }
@@ -968,14 +1047,30 @@ class LeadResearchStore:
         ]
         for eh in affected:
             self.set_meta_direct(eh, new, None)
-        # Catalog swap only when it no longer hides a used folder name: drop the
-        # old group only if NO dossier outside the sweep still uses it.
+        # Catalog swap, scoped to the CALLER'S owner rows: the sweep above moved
+        # every visible dossier out of the old name, so this account's old-name
+        # group is empty and goes — while another account's same-named folder is
+        # theirs and stays untouched.
         conn = self._conn()
-        still_used = conn.execute(
-            "SELECT COUNT(*) FROM dossiers WHERE folder = ?", (old,)
-        ).fetchone()[0]
-        conn.execute("DELETE FROM folders WHERE name = ?", (old,)) if still_used == 0 else None
-        conn.execute("INSERT OR IGNORE INTO folders(name) VALUES (?)", (new,))
+        if is_admin:
+            # Admin-panel sweep is global: old rows go everywhere, and the
+            # per-owner backfill re-attributes the new name on the next read.
+            conn.execute("DELETE FROM folders WHERE name = ?", (old,))
+            conn.execute(
+                "INSERT OR IGNORE INTO folders(user_id, name) VALUES ('', ?)", (new,)
+            )
+        else:
+            owners = [user_id] + ([""] if include_legacy else [])
+            qmarks = ",".join("?" * len(owners))
+            conn.execute(
+                f"DELETE FROM folders WHERE name = ? AND user_id IN ({qmarks})",
+                [old, *owners],
+            )
+            for owner in owners:
+                conn.execute(
+                    "INSERT OR IGNORE INTO folders(user_id, name) VALUES (?, ?)",
+                    (owner, new),
+                )
         conn.commit()
         conn.close()
         return len(affected)
@@ -1023,11 +1118,19 @@ class LeadResearchStore:
         ]
         for eh in affected:
             self.set_meta_direct(eh, "", None)
+        # Catalog drop, scoped to the CALLER'S owner rows (same rule as
+        # rename_folder): this account's group goes; another account's
+        # same-named folder is theirs and stays.
         conn = self._conn()
-        still_used = conn.execute(
-            "SELECT COUNT(*) FROM dossiers WHERE folder = ?", (value,)
-        ).fetchone()[0]
-        conn.execute("DELETE FROM folders WHERE name = ?", (value,)) if still_used == 0 else None
+        if is_admin:
+            conn.execute("DELETE FROM folders WHERE name = ?", (value,))
+        else:
+            owners = [user_id] + ([""] if include_legacy else [])
+            qmarks = ",".join("?" * len(owners))
+            conn.execute(
+                f"DELETE FROM folders WHERE name = ? AND user_id IN ({qmarks})",
+                [value, *owners],
+            )
         conn.commit()
         conn.close()
         return len(affected)

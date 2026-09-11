@@ -395,3 +395,187 @@ def test_folder_catalog_counts_match_list_not_junk(tmp_path, monkeypatch):
     inbox_view = client.get("/api/v1/leads").json()
     assert {l["email"] for l in inbox_view} == {"good@x.com"}
     assert len(inbox_view) == body["unfiled"]
+
+
+# ---------------------------------------------------------------------------
+# Multi-user isolation (2026-09-12) — the catalog is per-account, like data.
+# Root cause fixed: folders keyed on name ALONE, so every account saw every
+# folder. Now keyed on (user_id, name); each account owns its groups.
+# ---------------------------------------------------------------------------
+
+def test_migration_old_singleuser_folders_table_rebuilds(tmp_path):
+    """A pre-multiuser DB (folders keyed on name alone) is rebuilt in place:
+    rows survive as legacy ('' owner) rows — nothing lost, nothing shared."""
+    db = str(tmp_path / "old.db")
+    conn = sqlite3.connect(db)
+    conn.execute("""
+        CREATE TABLE folders (
+            name TEXT PRIMARY KEY,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.execute("INSERT INTO folders(name) VALUES ('Monday data')")
+    conn.execute("INSERT INTO folders(name) VALUES ('Hot')")
+    conn.commit()
+    conn.close()
+
+    store = LeadResearchStore(db_path=db)
+    names = {f["name"] for f in store.list_folders()}  # legacy scope
+    assert names == {"Monday data", "Hot"}
+    # The table now carries the per-owner key.
+    cols = {r[1] for r in sqlite3.connect(db).execute("PRAGMA table_info(folders)")}
+    assert "user_id" in cols
+    pk = [r[1] for r in sqlite3.connect(db).execute("PRAGMA table_info(folders)") if r[5]]
+    assert pk == ["user_id", "name"]
+
+
+def test_two_users_same_folder_name_each_sees_own(tmp_path):
+    """Same-named folders are ALLOWED per account and never cross-visible."""
+    store = LeadResearchStore(db_path=str(tmp_path / "db.sqlite"))
+    assert store.create_folder("Hot", user_id="u1") is True
+    assert store.create_folder("Hot", user_id="u2") is True  # same name, other account
+
+    u1 = {f["name"] for f in store.list_folders(user_id="u1")}
+    u2 = {f["name"] for f in store.list_folders(user_id="u2")}
+    assert u1 == {"Hot"} and u2 == {"Hot"}  # each sees their OWN row only
+
+    u1_catalog = store.folder_catalog(user_id="u1")
+    u2_catalog = store.folder_catalog(user_id="u2")
+    assert [f["name"] for f in u1_catalog["folders"]] == ["Hot"]
+    assert [f["name"] for f in u2_catalog["folders"]] == ["Hot"]
+    assert u1_catalog["total"] == 0 and u2_catalog["total"] == 0
+
+
+def test_created_folder_not_visible_to_other_accounts(tmp_path):
+    """The bug being fixed: u1's folder used to show on EVERY account."""
+    store = LeadResearchStore(db_path=str(tmp_path / "db.sqlite"))
+    store.create_folder("Monday data", user_id="u1")
+
+    # u2's catalog is EMPTY — u1's group is invisible to them.
+    assert store.list_folders(user_id="u2") == []
+    assert store.folder_catalog(user_id="u2")["folders"] == []
+    # u1 still sees their own.
+    assert [f["name"] for f in store.list_folders(user_id="u1")] == ["Monday data"]
+
+
+def test_backfill_attributes_folder_to_dossier_owner_only(tmp_path):
+    """A folder name riding on leads self-heals into the OWNER's catalog —
+    never into every account's."""
+    store = LeadResearchStore(db_path=str(tmp_path / "db.sqlite"))
+    store.save(_dossier("a@x.com", "x.com"), user_id="u1")
+    store.set_meta("a@x.com", folder="Hot")
+
+    assert [f["name"] for f in store.list_folders(user_id="u1")] == ["Hot"]
+    assert store.list_folders(user_id="u2") == []  # u2 never filed anything
+
+
+def test_shared_lead_folder_shows_with_honest_count(tmp_path):
+    """A shared lead (Phase 2: user's own search surfaced it, another user owns
+    the dossier row) filed in the owner's folder still needs its place in the
+    SHARING user's view — the catalog lists the name with this user's visible
+    count so the chips always sum to ``total``."""
+    store = LeadResearchStore(db_path=str(tmp_path / "db.sqlite"))
+    # u1 owns the dossier row; u2's search surfaced it (owner row).
+    store.save(_dossier("shared@x.com", "x.com"), user_id="u1")
+    store.set_meta("shared@x.com", folder="Dallas")
+    store.add_owner("shared@x.com", "u2")
+
+    catalog = store.folder_catalog(user_id="u2")
+    assert {f["name"]: f["count"] for f in catalog["folders"]} == {"Dallas": 1}
+    assert catalog["total"] == 1  # chips sum honestly to total
+
+
+def test_admin_own_dashboard_sees_own_and_legacy_folders(tmp_path):
+    """The admin's own dashboard lists own + legacy rows — but never another
+    account's groups."""
+    store = LeadResearchStore(db_path=str(tmp_path / "db.sqlite"))
+    store.create_folder("Legacy group")                     # '' owner
+    store.create_folder("Admin group", user_id="admin1")
+    store.create_folder("User group", user_id="u1")
+
+    names = {f["name"] for f in store.list_folders(
+        user_id="admin1", include_legacy=True)}
+    assert names == {"Legacy group", "Admin group"}
+    assert "User group" not in names
+
+
+def test_rename_and_clear_never_touch_other_accounts_rows(tmp_path):
+    """u1 renaming/clearing their folder leaves u2's same-named folder intact."""
+    store = LeadResearchStore(db_path=str(tmp_path / "db.sqlite"))
+    store.create_folder("Hot", user_id="u1")
+    store.create_folder("Hot", user_id="u2")
+    store.save(_dossier("a@x.com", "x.com"), user_id="u1")
+    store.set_meta("a@x.com", folder="Hot")
+    store.save(_dossier("b@y.com", "y.com"), user_id="u2")
+    store.set_meta("b@y.com", folder="Hot")
+
+    # u1 renames: only u1's leads move, only u1's row swaps.
+    assert store.rename_folder("Hot", "Priority", user_id="u1") == 1
+    assert {f["name"]: f["count"] for f in store.list_folders(user_id="u1")} == {"Priority": 1}
+    assert {f["name"]: f["count"] for f in store.list_folders(user_id="u2")} == {"Hot": 1}
+    assert store.get_meta("b@y.com").folder == "Hot"  # u2's lead untouched
+
+    # u2 clears: their lead is released, their row goes; u1 keeps "Priority".
+    assert store.clear_folder("Hot", user_id="u2") == 1
+    assert store.list_folders(user_id="u2") == []
+    assert [f["name"] for f in store.list_folders(user_id="u1")] == ["Priority"]
+
+
+def test_admin_drilldown_lists_that_users_folders(tmp_path):
+    """folder_catalog(user_id=X, is_admin=False) — the admin panel's per-user
+    summary shows exactly that account's groups + counts."""
+    store = LeadResearchStore(db_path=str(tmp_path / "db.sqlite"))
+    store.create_folder("Field work", user_id="u1")
+    store.save(_dossier("a@x.com", "x.com"), user_id="u1")
+    store.set_meta("a@x.com", folder="Field work")
+    store.create_folder("Other", user_id="u2")
+
+    catalog = store.folder_catalog(user_id="u1", is_admin=False)
+    assert {f["name"]: f["count"] for f in catalog["folders"]} == {"Field work": 1}
+    assert catalog["total"] == 1
+
+
+# ---------------------------------------------------------------------------
+# HTTP: per-account folder isolation
+# ---------------------------------------------------------------------------
+
+def _second_user_client(tmp_path, monkeypatch, username="otherguy"):
+    """A second authed client sharing the same store/users DB as _setup's."""
+    from app.auth.jwt import create_access_token
+    import app.auth.dependencies as deps
+    # Reuse the SAME users.db _authed_client created (deps._user_store is
+    # already monkeypatched by _setup's _authed_client call).
+    user_store = deps._user_store()
+    user = user_store.create(username, f"{username}@example.com", "password")
+    token = create_access_token(user.id, user.is_admin, username=user.username)
+    return TestClient(app, headers={"Authorization": f"Bearer {token}"}), user.id
+
+
+def test_folders_http_per_account_isolation(tmp_path, monkeypatch):
+    """Over HTTP: user A's created folder never appears on user B's rail,
+    and B creating the same name gets their OWN empty group."""
+    client_a = _setup(tmp_path, monkeypatch)
+    client_b, _ = _second_user_client(tmp_path, monkeypatch)
+
+    r = client_a.post("/api/v1/leads/folders", json={"name": "Monday data"})
+    assert r.status_code == 201 and r.json()["created"] is True
+
+    # B's rail: empty — A's folder is invisible to them.
+    assert client_b.get("/api/v1/leads/folders").json()["folders"] == []
+
+    # B creates the SAME name — their own group, not a duplicate error.
+    r = client_b.post("/api/v1/leads/folders", json={"name": "Monday data"})
+    assert r.status_code == 201 and r.json()["created"] is True
+
+    rails = {
+        who: {f["name"] for f in c.get("/api/v1/leads/folders").json()["folders"]}
+        for who, c in (("a", client_a), ("b", client_b))
+    }
+    assert rails == {"a": {"Monday data"}, "b": {"Monday data"}}
+
+    # A deleting their folder never touches B's.
+    r = client_a.post("/api/v1/leads/organize/clear",
+                      json={"kind": "folder", "value": "Monday data"})
+    assert r.status_code == 200
+    assert [f["name"] for f in client_b.get("/api/v1/leads/folders").json()["folders"]] == ["Monday data"]
+    assert client_a.get("/api/v1/leads/folders").json()["folders"] == []

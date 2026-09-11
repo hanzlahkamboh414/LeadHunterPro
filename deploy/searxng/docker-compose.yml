@@ -1,0 +1,37 @@
+# LeadHunter Pro — local SearXNG (search backend, FREE unlimited queries)
+#
+# Runs on the SAME server as the backend, bound to 127.0.0.1 ONLY (never
+# exposed to the internet — it has no auth). The backend's SearXNG provider
+# (priority 10 — ahead of Brave 15 / Tavily 20) reads its JSON API, so every
+# pipeline search is served free and Tavily acts only as the fallback when
+# SearXNG returns nothing (circuit breaker handles the switch, 5-min TTL).
+#
+# Install on the server:
+#   sudo apt-get install -y docker.io
+#   sudo mkdir -p /opt/searxng
+#   sudo cp settings.yml /opt/searxng/settings.yml   # edit secret_key first!
+#   sudo docker compose up -d
+#   # then in /opt/leadhunter/.env:
+#   SEARXNG_URL=http://127.0.0.1:8888
+#   sudo systemctl restart leadhunter
+#
+# Engine notes (measured 2026-09-12 on the EC2 datacenter IP): the docker
+# default enables only brave/duckduckgo/google-cse for general web, and ALL
+# THREE suspend within minutes under the pipeline's burst load (CAPTCHA /
+# too-many-requests). This settings.yml additionally enables bing, google,
+# qwant, yahoo, mojeek — with engine redundancy, a 12-query concurrent
+# burst returned 12/12 with results (bing+google+qwant carrying it), and a
+# sustained live run served 36/36 queries with zero Tavily fallback.
+# SearXNG auto-suspends and re-admits engines per engine, so redundancy is
+# the resilience mechanism — keep the set broad.
+
+services:
+  searxng:
+    image: searxng/searxng
+    container_name: searxng
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8888:8080"   # localhost only — never expose publicly
+    volumes:
+      - ./settings.yml:/etc/searxng/settings.yml:ro
+    mem_limit: 512m

@@ -1,0 +1,34 @@
+# LeadHunter Pro — SearXNG instance settings (see docker-compose.yml)
+#
+# JSON output enabled (the provider reads ?format=json), limiter off
+# (localhost-only traffic), image proxy off (we never request images).
+
+use_default_settings: true
+
+server:
+  # CHANGE THIS on a new install: openssl rand -base64 32
+  secret_key: "CHANGE_ME_GENERATE_A_NEW_SECRET"
+  limiter: false
+  image_proxy: false
+
+search:
+  formats:
+    - html
+    - json
+
+engines:
+  # General-web engines — the docker default enables only brave/duckduckgo/
+  # google-cse for general web, and all three suspend under a datacenter IP
+  # burst (CAPTCHA / too-many-requests). A broader set gives SearXNG
+  # redundancy: when 2-3 engines rate-limit, the rest still answer, and
+  # SearXNG auto-suspends/re-admits per engine.
+  - name: bing
+    disabled: false
+  - name: google
+    disabled: false
+  - name: qwant
+    disabled: false
+  - name: yahoo
+    disabled: false
+  - name: mojeek
+    disabled: false

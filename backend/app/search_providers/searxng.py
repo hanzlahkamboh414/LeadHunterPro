@@ -5,13 +5,15 @@ results from multiple sources without requiring an API key.
 
 Configuration via environment:
     SEARXNG_URL=https://searxng.example.com   # Required: your SearXNG instance
-    SEARXNG_TIMEOUT=10                         # Optional: request timeout (default 10s)
+    SEARXNG_TIMEOUT=6                          # Optional: request timeout (default 6s)
     SEARXNG_MAX_RESULTS=20                     # Optional: max results per query
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import threading
 import time
 from typing import Any
 
@@ -36,6 +38,17 @@ class SearXNGProvider(BaseSearchProvider, LoopSessionMixin):
     description = "Self-hosted SearXNG metasearch engine"
     priority = 10
 
+    # Global throttle: SearXNG fans every query out to the upstream engines,
+    # and a burst from the pipeline suspends them (CAPTCHA / 429 — measured
+    # on a datacenter IP). Spacing queries ~3 qps keeps the engine pool
+    # healthy under multi-user load. CLASS-level (threading.Lock + monotonic
+    # reservation slots, mirroring brave.py) because the pipeline runs
+    # several concurrent event loops — a per-instance or asyncio.Lock would
+    # only pace one loop.
+    _RATE_INTERVAL_S = 0.3
+    _rate_lock: threading.Lock = threading.Lock()
+    _rate_next_slot: float = 0.0
+
     def __init__(
         self,
         base_url: str,
@@ -55,12 +68,32 @@ class SearXNGProvider(BaseSearchProvider, LoopSessionMixin):
         """
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
-        self.timeout_s = float(timeout)  # manager hard-gate matches the aiohttp cap
+        # Manager hard-gate must cover BOTH the aiohttp request cap AND the
+        # rate-limiter queue wait — a backstop that fires while a query is
+        # waiting for its slot blacklists a healthy provider (brave.py, 3ca6022).
+        self.timeout_s = float(timeout) + 15.0
         self._max_results = max_results
         self._safe_search = 1 if safe_search else 0
         # LoopSessionMixin: one session per event loop (concurrency fix —
         # see the mixin docstring in base.py).
         self._init_sessions()
+
+    async def _respect_rate_limit(self) -> None:
+        """Reserve a slot on the global rate clock and wait for it.
+
+        Reservation happens under a threading.Lock (atomic check-and-book),
+        then the sleep happens OUTSIDE the lock so waiting callers don't
+        block the thread that owns the next slot.
+        """
+        with SearXNGProvider._rate_lock:
+            now = time.monotonic()
+            slot = max(now, SearXNGProvider._rate_next_slot)
+            SearXNGProvider._rate_next_slot = (
+                slot + SearXNGProvider._RATE_INTERVAL_S
+            )
+        wait = slot - now
+        if wait > 0:
+            await asyncio.sleep(wait)
 
     async def __aenter__(self) -> SearXNGProvider:
         return self
@@ -77,6 +110,7 @@ class SearXNGProvider(BaseSearchProvider, LoopSessionMixin):
         Returns:
             A SearchResponse with parsed results.
         """
+        await self._respect_rate_limit()
         start = time.monotonic()
 
         try:

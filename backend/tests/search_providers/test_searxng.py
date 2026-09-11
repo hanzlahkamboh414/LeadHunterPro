@@ -13,6 +13,19 @@ from app.search_providers.searxng import SearXNGProvider
 class TestSearXNGProvider:
     """Test SearXNG provider implementation."""
 
+    @pytest.fixture(autouse=True)
+    def _reset_rate_limiter(self):
+        """Start every test with a clean rate-limiter clock.
+
+        The limiter is CLASS-level (it must pace calls across the pipeline's
+        multiple concurrent event loops), so without this reset one test's
+        reservation makes the NEXT test sleep up to 0.3s for a slot it never
+        needed.
+        """
+        SearXNGProvider._rate_next_slot = 0.0
+        yield
+        SearXNGProvider._rate_next_slot = 0.0
+
     @pytest.fixture
     def provider(self):
         """Create a SearXNG provider instance."""
@@ -38,14 +51,60 @@ class TestSearXNGProvider:
         assert provider.priority == 10
 
     def test_timeout_defaults_to_fast_cap(self):
-        """Default SearXNG timeout is short (6s) and mirrors onto timeout_s so
-        the manager's hard gate matches — a hung instance stalls a query at
-        most once before being blacklisted."""
+        """The per-query aiohttp cap stays short (6s) — a hung instance
+        stalls a query at most once — while timeout_s (the manager's hard
+        gate) additionally carries a fixed budget for the rate-limiter
+        queue wait so a queued query is not cancelled-and-blacklisted."""
         p = SearXNGProvider(base_url="https://searxng.example.com")
         assert p._timeout == 6
-        assert p.timeout_s == 6.0
+        assert p.timeout_s == 6.0 + 15.0
         p2 = SearXNGProvider(base_url="https://searxng.example.com", timeout=3)
-        assert p2.timeout_s == 3.0
+        assert p2.timeout_s == 3.0 + 15.0
+
+    def test_timeout_covers_rate_queue(self, provider):
+        """The manager backstop (timeout_s) must exceed the aiohttp request
+        timeout by enough to absorb the rate-limiter queue wait — a backstop
+        that fires while a query is waiting for its slot would blacklist a
+        healthy provider (same invariant as brave.py)."""
+        assert provider.timeout_s > provider._timeout
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_spaces_concurrent_calls(self):
+        """Concurrent calls are spaced ≥ interval apart (~3 qps cap).
+
+        Uses a SHORT interval so the test stays fast — the reservation
+        arithmetic is what matters, not the real 0.3s spacing.
+        """
+        import asyncio
+        import time as _time
+
+        interval = 0.05
+        provider = SearXNGProvider(base_url="https://searxng.example.com")
+        old = SearXNGProvider._RATE_INTERVAL_S
+        SearXNGProvider._RATE_INTERVAL_S = interval
+        try:
+            start = _time.monotonic()
+            await asyncio.gather(
+                provider._respect_rate_limit(),
+                provider._respect_rate_limit(),
+                provider._respect_rate_limit(),
+            )
+            elapsed = _time.monotonic() - start
+        finally:
+            SearXNGProvider._RATE_INTERVAL_S = old
+        # 3 callers: first fires immediately, the other two wait for their
+        # reserved slots → at least 2 intervals of total spacing.
+        assert elapsed >= 2 * interval - 0.01
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_no_wait_when_idle(self):
+        """A single call with an idle clock fires immediately (no sleep)."""
+        import time as _time
+
+        provider = SearXNGProvider(base_url="https://searxng.example.com")
+        start = _time.monotonic()
+        await provider._respect_rate_limit()
+        assert _time.monotonic() - start < 0.05
 
     def test_health_check(self, provider):
         """Health check returns enabled status."""

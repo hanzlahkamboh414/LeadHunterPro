@@ -32,3 +32,15 @@ engines:
     disabled: false
   - name: mojeek
     disabled: false
+  # Second redundancy tier (added 2026-09-12 for multi-user load): with 9
+  # general engines a single burst still left only 4-5 answering; these 4
+  # brought the measured pool to 11 engines / 71 results per query with
+  # mwmbl alone carrying a third of the results.
+  - name: yandex
+    disabled: false
+  - name: yep
+    disabled: false
+  - name: mwmbl
+    disabled: false
+  - name: duckduckgo web
+    disabled: false

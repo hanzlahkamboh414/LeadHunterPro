@@ -67,20 +67,42 @@ def test_generate_with_fake_ask_expands_both_axes():
     # Surface Expansion Guard (Inc 1): 2 distinct markets is a THIN surface —
     # the deterministic metro fallback merges IN (union, not either/or). The
     # AI's own picks lead, the fallback fills the breadth behind them.
-    assert out["location_variants"] == [
+    assert out["location_variants"][:7] == [
         "Harris County TX", "Fort Bend County TX",
         "Montgomery County TX", "Galveston County TX",
         "Katy TX", "Sugar Land TX", "Conroe TX",
     ]
+    # Phase 1 state tier: the cap (_MAX_LOCATION=8) is filled by the NEXT
+    # tier — another TX metro — never left short when the state has more.
+    assert len(out["location_variants"]) == _MAX_LOCATION
+    assert out["location_variants"][7] == "Dallas, TX"
     assert "metro fallback merged" in out["reason"]
     assert out["retried"] is False
     assert len(out["raw_replies"]) == 1  # rich reply, no retry needed
 
 
-def test_generate_garbage_reply_returns_honest_empty_with_reason():
-    """Unknown metro + garbage reply: no deterministic fallback exists, so an
-    empty stays an empty — but loud (reason) after the free retry was burned."""
-    out = generate_query_expansion("General Contractors", "Butte MT",
+def test_thin_reply_for_unknown_metro_gets_state_tier():
+    """Phase 1 fix (live proof: the 2026-09-12 Honolulu run — the AI returned
+    ONE location wording across three expansion calls and the old fallback
+    table had no entry, so the whole run searched a 7×1 surface and stopped
+    at 2 working). A metro outside the six hand-curated ones now draws the
+    state tier: other major metros of the same state + the state itself."""
+    def fake_ask(_prompt: str) -> str:
+        return 'LOCATION:\n"Sedgwick County Kansas"'  # one market, forever
+
+    out = generate_query_expansion("Flooring", "Wichita, KS", ai_ask=fake_ask)
+    assert "Sedgwick County Kansas" in out["location_variants"]  # AI's kept
+    assert "Overland Park, KS" in out["location_variants"]  # state tier
+    assert "Kansas" in out["location_variants"]  # statewide, last resort
+    assert "metro fallback merged" in out["reason"]
+
+
+def test_garbage_reply_non_us_location_stays_honest_empty():
+    """A garbage reply for a location the fallback has NO data for (non-US)
+    still returns an honest empty — but loud (reason) after the free retry
+    was burned. (The old Butte-MT version of this test is obsolete: every
+    US metro now has a state tier, which is exactly the Phase 1 fix.)"""
+    out = generate_query_expansion("General Contractors", "London",
                                    ai_ask=lambda _p: "no idea what you want")
     assert out["retried"] is True  # the one retry was spent, honestly reported
     assert len(out["raw_replies"]) == 2
@@ -108,6 +130,7 @@ def test_retry_fires_when_first_call_yields_one_distinct_location():
     assert out["location_variants"] == [
         "Harris County TX", "Fort Bend County TX", "Montgomery County TX",
         "Galveston County TX", "Katy TX", "Sugar Land TX", "Conroe TX",
+        "Dallas, TX",
     ]
     assert "metro fallback merged" in out["reason"]
     assert len(out["raw_replies"]) == 2  # both raw replies diagnosable

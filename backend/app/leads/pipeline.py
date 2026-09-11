@@ -35,10 +35,10 @@ from urllib.parse import urlparse
 logger = logging.getLogger(__name__)
 
 from app.discovery.query_expansion import (
-    _METRO_FALLBACK,
     _fold,
     generate_query_expansion,
     merge_locations,
+    metro_fallback,
 )
 from app.discovery.sources.plan_holder_source import PlanHolderSource
 from app.discovery.sources.status import SourceStatus
@@ -1595,14 +1595,19 @@ def _run_full_streaming(
         rounds = 0
 
         def _expandable_markets() -> list[str]:
-            """Known metro markets NOT yet in the rotation (Surface Expansion).
+            """Expansion markets NOT yet in the rotation (Surface Expansion).
 
-            Draws from the deterministic :data:`_METRO_FALLBACK` table only —
-            Inc 1 keeps expansion cheap and predictable (no extra AI call on
-            the hot path). Returns [] when every known market is already in
-            the surface, which is the honest "nothing left to expand" signal.
+            Draws from the deterministic :func:`metro_fallback` tiers — the
+            hand-curated metro table (counties/suburbs) first, then the
+            state's other major metros + a state-wide entry, so ANY US
+            metro has an expansion path (live proof it was needed: the
+            2026-09-12 Honolulu/Wichita runs had an empty list and stopped
+            at 1-2 working). Inc 1 keeps expansion cheap and predictable
+            (no extra AI call on the hot path). Returns [] only when every
+            known market is already in the surface — the honest "nothing
+            left to expand" signal.
             """
-            fallback = _METRO_FALLBACK.get(_fold(query.location)) or []
+            fallback = metro_fallback(query.location)
             have = {_fold(v) for v in loc_variants}
             out: list[str] = []
             for m in fallback:

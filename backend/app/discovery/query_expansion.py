@@ -295,6 +295,38 @@ _METRO_FALLBACK: dict[str, list[str]] = {
 }
 
 
+def metro_fallback(location: str) -> list[str]:
+    """Deterministic expansion markets for ANY US location (Phase 1 fix).
+
+    Two tiers, ordered narrow-to-broad so the rotation tries the precise
+    markets before the wide nets:
+
+    1. ``_METRO_FALLBACK`` — counties/suburbs of the six hand-curated
+       metros (highest precision).
+    2. :func:`state_markets.state_markets` — the state's OTHER major
+       metros plus a state-wide entry, so a metro outside the six (live
+       proof: Honolulu HI / Wichita KS, 2026-09-12) still gets an
+       expansion path instead of an empty list.
+
+    Deduped by fold-key, never contains the literal itself. Returns []
+    only when the location is genuinely un-expandable (non-US, or the
+    literal already IS a state) — the honest "nothing left" signal.
+    """
+    out: list[str] = list(_METRO_FALLBACK.get(_fold(location)) or [])
+    seen: set[str] = {_fold(location)}
+    for m in out:
+        seen.add(_fold(m))
+    from app.discovery.state_markets import state_markets
+
+    for m in state_markets(location):
+        key = _fold(m)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(m)
+    return out
+
+
 def generate_query_expansion(
     trade: str, location: str, ai_ask: Callable[[str], str] | None = None,
 ) -> dict[str, Any]:
@@ -446,7 +478,7 @@ def generate_query_expansion(
         # geo surface. Now ANY thin reply (< _MIN_BREADTH_MARKETS distinct
         # markets) gets the deterministic metro entries merged in alongside —
         # a run never advances on a surface smaller than the known metro.
-        fallback = _METRO_FALLBACK.get(_fold(location))
+        fallback = metro_fallback(location)
         if fallback:
             clean_locs = _sanitize_list(
                 clean_locs + fallback, location, _MAX_LOCATION

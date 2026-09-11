@@ -40,12 +40,12 @@ class SearXNGProvider(BaseSearchProvider, LoopSessionMixin):
 
     # Global throttle: SearXNG fans every query out to the upstream engines,
     # and a burst from the pipeline suspends them (CAPTCHA / 429 — measured
-    # on a datacenter IP). Spacing queries ~3 qps keeps the engine pool
+    # on a datacenter IP). Spacing queries ~5 qps keeps the engine pool
     # healthy under multi-user load. CLASS-level (threading.Lock + monotonic
     # reservation slots, mirroring brave.py) because the pipeline runs
     # several concurrent event loops — a per-instance or asyncio.Lock would
     # only pace one loop.
-    _RATE_INTERVAL_S = 0.3
+    _RATE_INTERVAL_S = 0.2
     _rate_lock: threading.Lock = threading.Lock()
     _rate_next_slot: float = 0.0
 
@@ -71,7 +71,10 @@ class SearXNGProvider(BaseSearchProvider, LoopSessionMixin):
         # Manager hard-gate must cover BOTH the aiohttp request cap AND the
         # rate-limiter queue wait — a backstop that fires while a query is
         # waiting for its slot blacklists a healthy provider (brave.py, 3ca6022).
-        self.timeout_s = float(timeout) + 15.0
+        # 30s budget: two aligned job bursts measured ~70+ queued queries
+        # (0.2s each = 14s wait) before the old 21s gate cancelled them and
+        # the breaker opened a 5-minute Tavily blackout.
+        self.timeout_s = float(timeout) + 30.0
         self._max_results = max_results
         self._safe_search = 1 if safe_search else 0
         # LoopSessionMixin: one session per event loop (concurrency fix —
@@ -92,6 +95,12 @@ class SearXNGProvider(BaseSearchProvider, LoopSessionMixin):
                 slot + SearXNGProvider._RATE_INTERVAL_S
             )
         wait = slot - now
+        if wait > 10.0:
+            logger.warning(
+                "SearXNG rate-queue backlog: next slot in %.1fs "
+                "(query demand exceeds throttle drain)",
+                wait,
+            )
         if wait > 0:
             await asyncio.sleep(wait)
 

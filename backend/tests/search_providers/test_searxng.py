@@ -19,7 +19,7 @@ class TestSearXNGProvider:
 
         The limiter is CLASS-level (it must pace calls across the pipeline's
         multiple concurrent event loops), so without this reset one test's
-        reservation makes the NEXT test sleep up to 0.3s for a slot it never
+        reservation makes the NEXT test sleep up to 0.2s for a slot it never
         needed.
         """
         SearXNGProvider._rate_next_slot = 0.0
@@ -57,9 +57,9 @@ class TestSearXNGProvider:
         queue wait so a queued query is not cancelled-and-blacklisted."""
         p = SearXNGProvider(base_url="https://searxng.example.com")
         assert p._timeout == 6
-        assert p.timeout_s == 6.0 + 15.0
+        assert p.timeout_s == 6.0 + 30.0
         p2 = SearXNGProvider(base_url="https://searxng.example.com", timeout=3)
-        assert p2.timeout_s == 3.0 + 15.0
+        assert p2.timeout_s == 3.0 + 30.0
 
     def test_timeout_covers_rate_queue(self, provider):
         """The manager backstop (timeout_s) must exceed the aiohttp request

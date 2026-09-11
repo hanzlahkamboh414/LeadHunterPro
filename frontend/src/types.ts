@@ -290,6 +290,8 @@ export interface AdminUser {
   email: string;
   is_admin: boolean;
   created_at: string;
+  /** Display name (topbar); empty -> UI falls back to username. */
+  name: string;
 }
 
 export interface AdminUsers {

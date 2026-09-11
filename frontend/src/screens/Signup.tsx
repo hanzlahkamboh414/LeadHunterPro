@@ -8,6 +8,7 @@ export default function Signup() {
   const navigate = useNavigate();
   const [username, setUsername] = useState("");
   const [email, setEmail] = useState("");
+  const [name, setName] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [error, setError] = useState("");
@@ -22,7 +23,7 @@ export default function Signup() {
     }
     setLoading(true);
     try {
-      await signup(username, email, password);
+      await signup(username, email, password, name.trim());
       navigate("/");
     } catch (err: any) {
       setError(err?.message || "Signup failed");
@@ -65,6 +66,18 @@ export default function Signup() {
               onChange={(e) => setUsername(e.target.value)}
               required
               autoFocus
+              className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500/50"
+            />
+          </div>
+
+          <div>
+            <label className="block text-[12px] text-slate-400 mb-1">Full name</label>
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="Shown at the top of the app"
+              required
               className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500/50"
             />
           </div>

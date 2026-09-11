@@ -27,6 +27,7 @@ class User:
     password_hash: str
     is_admin: bool
     created_at: str
+    name: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -35,7 +36,14 @@ class User:
             "email": self.email,
             "is_admin": self.is_admin,
             "created_at": self.created_at,
+            "name": self.name,
         }
+
+
+def _display_name(username: str) -> str:
+    """A friendly display name from a username — first English letters
+    capitalised ("skye schooly" -> "Skye Schooly", "test1" -> "Test1")."""
+    return (username or "").strip().title()
 
 
 class UserStore:
@@ -59,9 +67,27 @@ class UserStore:
                 email TEXT UNIQUE NOT NULL,
                 password_hash TEXT NOT NULL,
                 is_admin INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                name TEXT NOT NULL DEFAULT ''
             )
         """)
+        # Additive migration for DBs created before `name` existed (guarded —
+        # the column append is a no-op once present).
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
+        if "name" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN name TEXT NOT NULL DEFAULT ''")
+        # Backfill: existing NON-admin accounts with no display name get one
+        # derived from their username (first letters capitalised). The admin
+        # account keeps whatever it has — the UI falls back to the username.
+        # Title-casing is per-row in Python (SQLite has no TITLE()).
+        rows = conn.execute(
+            "SELECT id, username FROM users "
+            "WHERE is_admin = 0 AND (name IS NULL OR name = '')"
+        ).fetchall()
+        for uid, uname in rows:
+            conn.execute(
+                "UPDATE users SET name = ? WHERE id = ?", (_display_name(uname), uid)
+            )
         conn.commit()
         conn.close()
 
@@ -73,10 +99,16 @@ class UserStore:
             password_hash=row[3],
             is_admin=bool(row[4]),
             created_at=row[5],
+            name=(row[6] if len(row) > 6 else "") or "",
         )
 
-    def create(self, username: str, email: str, password: str) -> User:
-        """Create a new user. Raises ValueError on duplicate username/email."""
+    def create(self, username: str, email: str, password: str,
+               name: str = "") -> User:
+        """Create a new user. Raises ValueError on duplicate username/email.
+
+        ``name`` is the display name (shown in the topbar). Empty -> derived
+        from the username (first letters capitalised).
+        """
         pw_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
         user = User(
             id=uuid.uuid4().hex[:12],
@@ -85,14 +117,15 @@ class UserStore:
             password_hash=pw_hash,
             is_admin=False,
             created_at=_now(),
+            name=(name or "").strip() or _display_name(username),
         )
         conn = sqlite3.connect(self._db_path)
         try:
             conn.execute(
-                "INSERT INTO users (id, username, email, password_hash, is_admin, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO users (id, username, email, password_hash, is_admin, created_at, name) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (user.id, user.username, user.email, user.password_hash,
-                 int(user.is_admin), user.created_at),
+                 int(user.is_admin), user.created_at, user.name),
             )
             conn.commit()
         except sqlite3.IntegrityError as e:

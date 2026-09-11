@@ -77,7 +77,7 @@ export default function Sidebar() {
         {user && (
           <div className="rounded-lg bg-white/[0.03] border border-white/5 px-3 py-2.5 flex items-center justify-between text-[12px] text-slate-400">
             <span className="truncate flex-1" title={user.username}>
-              {user.username}
+              {user.name || user.username}
               {user.is_admin && (
                 <span className="ml-1.5 text-indigo-400 text-[10px]">admin</span>
               )}

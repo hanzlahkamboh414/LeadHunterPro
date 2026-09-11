@@ -11,6 +11,7 @@ import { api } from "../api/client";
 interface AuthUser {
   id: string;
   username: string;
+  name: string;
   is_admin: boolean;
 }
 
@@ -19,7 +20,7 @@ interface AuthState {
   token: string | null;
   loading: boolean;
   login: (username: string, password: string) => Promise<void>;
-  signup: (username: string, email: string, password: string) => Promise<void>;
+  signup: (username: string, email: string, password: string, name?: string) => Promise<void>;
   logout: () => void;
   resetPassword: (username: string, newPassword: string) => Promise<void>;
 }
@@ -63,6 +64,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setUser({
           id: payload.user_id as string,
           username: (payload.username as string) || "",
+          name: (payload.name as string) || "",
           is_admin: Boolean(payload.is_admin),
         });
       } else {
@@ -93,8 +95,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 
   const signup = useCallback(
-    async (username: string, email: string, password: string) => {
-      const res = await api.signup(username, email, password);
+    async (username: string, email: string, password: string, name = "") => {
+      const res = await api.signup(username, email, password, name);
       storeToken(res.token);
     },
     [storeToken],

@@ -664,7 +664,7 @@ function UsersTab({
   };
 
   const createUser = useMutation({
-    mutationFn: (body: { username: string; email: string; password: string }) =>
+    mutationFn: (body: { username: string; email: string; password: string; name?: string }) =>
       api.adminCreateUser(body),
     onSuccess: invalidateUsers,
   });
@@ -722,7 +722,7 @@ function UsersTab({
           <table className="w-full text-left text-[12.5px]">
             <thead className="text-slate-500">
               <tr>
-                <th className="pb-2 pr-4 font-medium">Username</th>
+                <th className="pb-2 pr-4 font-medium">Name</th>
                 <th className="pb-2 pr-4 font-medium">Email</th>
                 <th className="pb-2 pr-4 font-medium">Role</th>
                 <th className="pb-2 pr-4 font-medium">Created</th>
@@ -838,18 +838,25 @@ function CreateUserForm({
 }: {
   busy: boolean;
   error: Error | null;
-  onCreate: (body: { username: string; email: string; password: string }) => void;
+  onCreate: (body: { username: string; email: string; password: string; name?: string }) => void;
 }) {
   const [username, setUsername] = useState("");
+  const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   return (
     <div className="mt-3">
-      <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-4">
         <input
           value={username}
           onChange={(e) => setUsername(e.target.value)}
           placeholder="username"
+          className={inputClass}
+        />
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="full name (shown in their topbar)"
           className={inputClass}
         />
         <input
@@ -870,12 +877,13 @@ function CreateUserForm({
       <div className="mt-2 flex items-center gap-3">
         <button
           onClick={() => {
-            onCreate({ username: username.trim(), email: email.trim(), password });
+            onCreate({ username: username.trim(), email: email.trim(), password, name: name.trim() });
             setUsername("");
+            setName("");
             setEmail("");
             setPassword("");
           }}
-          disabled={busy || !username.trim() || !email.trim() || !password}
+          disabled={busy || !username.trim() || !email.trim() || !password || !name.trim()}
           className="rounded-lg bg-indigo-600 px-4 py-2 text-[13px] font-semibold text-white hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
         >
           {busy ? <Spinner className="h-3.5 w-3.5" /> : <UserPlus className="h-3.5 w-3.5" />}
@@ -912,9 +920,12 @@ function UserRow({
     <>
       <tr className={`border-t border-white/5 ${expanded ? "bg-white/[0.02]" : "hover:bg-white/[0.02]"}`}>
         <td className="py-2.5 pr-4">
-          <button onClick={onToggle} className="text-slate-200 hover:text-white text-left">
+          <button onClick={onToggle} className="text-left hover:text-white">
             <span className={`inline-block transition-transform mr-1.5 text-slate-500 ${expanded ? "rotate-90" : ""}`}>›</span>
-            {user.username}
+            <span className="text-slate-200 font-medium">{user.name || user.username}</span>
+            {user.name && user.name !== user.username && (
+              <span className="ml-2 text-[11.5px] text-slate-500">@{user.username}</span>
+            )}
           </button>
         </td>
         <td className="py-2.5 pr-4 text-slate-400">{user.email}</td>

@@ -1,16 +1,30 @@
 import { FormEvent, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Search, Bell, ChevronDown } from "lucide-react";
+import { useAuth } from "../contexts/AuthContext";
+
+/** "Skye Schooly" -> "SS", "king" -> "KI" — the avatar badge initials. */
+function initials(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
+  return name.trim().slice(0, 2).toUpperCase() || "U";
+}
 
 export default function Topbar() {
   const [q, setQ] = useState("");
   const navigate = useNavigate();
+  const { user } = useAuth();
 
   function onSubmit(e: FormEvent) {
     e.preventDefault();
     const term = q.trim();
     navigate(term ? `/leads?q=${encodeURIComponent(term)}` : "/leads");
   }
+
+  // Who is signed in — the account's display name (falls back to the
+  // username), never a hardcoded one.
+  const displayName = user?.name || user?.username || "";
+  const subtitle = user?.is_admin ? "Administrator" : "Business Development";
 
   return (
     // shrink-0: the shell is a fixed height now, so the bar must keep its own
@@ -37,11 +51,11 @@ export default function Topbar() {
 
       <div className="flex items-center gap-2.5 pl-1 pr-2 py-1 rounded-lg hover:bg-white/[0.04]">
         <div className="w-8 h-8 rounded-full bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center text-[12px] font-semibold text-white">
-          HZ
+          {initials(displayName)}
         </div>
         <div className="text-left leading-tight hidden sm:block">
-          <div className="text-[13px] text-white font-medium">Hanzlah</div>
-          <div className="text-[11px] text-slate-500">Business Development</div>
+          <div className="text-[13px] text-white font-medium">{displayName}</div>
+          <div className="text-[11px] text-slate-500">{subtitle}</div>
         </div>
         <ChevronDown className="w-3.5 h-3.5 text-slate-500" />
       </div>

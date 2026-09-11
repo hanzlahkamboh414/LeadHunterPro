@@ -163,11 +163,11 @@ export const api = {
     });
   },
 
-  signup(username: string, email: string, password: string): Promise<{ user_id: string; username: string; token: string }> {
+  signup(username: string, email: string, password: string, name = ""): Promise<{ user_id: string; username: string; name: string; token: string }> {
     return request("/auth/signup", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username, email, password }),
+      body: JSON.stringify({ username, email, password, name }),
     });
   },
 
@@ -271,6 +271,7 @@ export const api = {
     username: string;
     email: string;
     password: string;
+    name?: string;
   }): Promise<AdminUsers["users"][number]> {
     return request("/admin/users", {
       method: "POST",

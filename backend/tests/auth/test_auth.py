@@ -75,10 +75,61 @@ class TestUserStore:
         assert fetched is not None
         assert fetched.id == user.id
 
+    def test_create_with_and_without_name(self, tmp_user_store):
+        named = tmp_user_store.create("jdoe", "jdoe@example.com", "pass123",
+                                      name="Jane Doe")
+        assert named.name == "Jane Doe"
+        # No name given -> derived from the username's first letters.
+        derived = tmp_user_store.create("fieldguy", "field@example.com", "pass123")
+        assert derived.name == "Fieldguy"
+
     def test_duplicate_username(self, tmp_user_store):
         tmp_user_store.create("bob", "bob@example.com", "pass123")
         with pytest.raises(ValueError, match="Username already taken"):
             tmp_user_store.create("bob", "bob2@example.com", "pass456")
+
+    def test_duplicate_email(self, tmp_user_store):
+        """One email = one account (DB-level UNIQUE, both directions)."""
+        tmp_user_store.create("one", "shared@example.com", "pass123")
+        with pytest.raises(ValueError, match="Email already registered"):
+            tmp_user_store.create("two", "shared@example.com", "pass456")
+
+    def test_legacy_db_gains_name_column_and_backfills(self, tmp_path):
+        """A users table created BEFORE the name column: booting the store
+        ALTERs it in and backfills NON-admin rows from their username's first
+        letters — the admin row is left alone (its UI falls back to username)."""
+        import sqlite3
+        db = str(tmp_path / "legacy_users.db")
+        conn = sqlite3.connect(db)
+        conn.execute("""
+            CREATE TABLE users (
+                id TEXT PRIMARY KEY,
+                username TEXT UNIQUE NOT NULL,
+                email TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                is_admin INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            )
+        """)
+        conn.executemany(
+            "INSERT INTO users VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                ("adm1", "admin4269", "admin@x.test", "h", 1, "2026-01-01"),
+                ("u1", "skye schooly", "skye@x.test", "h", 0, "2026-01-02"),
+                ("u2", "king", "king@x.test", "h", 0, "2026-01-03"),
+            ],
+        )
+        conn.commit()
+        conn.close()
+
+        store = UserStore(db_path=db)  # boot runs the additive migration
+        assert store.get_by_id("u1").name == "Skye Schooly"
+        assert store.get_by_id("u2").name == "King"
+        # Admin excluded from the backfill.
+        assert store.get_by_id("adm1").name == ""
+        # Idempotent: a second boot must not rename anyone.
+        UserStore(db_path=db)
+        assert store.get_by_id("u2").name == "King"
 
     def test_verify_password_correct(self, tmp_user_store):
         tmp_user_store.create("carol", "carol@example.com", "secret")
@@ -137,6 +188,53 @@ class TestSignupEndpoint:
             "password": "pass",
         })
         assert res.status_code == 409
+
+    def test_signup_one_account_per_email(self, client):
+        """A DIFFERENT username but the SAME email must still be refused —
+        one email = one account, no shadow accounts."""
+        client.post("/api/v1/auth/signup", json={
+            "username": "first",
+            "email": "shared@example.com",
+            "password": "pass123",
+        })
+        res = client.post("/api/v1/auth/signup", json={
+            "username": "second",
+            "email": "SHARED@example.com",  # case-insensitive — emails are lowered
+            "password": "pass123",
+        })
+        assert res.status_code == 409
+        assert "email" in res.json()["detail"].lower()
+
+    def test_signup_records_name_and_token_carries_it(self, client):
+        """The signup form asks for a full name — it must survive into the
+        account row, the response, and the JWT (the topbar reads the claim)."""
+        res = client.post("/api/v1/auth/signup", json={
+            "username": "nameduser",
+            "email": "named@example.com",
+            "password": "pass123",
+            "name": "Skye Schooly",
+        })
+        assert res.status_code == 201
+        data = res.json()
+        assert data["name"] == "Skye Schooly"
+
+        payload = decode_access_token(data["token"])
+        assert payload["name"] == "Skye Schooly"
+
+        me = client.get("/api/v1/auth/me",
+                        headers={"Authorization": f"Bearer {data['token']}"}).json()
+        assert me["name"] == "Skye Schooly"
+
+    def test_signup_without_name_derives_it_from_username(self, client):
+        """API clients may omit the name — the account still gets a display
+        name from the username's first letters ("fieldguy" -> "Fieldguy")."""
+        res = client.post("/api/v1/auth/signup", json={
+            "username": "fieldguy",
+            "email": "field@example.com",
+            "password": "pass123",
+        })
+        assert res.status_code == 201
+        assert res.json()["name"] == "Fieldguy"
 
 
 class TestLoginEndpoint:

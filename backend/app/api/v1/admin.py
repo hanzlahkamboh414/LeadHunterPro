@@ -314,7 +314,8 @@ def create_user(body: AdminUserCreateIn) -> AdminUserOut:
     """Admin creates an account directly (username + email + password)."""
     try:
         user = _user_store().create(
-            username=body.username, email=body.email, password=body.password
+            username=body.username, email=body.email,
+            password=body.password, name=body.name,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

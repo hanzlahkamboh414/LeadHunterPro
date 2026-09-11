@@ -37,6 +37,7 @@ class SignupRequest(BaseModel):
     username: str = Field(..., min_length=3, max_length=30)
     email: str = Field(..., min_length=5, max_length=100)
     password: str = Field(..., min_length=4, max_length=100)
+    name: str = Field("", max_length=100)
 
 
 class LoginRequest(BaseModel):
@@ -52,6 +53,7 @@ class ResetPasswordRequest(BaseModel):
 class AuthOut(BaseModel):
     user_id: str
     username: str
+    name: str = ""
     is_admin: bool = False
     token: str
 
@@ -59,6 +61,7 @@ class AuthOut(BaseModel):
 class MeOut(BaseModel):
     user_id: str
     username: str
+    name: str = ""
     email: str
     is_admin: bool
 
@@ -76,16 +79,20 @@ def signup(body: SignupRequest) -> AuthOut:
             username=body.username,
             email=body.email,
             password=body.password,
+            name=body.name,
         )
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
 
-    token = create_access_token(user.id, user.is_admin, username=user.username)
+    token = create_access_token(
+        user.id, user.is_admin, username=user.username, name=user.name
+    )
     logger.info("Signup: user %s created", user.username)
     get_activity().record(user.id, user.username, "signup")
     return AuthOut(
         user_id=user.id,
         username=user.username,
+        name=user.name,
         is_admin=user.is_admin,
         token=token,
     )
@@ -99,12 +106,15 @@ def login(body: LoginRequest) -> AuthOut:
     if user is None:
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
-    token = create_access_token(user.id, user.is_admin, username=user.username)
+    token = create_access_token(
+        user.id, user.is_admin, username=user.username, name=user.name
+    )
     logger.info("Login: user %s", user.username)
     get_activity().record(user.id, user.username, "login")
     return AuthOut(
         user_id=user.id,
         username=user.username,
+        name=user.name,
         is_admin=user.is_admin,
         token=token,
     )
@@ -127,6 +137,7 @@ def me(user: User = Depends(get_current_user)) -> MeOut:
     return MeOut(
         user_id=user.id,
         username=user.username,
+        name=user.name,
         email=user.email,
         is_admin=user.is_admin,
     )

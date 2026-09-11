@@ -554,3 +554,206 @@ def test_deep_research_still_gated_off_on_off_vertical():
     dossier = agent.research("jane@acme.com", "acme.com")
     assert deep_calls["n"] == 0
     assert "deep_research" not in dossier.sources_checked
+
+
+# ---------------------------------------------------------------------------
+# Stage 0.7 — homepage-first pre-verdict (Phase 3 demand fix)
+# ---------------------------------------------------------------------------
+
+def _counting_search(results=None):
+    """Fake search fn that COUNTS calls — the whole point of Phase 3 is that
+    a pre-verdict skip issues ZERO search queries."""
+    if results is None:
+        results = [{"url": "https://acme.com/about", "title": "About",
+                    "snippet": "Construction company"}]
+    calls = {"n": 0}
+
+    def _search(query):
+        calls["n"] += 1
+        return results
+
+    return _search, calls
+
+
+def _acme_pages():
+    """Readable homepage pages for acme.com (the default fake only serves
+    example.com — an unreadable homepage makes pre_verdict return None)."""
+    return make_fake_fetch({
+        "https://acme.com": "<html><body>Acme</body></html>",
+        "https://acme.com/about": "<html><body>About Acme</body></html>",
+    })
+
+
+def _agent_with_company(company):
+    """Full agent (kept-lead lanes faked) around a custom company researcher."""
+    person = PersonResearcherAI(
+        deterministic=None,
+        ai_ask=make_fake_ai({
+            "person_name": "Jane Doe", "person_role": "PM",
+            "role_relevance": True, "bound": True,
+            "evidence": [{"claim": "Team page", "source_url": "https://acme.com/team",
+                          "source_type": "website", "confidence": "verified"}],
+        }),
+        search=make_fake_search(), fetch_page=make_fake_fetch(),
+    )
+    intent = IntentTimingAnalyzer(ai_ask=make_fake_ai({
+        "needs_estimation": "yes", "signal": "Active", "reason": "Bids",
+        "evidence": [], "timing_window": "now", "timing_reason": "",
+        "timing_events": [],
+    }))
+    scorer = LeadScorer(ai_ask=make_fake_ai({
+        "fit": "Strong fit", "potential_score": 7.5,
+        "recommendation": "contact_now", "reasoning": "",
+    }))
+    return AILeadResearchAgent(
+        company_researcher=company, person_researcher=person,
+        intent_analyzer=intent, scorer=scorer, domain_delivers_email=_MX_OK,
+    )
+
+
+def test_pre_verdict_no_skips_all_search_queries():
+    """THE Phase 3 guarantee: a grounded homepage-only 'not our client'
+    verdict skips the lead with ZERO search queries (the old path burned
+    the 4 screening searches before the verdict ever ran)."""
+    ai_calls = {"n": 0}
+
+    def fake_ai(_prompt):
+        ai_calls["n"] += 1
+        return json.dumps({
+            "company_name": "Acme Software",
+            "industry": "Software",
+            "is_our_client": "no",
+            "client_reason": "Software company, not a bidding contractor.",
+        })
+
+    search, calls = _counting_search()
+    company = CompanyResearcher(
+        ai_ask=fake_ai, search=search, fetch_page=_acme_pages(),
+        refine_domain=make_fake_refine("acme.com"),
+    )
+    agent = _agent_with_company(company)
+    dossier = agent.research("jane@acme.com", "acme.com")
+
+    assert dossier.recommendation == "skip"
+    assert "company_pre_verdict" in dossier.sources_checked
+    assert "Software company" in dossier.fit
+    assert calls["n"] == 0  # zero search queries — the whole point
+    assert ai_calls["n"] == 1  # one pre-verdict call, no Stage-1 call
+
+
+def test_pre_verdict_unsure_falls_through_to_full_research():
+    """"unsure" is the SAFE answer: the lead gets the full Stage-1 pipeline
+    (searches run, company researched) — the pre-verdict can never cause a
+    wrong skip, only a saved one."""
+    def fake_ai(prompt):
+        # The pre-verdict prompt says "cheap pre-screen"; Stage 1 asks for the
+        # full research JSON. Distinguish by that distinctive phrase.
+        if "cheap pre-screen" in prompt:
+            return json.dumps({
+                "company_name": "Acme Construction",
+                "industry": "General Contractor",
+                "is_our_client": "unsure", "client_reason": "Pages are generic.",
+            })
+        return json.dumps({
+            "company_name": "Acme Construction", "industry": "General Contractor",
+            "location": "Dallas, TX", "website": "https://acme.com",
+            "is_our_client": "yes", "client_reason": "Active GC.",
+            "facts": [{"claim": "Bids on projects", "source_url": "https://acme.com/about",
+                       "source_type": "about_page", "confidence": "verified"}],
+        })
+
+    search, calls = _counting_search()
+    company = CompanyResearcher(
+        ai_ask=fake_ai, search=search, fetch_page=_acme_pages(),
+        refine_domain=make_fake_refine("acme.com"),
+    )
+    agent = _agent_with_company(company)
+    dossier = agent.research("jane@acme.com", "acme.com")
+
+    assert dossier.recommendation != "skip"
+    assert "company_research" in dossier.sources_checked
+    assert calls["n"] > 0  # full research ran
+
+
+def test_pre_verdict_unreadable_homepage_falls_through():
+    """No readable pages → pre_verdict returns None → the old behavior,
+    unchanged (the default fake fetch serves only example.com)."""
+    search, calls = _counting_search()
+    company = CompanyResearcher(
+        ai_ask=make_fake_ai({
+            "company_name": "Acme Construction", "industry": "General Contractor",
+            "location": "Dallas, TX", "website": "https://acme.com",
+            "facts": [{"claim": "General contractor in Dallas", "source_url": "https://acme.com/about",
+                       "source_type": "about_page", "confidence": "verified"}],
+        }),
+        search=search, fetch_page=make_fake_fetch(),  # example.com only
+        refine_domain=make_fake_refine("acme.com"),
+    )
+    agent = _agent_with_company(company)
+    dossier = agent.research("jane@acme.com", "acme.com")
+    assert dossier.company.name == "Acme Construction"
+    assert calls["n"] > 0  # Stage 1 searches ran as before
+
+
+def test_pre_verdict_kill_switch(monkeypatch):
+    """HOMEPAGE_PRE_VERDICT=False restores the pre-Phase-3 flow: no
+    pre-verdict AI call, searches run first."""
+    from app.core import config
+
+    monkeypatch.setattr(config.settings, "HOMEPAGE_PRE_VERDICT", False)
+    ai_calls = {"n": 0}
+
+    def fake_ai(_prompt):
+        ai_calls["n"] += 1
+        return json.dumps({
+            "company_name": "Acme Software", "industry": "Software",
+            "is_our_client": "no", "client_reason": "Software.",
+            "facts": [],
+        })
+
+    search, calls = _counting_search()
+    company = CompanyResearcher(
+        ai_ask=fake_ai, search=search, fetch_page=_acme_pages(),
+        refine_domain=make_fake_refine("acme.com"),
+    )
+    agent = _agent_with_company(company)
+    dossier = agent.research("jane@acme.com", "acme.com")
+    # Old behavior: searches ran, Stage 1c made the skip decision.
+    assert calls["n"] > 0
+    assert dossier.recommendation == "skip"
+    assert "company_research" in dossier.sources_checked
+    assert "company_pre_verdict" not in dossier.sources_checked
+
+
+def test_learned_domain_skips_before_any_network():
+    """A domain the USER rejected is skipped before even the homepage fetch —
+    the Stage-1c domain check moved earlier (one human rejection is decisive,
+    no trial count, per fit_learning.should_skip)."""
+    import os
+    import tempfile
+
+    from app.lead_research.fit_learning import FitLearningStore
+
+    with tempfile.TemporaryDirectory() as td:
+        fit_db = os.path.join(td, "fit.db")
+        store = FitLearningStore(fit_db)
+        store.reject_domain("acme.com")  # one user "not our client" verdict
+
+        fetch_calls = {"n": 0}
+        pages = _acme_pages()
+
+        def counting_fetch(url):
+            fetch_calls["n"] += 1
+            return pages(url)
+
+        company = CompanyResearcher(
+            ai_ask=make_fake_ai({}), search=make_fake_search(),
+            fetch_page=counting_fetch,
+            refine_domain=make_fake_refine("acme.com"),
+        )
+        agent = _agent_with_company(company)
+        agent.enable_fit_learning(fit_db)
+        dossier = agent.research("jane@acme.com", "acme.com")
+
+        assert dossier.recommendation == "skip"
+        assert fetch_calls["n"] == 0  # not even the homepage was fetched

@@ -106,6 +106,78 @@ If the company cannot be identified at all, set company_name to "" and explain i
 """
 
 
+def company_pre_verdict_prompt(
+    email: str,
+    refined_domain: str,
+    site_content: str,
+    *,
+    trade: str = "",
+    location: str = "",
+) -> str:
+    """Stage 0.7 — homepage-only client-fit PRE-VERDICT (Phase 3 demand fix).
+
+    61% of researched leads were proven non-clients only AFTER the 4 screening
+    searches ran — the verdict needs the industry, the industry came from the
+    Stage-1 AI call, and that call ran on the search results. The homepage
+    (fetched anyway, directly — zero search-engine load) carries the industry
+    signal on its own: a magazine/telecom/software homepage says so loudly.
+
+    This prompt asks ONLY the verdict question on homepage evidence. It runs
+    BEFORE the searches; a grounded "no" skips them entirely. "unsure" is the
+    DEFAULT for thin evidence — it falls through to full research, so the
+    pre-verdict can never cause a wrong skip, only a saved one.
+    """
+    if trade or location:
+        context = (
+            "DISCOVERY CONTEXT (treat as a strong prior):\n"
+            f"- This email was found on a construction plan/bid-holder list"
+            f"{f' for the trade {trade!r}' if trade else ''}"
+            f"{f' in {location!r}' if location else ''}.\n"
+        )
+    else:
+        context = ""
+    return f"""\
+You are a screening analyst for a construction preconstruction services company.
+
+WHO WE ARE (our ideal client + who is NOT our client):
+{get_profile().prompt_context()}
+
+TASK: Look ONLY at the company's own website pages below and answer ONE
+question: is this company an active building-trades bidder that could buy
+estimation services (a general contractor, subcontractor, or developer that
+bids on building projects)? This is a cheap pre-screen — the full research
+runs afterwards for plausible clients, so when in doubt answer "unsure".
+
+INPUT:
+- Email: {email}
+- Domain: {refined_domain}
+{context}- Website pages (truncated):
+{site_content}
+
+RULES:
+1. Judge from the website pages ONLY. Do NOT guess beyond what they show.
+2. Set "is_our_client" to "no" ONLY when the pages clearly show the company is
+   NOT a buyer — e.g. a magazine/publisher, a software/IT/technology company,
+   an A/E/C consultant or engineering/architecture/design firm, a trade
+   association / builders' exchange / plan service, a materials-only supplier,
+   or a fiber/telecom/utility/road/pipeline/transit contractor.
+3. "unsure" whenever the pages are thin, generic, or mixed — that is the SAFE
+   answer: unsure leads get the full research, so a real contractor is never
+   lost here. Answer "no" only when you are confident.
+4. "industry" MUST be the company's TRUE business, never stretched to fit
+   construction.
+5. "client_reason" MUST be one honest sentence grounded in the pages.
+6. Return ONLY valid JSON — no markdown, no commentary:
+
+{{
+  "company_name": "string — official company name (from the pages)",
+  "industry": "string — the company's TRUE business",
+  "is_our_client": "yes | no | unsure",
+  "client_reason": "string — one honest sentence: why they are (or are not) our client"
+}}
+"""
+
+
 def deep_research_prompt(
     domain: str,
     company_name: str,

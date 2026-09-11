@@ -609,3 +609,128 @@ def test_source_note_roundtrip_from_ai():
     profile = researcher.research("john@acme.com", "acme.com")
     assert profile.facts[0].source_note == "Contact page"
     assert profile.facts[0].confidence == "verified"
+
+
+# ---------------------------------------------------------------------------
+# pre_verdict — Stage 0.7 homepage-only client-fit screen (Phase 3)
+# ---------------------------------------------------------------------------
+
+def _acme_site_pages():
+    """Readable acme.com pages (the default fake serves example.com only)."""
+    return make_fake_fetch({
+        "https://acme.com": "<html><body>Acme Software</body></html>",
+        "https://acme.com/about": "<html><body>We build SaaS tools</body></html>",
+    })
+
+
+def test_pre_verdict_parses_no_verdict():
+    """A grounded 'no' comes back with the site_content the caller reuses."""
+    researcher = CompanyResearcher(
+        ai_ask=make_fake_ai({
+            "company_name": "Acme Software",
+            "industry": "Software",
+            "is_our_client": "no",
+            "client_reason": "SaaS vendor, not a bidder.",
+        }),
+        search=make_fake_search(),
+        fetch_page=_acme_site_pages(),
+        refine_domain=make_fake_refine("acme.com"),
+    )
+    pre = researcher.pre_verdict("jane@acme.com", "acme.com")
+    assert pre is not None
+    assert pre["verdict"] == "no"
+    assert pre["name"] == "Acme Software"
+    assert pre["industry"] == "Software"
+    assert "SaaS vendor" in pre["reason"]
+    assert "Acme Software" in pre["site_content"]  # caller reuses this crawl
+
+
+def test_pre_verdict_unreadable_homepage_returns_none():
+    """No readable pages -> None (the SAFE answer: fall through to research)."""
+    researcher = CompanyResearcher(
+        ai_ask=make_fake_ai({
+            "company_name": "X", "industry": "Y",
+            "is_our_client": "no", "client_reason": "never reached",
+        }),
+        search=make_fake_search(),
+        fetch_page=make_fake_fetch(),  # example.com only — acme.com unreadable
+        refine_domain=make_fake_refine("acme.com"),
+    )
+    assert researcher.pre_verdict("jane@acme.com", "acme.com") is None
+
+
+def test_pre_verdict_ai_failure_returns_none():
+    """A raising AI seam must produce None, never an exception out of Stage 0.7."""
+    def boom(_prompt):
+        raise RuntimeError("router down")
+
+    researcher = CompanyResearcher(
+        ai_ask=boom,
+        search=make_fake_search(),
+        fetch_page=_acme_site_pages(),
+        refine_domain=make_fake_refine("acme.com"),
+    )
+    assert researcher.pre_verdict("jane@acme.com", "acme.com") is None
+
+
+def test_pre_verdict_garbage_reply_returns_none():
+    """An unparseable AI reply is a None fall-through, not a crash."""
+    researcher = CompanyResearcher(
+        ai_ask=lambda _p: "not json at all",
+        search=make_fake_search(),
+        fetch_page=_acme_site_pages(),
+        refine_domain=make_fake_refine("acme.com"),
+    )
+    assert researcher.pre_verdict("jane@acme.com", "acme.com") is None
+
+
+def test_pre_verdict_normalizes_junk_verdict_to_unsure():
+    """An out-of-vocabulary verdict string can never become a silent skip —
+    junk degrades to 'unsure' (the default-keep answer)."""
+    researcher = CompanyResearcher(
+        ai_ask=make_fake_ai({
+            "company_name": "Acme Software", "industry": "Software",
+            "is_our_client": "probably", "client_reason": "hmm",
+        }),
+        search=make_fake_search(),
+        fetch_page=_acme_site_pages(),
+        refine_domain=make_fake_refine("acme.com"),
+    )
+    pre = researcher.pre_verdict("jane@acme.com", "acme.com")
+    assert pre is not None
+    assert pre["verdict"] == "unsure"
+
+
+def test_research_reuses_prefetched_site_content():
+    """Stage 1 must NOT re-crawl when the pre-verdict's site_content is
+    handed over — the kept-lead cost is one extra AI call, never a
+    duplicate crawl."""
+    fetch_calls = {"n": 0}
+    pages = _acme_site_pages()
+
+    def counting_fetch(url):
+        fetch_calls["n"] += 1
+        return pages(url)
+
+    researcher = CompanyResearcher(
+        ai_ask=make_fake_ai({
+            "company_name": "Acme Software", "industry": "Software",
+            "location": "Austin, TX", "website": "https://acme.com",
+            "is_our_client": "yes", "client_reason": "Active bidder.",
+            "facts": [{"claim": "Bids on projects", "source_url": "https://acme.com/about",
+                       "source_type": "about_page", "confidence": "verified"}],
+        }),
+        search=make_fake_search(),
+        fetch_page=counting_fetch,
+        refine_domain=make_fake_refine("acme.com"),
+    )
+    pre = researcher.pre_verdict("jane@acme.com", "acme.com")
+    assert pre is not None
+    assert pre["verdict"] == "yes"  # same fake AI JSON serves both calls
+    n_after_pre = fetch_calls["n"]
+
+    profile = researcher.research(
+        "jane@acme.com", "acme.com", site_content=pre["site_content"],
+    )
+    assert profile.name == "Acme Software"
+    assert fetch_calls["n"] == n_after_pre  # no second crawl in Stage 1

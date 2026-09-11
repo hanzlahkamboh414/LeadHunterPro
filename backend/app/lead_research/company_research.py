@@ -402,12 +402,17 @@ class CompanyResearcher:
     def research(
         self, email: str, domain: str, *, trade: str = "", location: str = "",
         query_planner: Any | None = None,
+        site_content: str | None = None,
     ) -> CompanyProfile:
         """Research the company behind ``email``/``domain``.
 
         ``trade``/``location`` (optional) carry the known construction context
         from the discovery layer, so the AI verifies the company as a
         construction-bid contractor rather than drifting to generic results.
+
+        ``site_content`` (optional) is a PRE-FETCHED page crawl (from
+        :meth:`pre_verdict`) — supplied, the crawl is not repeated; the kept
+        lead pays one extra AI call for the pre-verdict, never a second crawl.
 
         Returns a :class:`CompanyProfile` with cited facts. On any failure,
         returns a partial profile with ``source_errors`` in the dict (accessible
@@ -422,8 +427,8 @@ class CompanyResearcher:
             search_fn, email, refined_domain, query_planner=query_planner
         )
 
-        fetch_fn = self._get_fetch_page()
-        site_content = self._gather_site(fetch_fn, refined_domain)
+        if site_content is None:
+            site_content = self._gather_site(self._get_fetch_page(), refined_domain)
 
         # LinkedIn company activity lane (additive, config-gated): the public
         # LinkedIn company page surfaced in search results is extracted +
@@ -524,9 +529,69 @@ class CompanyResearcher:
             client_reason=str(data.get("client_reason", "")).strip(),
         )
 
+    def pre_verdict(
+        self, email: str, domain: str, *, trade: str = "", location: str = "",
+    ) -> dict[str, Any] | None:
+        """Stage 0.7 — homepage-only client-fit pre-verdict (Phase 3).
+
+        Fetches the company's own pages (direct HTTP, ZERO search-engine
+        load) and asks the AI only the verdict question on that evidence.
+        Returns ``{"refined_domain", "site_content", "name", "industry",
+        "verdict" ("yes"/"no"/"unsure"), "reason"}`` — or ``None`` when the
+        pre-verdict cannot run (homepage unreadable / AI failed / unparseable
+        reply), in which case the caller falls through to full research.
+        ``None`` is the safe answer, never a skip (CLAUDE.md §6).
+
+        ``site_content`` is returned so a KEPT lead reuses the fetch in
+        Stage 1 instead of re-crawling — the kept-lead cost is one extra AI
+        call, never a duplicate crawl.
+        """
+        from app.lead_research.prompts import company_pre_verdict_prompt
+
+        refine = self._get_refine_domain()
+        refined_domain = refine(domain)
+        site_content = self._gather_site(self._get_fetch_page(), refined_domain)
+        # _gather_site reports an unreadable site as the placeholder string
+        # "(website not reachable)" — truthy, so an empty-check alone would
+        # run the verdict on a placeholder and burn an AI call for nothing.
+        # Same idiom as research()'s reachability gate below.
+        if not site_content or "(website not reachable)" in site_content:
+            return None  # no readable pages — the full research decides
+
+        prompt = company_pre_verdict_prompt(
+            email=email,
+            refined_domain=refined_domain,
+            site_content=site_content,
+            trade=trade,
+            location=location,
+        )
+        try:
+            raw = self._get_ai_ask()(prompt)
+        except Exception as exc:
+            logger.info("pre-verdict: AI call failed for %s: %s", email, exc)
+            return None
+        data = _parse_ai_json(raw)
+        if not data:
+            return None
+        raw_verdict = str(data.get("is_our_client", "")).strip().lower()
+        verdict = (
+            raw_verdict
+            if raw_verdict in ("yes", "no", "unsure")
+            else ("" if not raw_verdict else "unsure")
+        )
+        return {
+            "refined_domain": refined_domain,
+            "site_content": site_content,
+            "name": str(data.get("company_name", "")).strip(),
+            "industry": str(data.get("industry", "")).strip(),
+            "verdict": verdict,
+            "reason": str(data.get("client_reason", "")).strip(),
+        }
+
     def research_with_domain(
         self, email: str, domain: str, *, trade: str = "", location: str = "",
         query_planner: Any | None = None,
+        site_content: str | None = None,
     ) -> dict[str, Any]:
         """Like ``research()`` but returns a dict including the refined domain."""
         refine = self._get_refine_domain()
@@ -534,7 +599,7 @@ class CompanyResearcher:
 
         profile = self.research(
             email, refined_domain, trade=trade, location=location,
-            query_planner=query_planner,
+            query_planner=query_planner, site_content=site_content,
         )
 
         result = profile.to_dict()

@@ -141,6 +141,15 @@ class Settings(BaseSettings):
     # cache can never risk a dossier).
     SEARCH_CACHE_DB: str = ""
 
+    # Homepage-first client-fit pre-verdict (Phase 3 demand fix). 61% of
+    # leads burned the 4 screening search queries BEFORE the fit verdict
+    # said "not our client". The pre-verdict crawls the company's own site
+    # (direct HTTP — zero search-engine load) and skips the searches only
+    # on a GROUNDED AI "no"; "unsure" always falls through to full
+    # research, so this can never cause a wrong skip. Kill-switch if the
+    # verdict quality ever regresses.
+    HOMEPAGE_PRE_VERDICT: bool = True
+
     # Optional lightweight auth for the Leads API (M12 baseline). When set,
     # requests must carry `X-API-Key: <key>`. When empty, the Leads API is
     # open (localhost/dev). Full user auth is a later phase.

@@ -3,6 +3,7 @@
 Ties all stages into one pipeline:
 
   Stage 0  triage          → skip free-mail / placeholder domain
+  Stage 0.7 pre-verdict    → homepage-only client-fit screen (Phase 3)
   Stage 1  refine/company  → CompanyResearcher (AI cited)
   Stage 2  person          → PersonResearcherAI (skipped for generic emails)
   Stage 3  intent/timing   → IntentTimingAnalyzer (AI reasoned)
@@ -17,6 +18,7 @@ import logging
 from typing import Any, Callable
 
 from app.company_profile import get_profile
+from app.core.config import settings
 from app.lead_research.company_research import CompanyResearcher
 from app.lead_research.fit_learning import FitLearningStore
 from app.lead_research.intent_timing import IntentTimingAnalyzer
@@ -288,11 +290,99 @@ class AILeadResearchAgent:
             logger.info("Triage: %s has dead/expired domain %s → skip", email, domain)
             return dossier
 
+        # Stage 0.7: homepage-first client-fit pre-verdict (Phase 3 demand
+        # fix). The measured leak: 61% of leads burned the 4 screening
+        # search queries before the verdict said "not our client" — the
+        # verdict needs the industry, the industry came from the Stage-1 AI
+        # call, and that call needed the searches. The company's OWN site
+        # (fetched directly, ZERO search-engine load) carries the industry
+        # signal by itself: a magazine / telecom / software homepage says so
+        # loudly. Skip the searches ONLY on a GROUNDED AI "no" (the same
+        # signal Stage 1c trusts) or the deterministic off-vertical backstop
+        # on the pre-verdict industry; "unsure" or an unreadable homepage
+        # falls through to full research — default-keep, never a silent
+        # skip (CLAUDE.md §6). Kept leads reuse the pre-fetched crawl, so
+        # their only extra cost is the (cheap, flash-lane) pre-verdict call.
+        pre = None
+        if settings.HOMEPAGE_PRE_VERDICT:
+            # Learned-domain shortcut first: a domain the fit loop has proven
+            # (by its own repeated verdicts) never produces a lead needs no
+            # pre-verdict either — the same check Stage 1c runs on the refined
+            # domain, moved before ANY network work.
+            if self._fit_learning is not None and self._fit_learning.should_skip_domain(domain):
+                dossier.fit = (
+                    f"Not our client — {domain}. This domain has never produced "
+                    f"a lead across repeated research; auto-skipped."
+                )
+                dossier.recommendation = "skip"
+                self._record_fit(dossier, source_url, kept=False)
+                dossier.sources_checked = sources_checked
+                dossier.source_errors = source_errors
+                logger.info("Pre-Stage skip: %s domain proven non-buyer → skip", email)
+                return dossier
+            try:
+                pre = self._company.pre_verdict(
+                    email, domain, trade=trade, location=location,
+                )
+            except Exception as exc:  # noqa: BLE001 — pre-verdict is best-effort
+                logger.info("pre-verdict failed for %s: %s", email, exc)
+                pre = None
+        if pre is not None:
+            dossier.refined_domain = pre["refined_domain"]
+            dossier.refined_company = pre["name"]
+            prof = get_profile()
+            det_reason = (
+                pre["industry"]
+                and (prof.is_off_vertical(pre["industry"])
+                     or prof.is_non_client(pre["industry"]))
+            )
+            learned = (
+                self._fit_learning is not None
+                and self._fit_learning.should_skip_industry(pre["industry"])
+            )
+            if pre["verdict"] == "no" or det_reason or learned:
+                from app.lead_research.models import CompanyProfile
+                dossier.company = CompanyProfile(
+                    name=pre["name"], industry=pre["industry"],
+                    website=f"https://{pre['refined_domain']}",
+                    is_our_client=pre["verdict"],
+                    client_reason=pre["reason"],
+                )
+                ind = pre["industry"] or "(unknown industry)"
+                if pre["verdict"] == "no" and pre["reason"]:
+                    dossier.fit = f"Not our client — {pre['reason']}"
+                elif learned:
+                    dossier.fit = (
+                        f"Not our client — {pre['name'] or pre['refined_domain']} "
+                        f"({ind}). This class has never produced a lead across "
+                        f"repeated research; auto-skipped."
+                    )
+                else:
+                    dossier.fit = (
+                        f"Not our client — {pre['name'] or pre['refined_domain']} "
+                        f"({ind}). Estimating services are not for them."
+                    )
+                dossier.recommendation = "skip"
+                sources_checked.append("company_pre_verdict")
+                # Reinforce the loop with this proven non-buyer, then finalize.
+                self._record_fit(dossier, source_url, kept=False)
+                dossier.sources_checked = sources_checked
+                dossier.source_errors = source_errors
+                logger.info(
+                    "Pre-verdict skip: %s industry=%r verdict=%r → skip "
+                    "(0 search queries spent)",
+                    email, ind, pre["verdict"],
+                )
+                return dossier
+
         # Stage 1: company research
         try:
             company_result = self._company.research_with_domain(
                 email, domain, trade=trade, location=location,
                 query_planner=planner,
+                # Reuse the pre-verdict's page crawl — a kept lead pays one
+                # extra AI call for the pre-verdict, never a second crawl.
+                site_content=(pre or {}).get("site_content"),
             )
             dossier.refined_domain = company_result.get("refined_domain", domain)
             dossier.refined_company = company_result.get("name", "")

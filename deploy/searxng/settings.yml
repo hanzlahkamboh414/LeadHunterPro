@@ -16,6 +16,15 @@ search:
     - html
     - json
 
+# Cap the per-engine fan-out window. Engines that time out from this
+# datacenter IP (mwmbl, duckduckgo variants — measured) otherwise eat the
+# full default window, pushing every query's response to ~6s, which races
+# the backend's request cap and trips the circuit breaker. With a 3s cap
+# the slow engines fail fast and the responsive ones (bing, qwant, yandex,
+# google) carry the query; responses land well inside the 10s provider cap.
+outgoing:
+  request_timeout: 3.0
+
 engines:
   # General-web engines — the docker default enables only brave/duckduckgo/
   # google-cse for general web, and all three suspend under a datacenter IP

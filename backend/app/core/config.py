@@ -111,11 +111,12 @@ class Settings(BaseSettings):
 
     # Search Provider Configuration
     SEARXNG_URL: str = ""
-    # Seconds SearXNG gets before the orchestrator treats it as hung. SearXNG
-    # aggregates many engines (often including DuckDuckGo, which is dead/slow),
-    # so a misbehaving instance can stall a query for 20s+. A short cap plus the
-    # manager's circuit-breaker (mark-down + TTL) keeps the pipeline moving.
-    SEARXNG_TIMEOUT: int = 6
+    # Per-request aiohttp cap for SearXNG. The instance itself caps its
+    # engine fan-out at ~3s (deploy/searxng/settings.yml outgoing.request_timeout),
+    # so 10s is 7s of headroom: a slow-but-healthy instance completes instead
+    # of racing the cap — a single request timeout trips the circuit breaker
+    # and opens a 5-minute Tavily blackout (measured under 2-user load).
+    SEARXNG_TIMEOUT: int = 10
     BRAVE_SEARCH_API_KEY: str = Field(default="", repr=False)  # secret
     TAVILY_SEARCH_API_KEY: str = Field(default="", repr=False)  # secret
 

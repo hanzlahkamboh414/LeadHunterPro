@@ -91,15 +91,16 @@ def _auto_register_providers() -> None:
     registry = get_registry()
 
     # SearXNG — register if SEARXNG_URL is configured. The timeout comes from
-    # SEARXNG_TIMEOUT (default 6s): SearXNG aggregates many engines (DuckDuckGo
-    # included, which is routinely slow/blocked), so without a short cap a hung
-    # instance stalls every query and the run creeps.
+    # SEARXNG_TIMEOUT (default 10s): it must sit comfortably ABOVE the
+    # instance's internal engine cap (~3s, deploy/searxng/settings.yml) so a
+    # slow-but-healthy instance completes instead of racing the cap — each
+    # request timeout trips the circuit breaker (5-min Tavily blackout).
     searxng_url = getattr(settings, "SEARXNG_URL", "")
     if searxng_url:
         searchng_timeout = getattr(settings, "SEARXNG_TIMEOUT", None)
         provider = SearXNGProvider(
             base_url=searxng_url,
-            timeout=searchng_timeout if searchng_timeout is not None else 6,
+            timeout=searchng_timeout if searchng_timeout is not None else 10,
         )
         registry.register(provider)
         logger.info("Auto-registered SearXNG provider: %s", searxng_url)

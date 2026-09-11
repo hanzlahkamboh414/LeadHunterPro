@@ -51,13 +51,15 @@ class TestSearXNGProvider:
         assert provider.priority == 10
 
     def test_timeout_defaults_to_fast_cap(self):
-        """The per-query aiohttp cap stays short (6s) — a hung instance
-        stalls a query at most once — while timeout_s (the manager's hard
+        """The per-query aiohttp cap (10s) sits comfortably ABOVE the
+        instance's internal engine cap (~3s via deploy/searxng/settings.yml
+        outgoing.request_timeout) — a slow-but-healthy instance completes
+        instead of racing the cap — while timeout_s (the manager's hard
         gate) additionally carries a fixed budget for the rate-limiter
         queue wait so a queued query is not cancelled-and-blacklisted."""
         p = SearXNGProvider(base_url="https://searxng.example.com")
-        assert p._timeout == 6
-        assert p.timeout_s == 6.0 + 30.0
+        assert p._timeout == 10
+        assert p.timeout_s == 10.0 + 30.0
         p2 = SearXNGProvider(base_url="https://searxng.example.com", timeout=3)
         assert p2.timeout_s == 3.0 + 30.0
 

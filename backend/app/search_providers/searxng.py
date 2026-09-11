@@ -5,7 +5,7 @@ results from multiple sources without requiring an API key.
 
 Configuration via environment:
     SEARXNG_URL=https://searxng.example.com   # Required: your SearXNG instance
-    SEARXNG_TIMEOUT=6                          # Optional: request timeout (default 6s)
+    SEARXNG_TIMEOUT=10                         # Optional: request timeout (default 10s)
     SEARXNG_MAX_RESULTS=20                     # Optional: max results per query
 """
 
@@ -53,7 +53,7 @@ class SearXNGProvider(BaseSearchProvider, LoopSessionMixin):
         self,
         base_url: str,
         *,
-        timeout: int = 6,
+        timeout: int = 10,
         max_results: int = 20,
         safe_search: bool = True,
     ) -> None:
@@ -61,8 +61,9 @@ class SearXNGProvider(BaseSearchProvider, LoopSessionMixin):
 
         Args:
             base_url: Full URL to the SearXNG instance (e.g. 'https://searx.org').
-            timeout: Request timeout in seconds (SEARXNG_TIMEOUT; a per-query
-                hard cap so a slow instance cannot stall a whole run).
+            timeout: Request timeout in seconds (SEARXNG_TIMEOUT; must sit
+                ABOVE the instance's internal engine cap (~3s) so slow-but-
+                healthy responses complete instead of racing the cap).
             max_results: Maximum number of results to request.
             safe_search: Whether to enable safe search filtering.
         """

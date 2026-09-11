@@ -165,6 +165,28 @@ class LeadResearchStore:
                 reason TEXT NOT NULL DEFAULT 'manual'
             )
         """)
+        # Cross-user lead sharing (Phase 2 demand fix). The dossiers.user_id
+        # column keeps the FIRST owner (the run that researched the lead);
+        # this junction records EVERY user whose own search surfaced the
+        # lead. Why it matters under multi-user load: a cache hit in user
+        # B's run must not burn a re-research (credit saver, already true)
+        # AND must still show the lead on B's dashboard — the old single
+        # column could only name one user, so B's run consumed the shared
+        # dossier invisibly. The PK also backs the per-user visibility
+        # EXISTS lookups (email_hash-first, the same key shape as dossiers).
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS dossier_owners (
+                email_hash TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                PRIMARY KEY (email_hash, user_id)
+            )
+        """)
+        # Backfill: every existing single-owner row stays visible to its
+        # owner through the junction too (idempotent — INSERT OR IGNORE).
+        conn.execute("""
+            INSERT OR IGNORE INTO dossier_owners (email_hash, user_id)
+            SELECT email_hash, user_id FROM dossiers WHERE user_id <> ''
+        """)
         self._backfill_filter_columns(conn)
         conn.commit()
         conn.close()
@@ -234,8 +256,41 @@ class LeadResearchStore:
                 updated_at = CURRENT_TIMESTAMP
         """, (eh, dossier.email, dossier.domain, json.dumps(dossier.to_dict()),
               rec, score, bound, user_id))
+        # Sharing (Phase 2): the researcher's own search surfaced this lead —
+        # record the owner even when the upsert lands on another user's row
+        # (two jobs racing the same email; the column keeps the FIRST owner,
+        # the junction keeps BOTH visible). OR IGNORE: re-research of an
+        # already-owned lead is a no-op.
+        if user_id:
+            conn.execute(
+                "INSERT OR IGNORE INTO dossier_owners (email_hash, user_id) "
+                "VALUES (?, ?)",
+                (eh, user_id),
+            )
         conn.commit()
         conn.close()
+
+    def add_owner(self, email: str, user_id: str) -> bool:
+        """Record that ``user_id``'s own search surfaced an EXISTING dossier.
+
+        The cache-hit path of the pipeline: user B's run found the lead
+        already researched (by A), reuses the dossier (no re-research), and
+        B must still see the lead on their dashboard. INSERT ... SELECT
+        guards existence — an unknown email is an honest False, never a
+        dangling owner row. Returns True when a NEW owner row was created.
+        """
+        if not user_id:
+            return False
+        eh = _email_hash(email)
+        conn = self._conn()
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO dossier_owners (email_hash, user_id) "
+            "SELECT email_hash, ? FROM dossiers WHERE email_hash = ?",
+            (user_id, eh),
+        )
+        conn.commit()
+        conn.close()
+        return cur.rowcount > 0
 
     def get(self, email: str) -> LeadDossier | None:
         """Retrieve a dossier by email."""
@@ -249,11 +304,30 @@ class LeadResearchStore:
             return None
         return LeadDossier.from_dict(json.loads(row[0]))
 
+    @staticmethod
+    def _shared_visible(alias: str = "d") -> str:
+        """The cross-user sharing EXISTS clause (Phase 2).
+
+        A user sees a dossier when THEIR OWN search surfaced it — recorded
+        in :data:`dossier_owners` — even when the ``user_id`` column names
+        the first researcher. Two users searching overlapping markets share
+        the research (the cache hit burns no credits) and each still gets
+        the lead on their own dashboard. ``alias`` must name the dossiers
+        table in the caller's FROM clause (the outer column must be
+        qualified — a bare ``email_hash`` inside the subquery would resolve
+        to the OWNERS row and match itself).
+        """
+        return (
+            f"EXISTS (SELECT 1 FROM dossier_owners o "
+            f"WHERE o.email_hash = {alias}.email_hash AND o.user_id = ?)"
+        )
+
     def list_all(self, user_id: str = "", is_admin: bool = False,
                  include_legacy: bool = False) -> list[LeadDossier]:
         """List all stored dossiers.
 
-        Per-user isolation: a non-admin only lists their OWN dossiers;
+        Per-user isolation: a non-admin only lists their OWN dossiers
+        (their user_id OR a dossier_owners row — see :meth:`_shared_visible`);
         ``include_legacy`` adds the pre-auth (``user_id=''``) rows — the admin's
         own-dashboard scope.
         """
@@ -261,10 +335,14 @@ class LeadResearchStore:
         args: list[Any] = []
         conds = ""
         if user_id and not is_admin:
-            conds = "WHERE (user_id = ? OR user_id = '')" if include_legacy else "WHERE user_id = ?"
-            args = [user_id]
+            shared = self._shared_visible()
+            if include_legacy:
+                conds = f"WHERE (d.user_id = ? OR d.user_id = '' OR {shared})"
+            else:
+                conds = f"WHERE (d.user_id = ? OR {shared})"
+            args = [user_id, user_id]
         rows = conn.execute(
-            f"SELECT dossier_json FROM dossiers {conds} ORDER BY updated_at DESC",
+            f"SELECT d.dossier_json FROM dossiers d {conds} ORDER BY d.updated_at DESC",
             args,
         ).fetchall()
         conn.close()
@@ -402,10 +480,14 @@ class LeadResearchStore:
         args: list[Any] = []
         conds = ""
         if user_id and not is_admin:
-            conds = "WHERE (user_id = ? OR user_id = '')" if include_legacy else "WHERE user_id = ?"
-            args = [user_id]
+            shared = self._shared_visible()
+            if include_legacy:
+                conds = f"WHERE (d.user_id = ? OR d.user_id = '' OR {shared})"
+            else:
+                conds = f"WHERE (d.user_id = ? OR {shared})"
+            args = [user_id, user_id]
         rows = conn.execute(
-            f"SELECT email_hash, folder, tags FROM dossiers {conds}",
+            f"SELECT d.email_hash, d.folder, d.tags FROM dossiers d {conds}",
             args,
         ).fetchall()
         conn.close()
@@ -483,6 +565,22 @@ class LeadResearchStore:
             f"WHERE user_id <> ? AND email_hash IN ({placeholders})",
             params,
         )
+        # Keep the sharing junction in step with the admin's control: assign
+        # makes the target user a durable owner (visible even if the column
+        # later moves again); unassign ('') is "back to admin-only" — every
+        # owner row goes too, or the leads would stay on user dashboards.
+        if user_id:
+            conn.execute(
+                f"INSERT OR IGNORE INTO dossier_owners (email_hash, user_id) "
+                f"SELECT email_hash, ? FROM dossiers "
+                f"WHERE email_hash IN ({placeholders})",
+                [user_id] + params[2:],
+            )
+        else:
+            conn.execute(
+                f"DELETE FROM dossier_owners WHERE email_hash IN ({placeholders})",
+                params[2:],
+            )
         conn.commit()
         conn.close()
         return cur.rowcount
@@ -556,24 +654,29 @@ class LeadResearchStore:
         fields via ``json_extract`` (substring, case-insensitive LIKE, literal-safe
         escapes so a query with %/_/\\ is a literal search, never a wildcard).
 
-        Per-user isolation: non-admin users ONLY see dossiers where user_id matches
-        exactly (a new user's dashboard is fresh). With ``include_legacy`` the
-        caller ALSO sees the legacy pre-auth rows (``user_id=''``) — the admin's
-        OWN dashboard uses this: own + legacy data, never other users' searches
-        (those live in the admin panel instead). The unfiltered whole-store view
-        is the admin panel's job, not a user view.
+        Per-user isolation: non-admin users see dossiers they own — the
+        ``user_id`` column (first researcher) OR a :data:`dossier_owners` row
+        (their own search surfaced it — cross-user sharing, Phase 2). With
+        ``include_legacy`` the caller ALSO sees the legacy pre-auth rows
+        (``user_id=''``) — the admin's OWN dashboard uses this: own + legacy
+        data, never other users' searches (those live in the admin panel
+        instead). The unfiltered whole-store view is the admin panel's job,
+        not a user view.
         """
         conds = ["d.hidden = 0"]
-        # Per-user data isolation
+        # Per-user data isolation (+ cross-user sharing)
         if user_id and not is_admin:
+            shared = self._shared_visible()
             if include_legacy:
                 # Own + legacy pre-auth rows — the admin's own-dashboard scope.
-                conds.append("(d.user_id = ? OR d.user_id = '')")
+                conds.append(f"(d.user_id = ? OR d.user_id = '' OR {shared})")
             else:
-                # EXACT match only — legacy (user_id='') dossiers belong to the
-                # admin alone; a new user's dashboard stays fresh.
-                conds.append("d.user_id = ?")
-            args: list[Any] = [user_id]
+                # Own only — legacy (user_id='') dossiers belong to the admin
+                # alone; a new user's dashboard stays fresh. A dossier_owners
+                # row means the user's OWN search surfaced this lead (shared
+                # research, not mixing — it is exactly what they searched).
+                conds.append(f"(d.user_id = ? OR {shared})")
+            args: list[Any] = [user_id, user_id]
         else:
             args = []
         if recommendation is None:
@@ -695,8 +798,9 @@ class LeadResearchStore:
         args: list[Any] = []
         conds = "WHERE hidden = 0 AND date(created_at) IS NOT NULL"
         if user_id and not is_admin:
-            conds += " AND (d.user_id = ? OR d.user_id = '')" if include_legacy else " AND d.user_id = ?"
-            args = [user_id]
+            shared = self._shared_visible()
+            conds += f" AND (d.user_id = ? OR d.user_id = '' OR {shared})" if include_legacy else f" AND (d.user_id = ? OR {shared})"
+            args = [user_id, user_id]
         rows = conn.execute(
             "SELECT DISTINCT date(created_at) AS d FROM dossiers d "
             f"{conds} ORDER BY d DESC",
@@ -717,8 +821,9 @@ class LeadResearchStore:
         args: list[Any] = []
         conds = "d.hidden = 0 AND d.recommendation NOT IN ('skip', '')"
         if user_id and not is_admin:
-            conds += " AND (d.user_id = ? OR d.user_id = '')" if include_legacy else " AND d.user_id = ?"
-            args = [user_id]
+            shared = self._shared_visible()
+            conds += f" AND (d.user_id = ? OR d.user_id = '' OR {shared})" if include_legacy else f" AND (d.user_id = ? OR {shared})"
+            args = [user_id, user_id]
         rows = conn.execute(
             "SELECT jt.value AS tag, COUNT(*) AS cnt "
             "FROM dossiers d, json_each(d.tags) AS jt "
@@ -816,10 +921,11 @@ class LeadResearchStore:
         args: list[Any] = []
         conds = "WHERE hidden = 0 AND recommendation NOT IN ('skip', '')"
         if user_id and not is_admin:
-            conds += " AND (user_id = ? OR user_id = '')" if include_legacy else " AND user_id = ?"
-            args = [user_id]
+            shared = self._shared_visible()
+            conds += f" AND (d.user_id = ? OR d.user_id = '' OR {shared})" if include_legacy else f" AND (d.user_id = ? OR {shared})"
+            args = [user_id, user_id]
         count_rows = conn.execute(
-            f"SELECT folder, COUNT(*) FROM dossiers {conds} GROUP BY folder",
+            f"SELECT folder, COUNT(*) FROM dossiers d {conds} GROUP BY folder",
             args,
         ).fetchall()
         conn.commit()  # backfill may have inserted rows

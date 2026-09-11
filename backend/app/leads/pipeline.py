@@ -1063,6 +1063,11 @@ def run_research(
             existing = store.get(email)
             if existing is not None:
                 with write_lock:
+                    # Cross-user sharing (Phase 2): another user's dossier,
+                    # reused without re-research — stamp THIS user as an owner
+                    # so the lead still lands on their dashboard.
+                    if user_id:
+                        store.add_owner(email, user_id)
                     if pending_store is not None:
                         pending_store.remove([email])
                 entry = {
@@ -1826,6 +1831,11 @@ def _run_full_streaming(
             existing = store.get(email)
             if existing is not None:
                 with write_lock:
+                    # Cross-user sharing (Phase 2): the cache hit reused
+                    # another user's research — stamp THIS user as an owner
+                    # so the lead shows on their dashboard too.
+                    if user_id:
+                        store.add_owner(email, user_id)
                     pending_store.remove([email])
                 return {
                     "email": email, "domain": domain,

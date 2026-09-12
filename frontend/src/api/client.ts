@@ -19,6 +19,7 @@ import type {
   AdminVisibility,
   CrmInput,
   CrmState,
+  EmailAccount,
   FolderCreateOut,
   FoldersOut,
   Job,
@@ -157,6 +158,20 @@ export interface ExportFilter {
   bound?: boolean;
   min_score?: number;
   q?: string;
+}
+
+/** Full URL for the Gmail OAuth consent hop (Phase E2). This is a TOP-LEVEL
+ * navigation — the browser must land on Google's own consent page, so no
+ * Authorization header can ride along; the JWT travels in the query string
+ * for this one hop and a signed state carries the user back. */
+export function googleAuthorizeUrl(): string {
+  let token = "";
+  try {
+    token = localStorage.getItem("leadhunter.jwt") || "";
+  } catch {
+    /* private mode */
+  }
+  return `${BASE}/email-accounts/google/authorize?token=${encodeURIComponent(token)}`;
 }
 
 export const api = {
@@ -478,6 +493,26 @@ export const api = {
 
   getLead(email: string): Promise<LeadDetail> {
     return request<LeadDetail>(`/leads/${encodeURIComponent(email)}`);
+  },
+
+  // Email sending accounts (Phase E2) — Gmail via Google OAuth.
+  emailAccounts(): Promise<EmailAccount[]> {
+    return request<EmailAccount[]>("/email-accounts");
+  },
+
+  /** Is Gmail OAuth configured server-side? (Drives the Connect button vs the
+   * setup notice — public, leaks nothing beyond configured/not.) */
+  gmailStatus(): Promise<{ configured: boolean }> {
+    return request("/email-accounts/google/status");
+  },
+
+  disconnectEmailAccount(id: number): Promise<{ id: number; deleted: boolean }> {
+    return request(`/email-accounts/${id}`, { method: "DELETE" });
+  },
+
+  /** End-to-end proof of one account: a test email from it TO itself. */
+  sendTestEmail(id: number): Promise<{ id: number; sent: boolean; to: string }> {
+    return request(`/email-accounts/${id}/send-test`, { method: "POST" });
   },
 
   // CRM pipeline (Phase E1): stage + next action + the immutable timeline.

@@ -1,20 +1,11 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Link, useLocation, useParams } from "react-router-dom";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, CornerDownRight, ExternalLink, Flag, StickyNote } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import { ArrowLeft, ExternalLink } from "lucide-react";
 import { api } from "../api/client";
-import { Select } from "../components/Select";
-import type { CrmEvent, CrmInput, EvidenceFact } from "../types";
-import { CRM_STAGES } from "../types";
+import type { EvidenceFact } from "../types";
 import { Spinner } from "../components/StatusChip";
-import {
-  crmStageBadge,
-  crmStageLabel,
-  recommendationBadge,
-  recommendationLabel,
-  scoreColor,
-  timeAgo,
-} from "../lib/format";
+import { recommendationBadge, recommendationLabel, scoreColor } from "../lib/format";
 
 export default function LeadDetail() {
   const { email = "" } = useParams();
@@ -52,10 +43,6 @@ export default function LeadDetail() {
   }
 
   const badge = recommendationBadge(data.recommendation);
-  // The CRM stage chip rides beside the AI recommendation — the AI's verdict
-  // (what LeadHunter thinks) and the pipeline stage (where YOU are with this
-  // lead) are two different answers, both visible at once.
-  const stageChip = crmStageBadge(data.crm_status);
 
   return (
     <div className="px-8 py-7 max-w-4xl">
@@ -73,12 +60,6 @@ export default function LeadDetail() {
             <span className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[12px] ${badge.cls}`}>
               <span className={`h-1.5 w-1.5 rounded-full ${badge.dot}`} />
               {recommendationLabel(data.recommendation)}
-            </span>
-            <span
-              className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-[12px] font-medium ${stageChip}`}
-              title={`CRM stage: ${crmStageLabel(data.crm_status)}`}
-            >
-              {crmStageLabel(data.crm_status)}
             </span>
           </div>
           <p className="text-[13.5px] text-slate-500 mt-1">{data.email}</p>
@@ -104,11 +85,6 @@ export default function LeadDetail() {
           {data.company.website} <ExternalLink className="w-3.5 h-3.5" />
         </a>
       )}
-
-      {/* CRM pipeline (Phase E1) — the lead's stage, next action, notes and
-          the immutable timeline. Sits ABOVE the research sections: where the
-          deal is comes before what the research found. */}
-      <CrmPanel email={decoded} />
 
       {/* Fit summary — left-accent callout (the frontend1 design pattern):
           the AI's verdict reads as a quote, visually distinct from data. */}
@@ -182,178 +158,6 @@ export default function LeadDetail() {
         </Section>
       )}
     </div>
-  );
-}
-
-function CrmPanel({ email }: { email: string }) {
-  const qc = useQueryClient();
-  const { data } = useQuery({
-    queryKey: ["crm", email],
-    queryFn: () => api.getCrm(email),
-  });
-  const save = useMutation({
-    mutationFn: (input: CrmInput) => api.updateCrm(email, input),
-    onSuccess: () => {
-      // The stage/next-action chips live in three places — refresh them all.
-      qc.invalidateQueries({ queryKey: ["crm", email] });
-      qc.invalidateQueries({ queryKey: ["lead", email] });
-      qc.invalidateQueries({ queryKey: ["leads"] });
-    },
-  });
-
-  // Next-action draft: local edit until saved; resets when the server state
-  // changes underneath (dirty stays true while the user is mid-edit).
-  const [actionDraft, setActionDraft] = useState("");
-  const [actionDirty, setActionDirty] = useState(false);
-  useEffect(() => {
-    if (!actionDirty) setActionDraft(data?.next_action ?? "");
-  }, [data, actionDirty]);
-
-  const [note, setNote] = useState("");
-  const stage = data?.crm_status ?? "researched";
-  const events = data?.events ?? [];
-
-  return (
-    <section className="rounded-xl border border-white/5 bg-white/[0.02] p-5">
-      <div className="flex items-center justify-between flex-wrap gap-2">
-        <h2 className="text-[14px] font-semibold text-white">
-          Pipeline
-          <span className="ml-2 font-normal text-slate-500">CRM stage · next action · notes</span>
-        </h2>
-        {save.isPending && (
-          <span className="inline-flex items-center gap-1.5 text-[12px] text-slate-500">
-            <Spinner className="h-3.5 w-3.5" /> saving…
-          </span>
-        )}
-      </div>
-
-      <div className="mt-3 flex flex-wrap items-end gap-4">
-        <div>
-          <span className="mb-1 block text-[11.5px] font-medium uppercase tracking-wide text-slate-500">Stage</span>
-          <Select
-            className="w-44"
-            value={stage}
-            onChange={(v) => save.mutate({ status: v })}
-            disabled={save.isPending}
-            ariaLabel="CRM stage"
-            options={CRM_STAGES.map((s) => ({ value: s, label: crmStageLabel(s) }))}
-          />
-        </div>
-        <div className="flex-1 min-w-[240px]">
-          <span className="mb-1 block text-[11.5px] font-medium uppercase tracking-wide text-slate-500">Next action</span>
-          <div className="flex gap-2">
-            <input
-              type="text"
-              value={actionDraft}
-              onChange={(e) => {
-                setActionDraft(e.target.value);
-                setActionDirty(true);
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && actionDirty) {
-                  save.mutate({ next_action: actionDraft });
-                  setActionDirty(false);
-                }
-              }}
-              placeholder="e.g. Send intro email — Friday"
-              className="w-full rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-[13px] text-slate-200 placeholder:text-slate-600 outline-none focus:border-indigo-500/50"
-            />
-            {actionDirty && (
-              <button
-                onClick={() => {
-                  save.mutate({ next_action: actionDraft });
-                  setActionDirty(false);
-                }}
-                disabled={save.isPending}
-                className="shrink-0 rounded-lg bg-indigo-600 px-3.5 py-2 text-[12.5px] font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
-              >
-                Save
-              </button>
-            )}
-          </div>
-        </div>
-      </div>
-
-      {/* Note box — appended to the immutable timeline (never edited after). */}
-      <div className="mt-3 flex gap-2">
-        <input
-          type="text"
-          value={note}
-          onChange={(e) => setNote(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && note.trim()) {
-              save.mutate({ note: note.trim() });
-              setNote("");
-            }
-          }}
-          placeholder="Add a note to the timeline…"
-          className="flex-1 rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-[13px] text-slate-200 placeholder:text-slate-600 outline-none focus:border-indigo-500/50"
-        />
-        <button
-          onClick={() => {
-            if (!note.trim()) return;
-            save.mutate({ note: note.trim() });
-            setNote("");
-          }}
-          disabled={save.isPending || !note.trim()}
-          className="shrink-0 rounded-lg border border-white/10 px-3.5 py-2 text-[12.5px] font-medium text-slate-300 hover:bg-white/[0.04] disabled:opacity-50"
-        >
-          Add note
-        </button>
-      </div>
-      {save.isError && (
-        <p className="mt-2 text-[12.5px] text-rose-300">
-          {(save.error as Error).message}
-        </p>
-      )}
-
-      {/* The timeline — newest last (chronological), like a conversation. */}
-      {events.length > 0 && (
-        <ul className="mt-4 space-y-2 border-t border-white/5 pt-3">
-          {events.map((e) => (
-            <CrmEventRow key={e.id} event={e} />
-          ))}
-        </ul>
-      )}
-    </section>
-  );
-}
-
-function CrmEventRow({ event }: { event: CrmEvent }) {
-  const icon =
-    event.kind === "status" ? (
-      <Flag className="h-3.5 w-3.5 text-indigo-300" />
-    ) : event.kind === "next_action" ? (
-      <CornerDownRight className="h-3.5 w-3.5 text-cyan-300" />
-    ) : (
-      <StickyNote className="h-3.5 w-3.5 text-amber-300" />
-    );
-  // Stage transitions ("researched → contacted") get the colored stage words;
-  // everything else renders as plain text.
-  const parts = event.detail.split(" → ");
-  return (
-    <li className="flex items-start gap-2 text-[13px]">
-      <span className="mt-0.5 shrink-0">{icon}</span>
-      <div className="min-w-0 flex-1">
-        {event.kind === "status" && parts.length === 2 ? (
-          <span>
-            <span className={`rounded-full px-1.5 py-0.5 text-[11px] ${crmStageBadge(parts[0])}`}>
-              {crmStageLabel(parts[0])}
-            </span>{" "}
-            <span className="text-slate-500">→</span>{" "}
-            <span className={`rounded-full px-1.5 py-0.5 text-[11px] font-medium ${crmStageBadge(parts[1])}`}>
-              {crmStageLabel(parts[1])}
-            </span>
-          </span>
-        ) : (
-          <span className="text-slate-100 break-words">{event.detail}</span>
-        )}
-        <span className="ml-2 text-[11.5px] text-slate-600">
-          {event.username ? `${event.username} · ` : ""}
-          {timeAgo(event.created_at)}
-        </span>
-      </div>
-    </li>
   );
 }
 

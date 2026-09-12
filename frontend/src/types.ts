@@ -230,6 +230,18 @@ export interface CrmInput {
   note?: string;
 }
 
+/** A connected sending account (Phase E2) — Gmail via Google OAuth. This is
+ * the SAFE public view: OAuth tokens never leave the backend. */
+export interface EmailAccount {
+  id: number;
+  provider: string;
+  email: string;
+  display_name: string;
+  /** connected | expired | revoked (revoked = reconnect needed). */
+  status: string;
+  created_at: string;
+}
+
 export interface AdminJobSummary {
   id: string;
   query: JobQuery;

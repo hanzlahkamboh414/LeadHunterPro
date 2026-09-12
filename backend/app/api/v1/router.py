@@ -10,6 +10,7 @@ from app.api.v1.contact import router as contact_router
 from app.api.v1.database import router as database_router
 from app.api.v1.discovery import router as discovery_router
 from app.api.v1.email import router as email_router
+from app.api.v1.email_accounts import router as email_accounts_router
 from app.api.v1.health import router as health_router
 from app.api.v1.auth import router as auth_router
 from app.api.v1.admin import router as admin_router
@@ -35,3 +36,4 @@ api_router.include_router(discovery_router)
 api_router.include_router(source_intelligence_router)
 api_router.include_router(connectors_router)
 api_router.include_router(leads_router)
+api_router.include_router(email_accounts_router)

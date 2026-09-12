@@ -177,6 +177,25 @@ class Settings(BaseSettings):
     AUTH_TOKEN_EXPIRE_HOURS: int = 24
 
     # ------------------------------------------------------------------
+    # Gmail OAuth (Phase E2 — email outreach).
+    #
+    # Credentials come from the operator's OWN Google Cloud project (see
+    # docs/email_oauth_setup.md): OAuth consent screen (External, Testing is
+    # fine for private use) + an OAuth Client ID of type "Web application"
+    # whose redirect URI is {PUBLIC_BASE_URL}/api/v1/email-accounts/google/callback.
+    # While these are empty the Connect Gmail flow answers 503 with a clear
+    # setup pointer — never a silent failure.
+    # ------------------------------------------------------------------
+    GOOGLE_CLIENT_ID: str = Field(default="", repr=False)  # secret
+    GOOGLE_CLIENT_SECRET: str = Field(default="", repr=False)  # secret
+    #: The public origin the OAuth redirect URI is built from (no trailing /).
+    PUBLIC_BASE_URL: str = "https://leadhuntarpro.online"
+    #: Optional dedicated Fernet key for token encryption at rest. Empty =
+    #: derive one from AUTH_SECRET_KEY (documented: rotating AUTH_SECRET_KEY
+    #: makes stored OAuth tokens unreadable — set EMAIL_TOKEN_KEY to decouple).
+    EMAIL_TOKEN_KEY: str = Field(default="", repr=False)  # secret
+
+    # ------------------------------------------------------------------
     # Pending-lead re-enrichment cooldown.
     #
     # Root cause it fixes: a lead whose AI research raises (transient AI/router

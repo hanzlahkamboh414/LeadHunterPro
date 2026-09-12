@@ -201,6 +201,17 @@ export default function Leads() {
   const boundCount = leads.filter((l) => l.bound).length;
   const avgScore = leads.length ? leads.reduce((s, l) => s + l.score, 0) / leads.length : 0;
 
+  // Any list-level filter on? Drives the "In this view" card's active state —
+  // it is the one-click "reset everything" escape hatch.
+  const anyFilterOn = !!(rec || bound || minScore || src || tag || date);
+  function clearFilters() {
+    const p = new URLSearchParams(params);
+    // The PLACE (folder) survives — it's where the user is browsing, not a
+    // filter; only the row-level constraints reset.
+    ["recommendation", "bound", "min_score", "source", "tag", "date"].forEach((k) => p.delete(k));
+    setParams(p, { replace: true });
+  }
+
   // Folders catalog (Phase B.2) — persisted, empty-allowed clickable groups.
   // The filter + manage panel read from here so a folder exists BEFORE any
   // lead is in it ("pehle folder banao, phir leads move karo").
@@ -539,9 +550,10 @@ export default function Leads() {
       </div>
 
       {/* Mini stat strip — the current view at a glance, Dashboard-style.
-          Clickable cards deep-link into the matching filter (toggle off on
-          second click). Counts are from the loaded rows; "loaded" appears
-          when the server total is larger (honest paging). */}
+          EVERY card acts on click: In-this-view resets the filters, the
+          others toggle their filter (second click turns it off). Counts are
+          from the loaded rows; "loaded" appears when the server total is
+          larger (honest paging). */}
       {!isLoading && leads.length > 0 && (
         <div className="mt-4 grid grid-cols-2 lg:grid-cols-4 gap-3">
           <StatMini
@@ -549,6 +561,8 @@ export default function Leads() {
             value={totalLeads.toLocaleString()}
             sub={leads.length < totalLeads ? `${leads.length} loaded — Show more for the rest` : "all loaded"}
             icon={Layers}
+            active={anyFilterOn}
+            onClick={clearFilters}
           />
           <StatMini
             label="Contact Now"

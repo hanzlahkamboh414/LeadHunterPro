@@ -26,14 +26,18 @@ export default function Contacts() {
 
   // Client-side live filter — the whole outreach list is already downloaded
   // (limit 1000), so searching name/company/email/LinkedIn needs no round trip.
+  // contactFilter comes from the overview chips: LinkedIn/Phone cards toggle
+  // "only contacts that have it".
   const [filter, setFilter] = useState("");
+  const [contactFilter, setContactFilter] = useState<"" | "linkedin" | "phone">("");
   const q = filter.trim().toLowerCase();
   const contacts = data ?? [];
-  const visible = q
-    ? contacts.filter((c) =>
-        [c.person, c.company, c.email, c.linkedin].some((v) => (v ?? "").toLowerCase().includes(q)),
-      )
-    : contacts;
+  const visible = contacts.filter((c) => {
+    if (contactFilter === "linkedin" && !c.linkedin) return false;
+    if (contactFilter === "phone" && !c.phone) return false;
+    if (!q) return true;
+    return [c.person, c.company, c.email, c.linkedin].some((v) => (v ?? "").toLowerCase().includes(q));
+  });
   const withLinkedIn = contacts.filter((c) => c.linkedin).length;
   const withPhone = contacts.filter((c) => c.phone).length;
 
@@ -73,10 +77,20 @@ export default function Contacts() {
         />
       </div>
 
-      {/* Overview chips + live search — the outreach list at a glance. */}
+      {/* Overview chips + live search — the outreach list at a glance.
+          Every chip ACTS: LinkedIn/Phone narrow the list, Total resets. */}
       {contacts.length > 0 && (
         <div className="mt-5 flex flex-wrap items-center gap-3">
-          <div className="flex items-center gap-2 rounded-xl border border-white/5 bg-white/[0.02] px-4 py-2.5">
+          <button
+            type="button"
+            onClick={() => {
+              setContactFilter("");
+              setFilter("");
+            }}
+            className={`flex items-center gap-2 rounded-xl border px-4 py-2.5 text-left transition-colors hover:bg-white/[0.04] ${
+              contactFilter || filter ? "border-indigo-500/50 bg-indigo-500/[0.08]" : "border-white/5 bg-white/[0.02]"
+            }`}
+          >
             <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-indigo-500/15">
               <Users className="h-[15px] w-[15px] text-indigo-400" strokeWidth={1.9} />
             </div>
@@ -84,10 +98,18 @@ export default function Contacts() {
               <div className="text-[16px] font-semibold text-white leading-tight">
                 {contacts.length.toLocaleString()}
               </div>
-              <div className="text-[11px] text-slate-500">contacts</div>
+              <div className="text-[11px] text-slate-500">
+                {contactFilter || filter ? "all contacts (reset)" : "contacts"}
+              </div>
             </div>
-          </div>
-          <div className="flex items-center gap-2 rounded-xl border border-white/5 bg-white/[0.02] px-4 py-2.5">
+          </button>
+          <button
+            type="button"
+            onClick={() => setContactFilter(contactFilter === "linkedin" ? "" : "linkedin")}
+            className={`flex items-center gap-2 rounded-xl border px-4 py-2.5 text-left transition-colors hover:bg-white/[0.04] ${
+              contactFilter === "linkedin" ? "border-indigo-500/50 bg-indigo-500/[0.08]" : "border-white/5 bg-white/[0.02]"
+            }`}
+          >
             <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-sky-500/15">
               <Link2 className="h-[15px] w-[15px] text-sky-300" strokeWidth={1.9} />
             </div>
@@ -98,11 +120,19 @@ export default function Contacts() {
                   ({contacts.length ? Math.round((withLinkedIn / contacts.length) * 100) : 0}%)
                 </span>
               </div>
-              <div className="text-[11px] text-slate-500">with LinkedIn</div>
+              <div className="text-[11px] text-slate-500">
+                {contactFilter === "linkedin" ? "showing only these" : "with LinkedIn"}
+              </div>
             </div>
-          </div>
+          </button>
           {withPhone > 0 && (
-            <div className="flex items-center gap-2 rounded-xl border border-white/5 bg-white/[0.02] px-4 py-2.5">
+            <button
+              type="button"
+              onClick={() => setContactFilter(contactFilter === "phone" ? "" : "phone")}
+              className={`flex items-center gap-2 rounded-xl border px-4 py-2.5 text-left transition-colors hover:bg-white/[0.04] ${
+                contactFilter === "phone" ? "border-indigo-500/50 bg-indigo-500/[0.08]" : "border-white/5 bg-white/[0.02]"
+              }`}
+            >
               <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-emerald-500/15">
                 <Phone className="h-[15px] w-[15px] text-emerald-300" strokeWidth={1.9} />
               </div>
@@ -110,9 +140,11 @@ export default function Contacts() {
                 <div className="text-[16px] font-semibold text-white leading-tight">
                   {withPhone.toLocaleString()}
                 </div>
-                <div className="text-[11px] text-slate-500">with phone</div>
+                <div className="text-[11px] text-slate-500">
+                  {contactFilter === "phone" ? "showing only these" : "with phone"}
+                </div>
               </div>
-            </div>
+            </button>
           )}
           <div className="relative ml-auto w-full sm:w-64">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
@@ -142,7 +174,19 @@ export default function Contacts() {
         </div>
       ) : visible.length === 0 ? (
         <div className="rounded-xl border border-dashed border-white/10 py-16 text-center text-slate-500 mt-4">
-          No contacts match “{filter.trim()}”.
+          No contacts match{" "}
+          {contactFilter === "linkedin" ? "“with LinkedIn”" : contactFilter === "phone" ? "“with phone”" : ""}
+          {filter.trim() ? `${contactFilter ? " + " : ""}“${filter.trim()}”` : ""} —{" "}
+          <button
+            onClick={() => {
+              setContactFilter("");
+              setFilter("");
+            }}
+            className="text-indigo-400 hover:underline"
+          >
+            show all
+          </button>
+          .
         </div>
       ) : (
         <div className="mt-4 overflow-x-auto rounded-xl border border-white/5">

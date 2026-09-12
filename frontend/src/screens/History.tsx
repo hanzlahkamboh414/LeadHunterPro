@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
@@ -17,10 +17,23 @@ export default function History() {
     refetchInterval: 10_000,
   });
 
+  // Card-driven view controls: stateFilter narrows the list, byDelivered
+  // re-orders it (working leads desc). "" = off — the honest default view.
+  const [stateFilter, setStateFilter] = useState<"" | "active" | "completed">("");
+  const [byDelivered, setByDelivered] = useState(false);
+
   const jobs = data ?? [];
   const running = jobs.filter((j) => j.state === "running" || j.state === "queued").length;
   const completed = jobs.filter((j) => j.state === "completed").length;
   const delivered = jobs.reduce((s, j) => s + (j.working_leads ?? 0), 0);
+
+  const visibleJobs = useMemo(() => {
+    let list = jobs;
+    if (stateFilter === "active") list = list.filter((j) => j.state === "running" || j.state === "queued");
+    else if (stateFilter === "completed") list = list.filter((j) => j.state === "completed");
+    if (byDelivered) list = [...list].sort((a, b) => (b.working_leads ?? 0) - (a.working_leads ?? 0));
+    return list;
+  }, [jobs, stateFilter, byDelivered]);
 
   // Working leads delivered per day — contiguous 14-day window anchored on
   // the newest run day, so gaps show as honest zeros (same rule as the
@@ -67,18 +80,43 @@ export default function History() {
       </div>
 
       {/* Stat cards + delivery trend — the run history at a glance,
-          Dashboard-style. */}
+          Dashboard-style. Every card ACTS: click filters/sorts the list. */}
       {jobs.length > 0 && (
         <>
           <div className="mt-5 grid grid-cols-2 lg:grid-cols-4 gap-3">
-            <HistStat label="Total runs" value={jobs.length.toLocaleString()} icon={Activity} />
-            <HistStat label="Active now" value={running.toLocaleString()} icon={PlayCircle} tint="indigo" />
-            <HistStat label="Completed" value={completed.toLocaleString()} icon={CheckCircle2} tint="emerald" />
             <HistStat
-              label="Working leads delivered"
+              label={stateFilter || byDelivered ? "All runs (reset)" : "Total runs"}
+              value={jobs.length.toLocaleString()}
+              icon={Activity}
+              active={!!stateFilter || byDelivered}
+              onClick={() => {
+                setStateFilter("");
+                setByDelivered(false);
+              }}
+            />
+            <HistStat
+              label="Active now"
+              value={running.toLocaleString()}
+              icon={PlayCircle}
+              tint="indigo"
+              active={stateFilter === "active"}
+              onClick={() => setStateFilter(stateFilter === "active" ? "" : "active")}
+            />
+            <HistStat
+              label="Completed"
+              value={completed.toLocaleString()}
+              icon={CheckCircle2}
+              tint="emerald"
+              active={stateFilter === "completed"}
+              onClick={() => setStateFilter(stateFilter === "completed" ? "" : "completed")}
+            />
+            <HistStat
+              label={byDelivered ? "Delivered (sorted ↓)" : "Working leads delivered"}
               value={delivered.toLocaleString()}
               icon={ListChecks}
               tint="amber"
+              active={byDelivered}
+              onClick={() => setByDelivered((v) => !v)}
             />
           </div>
 
@@ -132,7 +170,7 @@ export default function History() {
         <div className="flex items-center gap-2 text-slate-500 text-sm py-16 justify-center">
           <Spinner /> Loading history…
         </div>
-      ) : !data || data.length === 0 ? (
+      ) : jobs.length === 0 ? (
         <div className="rounded-xl border border-dashed border-white/10 py-16 text-center text-slate-500">
           No runs yet. Start one on the{" "}
           <button onClick={() => navigate("/research")} className="text-indigo-400 hover:underline">
@@ -140,28 +178,65 @@ export default function History() {
           </button>{" "}
           screen.
         </div>
+      ) : visibleJobs.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-white/10 py-16 text-center text-slate-500 mt-4">
+          No runs match this filter —{" "}
+          <button
+            onClick={() => setStateFilter("")}
+            className="text-indigo-400 hover:underline"
+          >
+            show all
+          </button>
+          .
+        </div>
       ) : (
-        <ul className="space-y-3">
-          {data.map((job) => (
-            <HistoryRow key={job.id} job={job} />
-          ))}
-        </ul>
+        <>
+          {(stateFilter || byDelivered) && (
+            <p className="mt-4 text-[12.5px] text-indigo-300/90">
+              {stateFilter === "active"
+                ? "Showing active runs only"
+                : stateFilter === "completed"
+                  ? "Showing completed runs only"
+                  : "Sorted by working leads delivered"}
+              {" — "}
+              <button
+                onClick={() => {
+                  setStateFilter("");
+                  setByDelivered(false);
+                }}
+                className="underline hover:text-indigo-200"
+              >
+                reset
+              </button>
+            </p>
+          )}
+          <ul className="space-y-3">
+            {visibleJobs.map((job) => (
+              <HistoryRow key={job.id} job={job} />
+            ))}
+          </ul>
+        </>
       )}
     </div>
   );
 }
 
-/** Compact stat card for the History overview strip. */
+/** Compact stat card for the History overview strip — clickable cards act
+ *  on the list (filter / sort / reset), with an active state while on. */
 function HistStat({
   label,
   value,
   icon: Icon,
   tint = "slate",
+  active = false,
+  onClick,
 }: {
   label: string;
   value: string;
   icon: typeof Activity;
   tint?: "emerald" | "amber" | "indigo" | "slate";
+  active?: boolean;
+  onClick?: () => void;
 }) {
   const tintCls =
     tint === "emerald"
@@ -171,8 +246,11 @@ function HistStat({
         : tint === "indigo"
           ? "bg-indigo-500/15 text-indigo-400"
           : "bg-slate-500/15 text-slate-400";
-  return (
-    <div className="rounded-xl border border-white/5 bg-white/[0.02] p-4">
+  const cls = `rounded-xl border p-4 text-left transition-colors ${
+    onClick ? "cursor-pointer hover:bg-white/[0.04]" : ""
+  } ${active ? "border-indigo-500/50 bg-indigo-500/[0.08]" : "border-white/5 bg-white/[0.02]"}`;
+  const body = (
+    <>
       <div className="flex items-center justify-between gap-2">
         <span className="text-[12.5px] text-slate-400">{label}</span>
         <div className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ${tintCls}`}>
@@ -180,7 +258,14 @@ function HistStat({
         </div>
       </div>
       <div className="mt-1.5 text-[22px] font-semibold text-white">{value}</div>
-    </div>
+    </>
+  );
+  return onClick ? (
+    <button type="button" onClick={onClick} className={cls}>
+      {body}
+    </button>
+  ) : (
+    <div className={cls}>{body}</div>
   );
 }
 

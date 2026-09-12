@@ -16,6 +16,7 @@ from fastapi.responses import Response
 
 from app.auth.dependencies import get_current_user
 from app.auth.models import User
+from app.campaigns import spamcheck
 from app.campaigns.scheduler import ensure_access_token, parse_ts
 from app.campaigns.store import get_campaign_store
 from app.campaigns.templates import render, sample_context
@@ -31,6 +32,10 @@ from app.schemas.campaigns import (
     CampaignTestSendOut,
     CampaignUpdateIn,
     CampaignsOut,
+    SpamCheckIn,
+    SpamCheckOut,
+    SpamImproveIn,
+    SpamImproveOut,
 )
 
 logger = logging.getLogger(__name__)
@@ -174,6 +179,25 @@ def campaign_test_send(
                 body.to_email, creds["email"])
     return {"sent": True, "to": body.to_email, "from_email": creds["email"],
             "subject": subject}
+
+
+@router.post("/spam-check", response_model=SpamCheckOut)
+def spam_check(body: SpamCheckIn,
+               user: User = Depends(get_current_user)) -> dict:
+    """How spammy does this pitch look? An estimated 0-100 risk score plus
+    the findings behind it, in plain words — our own content rules, not
+    Gmail's real filter (a guide, not a guarantee). Creates nothing."""
+    return spamcheck.analyze_script(body.subject, body.body)
+
+
+@router.post("/spam-improve", response_model=SpamImproveOut)
+def spam_improve(body: SpamImproveIn,
+                 user: User = Depends(get_current_user)) -> dict:
+    """The one-click fix: the pitch rewritten without its spam triggers
+    (AI best-effort, deterministic rules as the guaranteed fallback).
+    Nothing is scheduled or sent — the result goes back to the user's
+    editor for review."""
+    return spamcheck.improve_endpoint(body.subject, body.body)
 
 
 @router.get("", response_model=CampaignsOut)

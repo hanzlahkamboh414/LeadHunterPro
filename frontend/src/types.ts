@@ -300,6 +300,29 @@ export interface CampaignUpdateInput {
   body: string;
 }
 
+/** One risky thing the spam analyzer found, in plain words. */
+export interface SpamFinding {
+  rule: string;
+  severity: string; // high | medium | low
+  message: string;
+  count: number;
+}
+
+/** POST /campaigns/spam-check result — estimated spam risk of a pitch. */
+export interface SpamCheckResult {
+  score: number; // 0-100
+  level: string; // low | medium | high
+  findings: SpamFinding[];
+}
+
+/** POST /campaigns/spam-improve result — the one-click fixed pitch. */
+export interface SpamImproveResult {
+  subject: string;
+  body: string;
+  method: string; // ai | rules
+  notes: string[];
+}
+
 /** A follow-up rung in a POST /campaigns body (Phase E4). */
 export interface FollowupInput {
   after_days: number;

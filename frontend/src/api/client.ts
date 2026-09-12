@@ -24,6 +24,8 @@ import type {
   CampaignFollowup,
   CampaignSend,
   CampaignUpdateInput,
+  SpamCheckResult,
+  SpamImproveResult,
   EmailAccount,
   FolderCreateOut,
   FoldersOut,
@@ -580,6 +582,27 @@ export const api = {
 
   deleteCampaign(id: number): Promise<{ id: number; deleted: boolean }> {
     return request(`/campaigns/${id}`, { method: "DELETE" });
+  },
+
+  /** How spammy does this pitch look? Estimated 0-100 risk + the findings
+   * behind it, in plain words. Creates nothing. */
+  spamCheck(input: { subject: string; body: string }): Promise<SpamCheckResult> {
+    return request("/campaigns/spam-check", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+  },
+
+  /** The one-click fix: the pitch rewritten without its spam triggers
+   * (AI best-effort, deterministic rules as fallback). Nothing is sent —
+   * the result goes back to the editor for review. */
+  spamImprove(input: { subject: string; body: string }): Promise<SpamImproveResult> {
+    return request("/campaigns/spam-improve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
   },
 
   // CRM pipeline (Phase E1): stage + next action + the immutable timeline.

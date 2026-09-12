@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import {
@@ -13,6 +13,8 @@ import {
   Info,
   Eye,
   Pencil,
+  ShieldCheck,
+  Wand2,
 } from "lucide-react";
 import { ApiError, api } from "../api/client";
 import { PageHeader } from "../components/PageHeader";
@@ -22,6 +24,7 @@ import type {
   CampaignUpdateInput,
   EmailAccount,
   LeadSummary,
+  SpamFinding,
 } from "../types";
 import type { FollowupInput } from "../types";
 
@@ -501,6 +504,16 @@ function EditPitchForm({
           onChange={(e) => setBody(e.target.value)}
           placeholder="Email script"
         />
+        <div className="mt-2.5">
+          <SpamPanel
+            subject={subject}
+            body={body}
+            onApply={(s, b) => {
+              setSubject(s);
+              setBody(b);
+            }}
+          />
+        </div>
         <div className="flex justify-end gap-2">
           <button
             onClick={() => onSave({ name: name.trim(), subject, body })}
@@ -511,6 +524,173 @@ function EditPitchForm({
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Spam risk analyzer — live score, the mistakes behind it, one-click fix
+// ---------------------------------------------------------------------------
+
+const SPAM_LEVEL_STYLES: Record<string, { chip: string; bar: string; label: string }> = {
+  low: {
+    chip: "bg-emerald-500/15 text-emerald-300",
+    bar: "bg-emerald-500",
+    label: "Low risk",
+  },
+  medium: {
+    chip: "bg-amber-500/15 text-amber-300",
+    bar: "bg-amber-500",
+    label: "Medium risk",
+  },
+  high: {
+    chip: "bg-rose-500/15 text-rose-300",
+    bar: "bg-rose-500",
+    label: "High risk",
+  },
+};
+
+const SPAM_SEVERITY_DOT: Record<string, string> = {
+  high: "bg-rose-400",
+  medium: "bg-amber-400",
+  low: "bg-slate-400",
+};
+
+function SpamPanel({
+  subject,
+  body,
+  onApply,
+}: {
+  subject: string;
+  body: string;
+  onApply: (subject: string, body: string) => void;
+}) {
+  // Debounced copy of the draft — the analyzer sees the script only after
+  // the user stops typing, not on every keystroke.
+  const [debounced, setDebounced] = useState({ subject, body });
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced({ subject, body }), 600);
+    return () => clearTimeout(t);
+  }, [subject, body]);
+
+  const [fixed, setFixed] = useState<string | null>(null);
+  // What the last one-click fix applied — the banner survives until the
+  // user edits AWAY from that text (a manual edit clears it).
+  const appliedRef = useRef<{ subject: string; body: string } | null>(null);
+
+  const check = useQuery({
+    queryKey: ["spam-check", debounced.subject, debounced.body],
+    queryFn: () => api.spamCheck(debounced),
+    enabled: debounced.subject.trim() !== "" && debounced.body.trim() !== "",
+  });
+
+  const improve = useMutation({
+    mutationFn: () => api.spamImprove({ subject, body }),
+    onSuccess: (r) => {
+      appliedRef.current = { subject: r.subject, body: r.body };
+      onApply(r.subject, r.body);
+      setFixed(
+        r.method === "ai"
+          ? "Rewritten by AI with the spam triggers removed — review it above."
+          : `Fixed: ${r.notes.join("; ") || "spam triggers removed"}`,
+      );
+    },
+    onError: () => setFixed(null),
+  });
+
+  // A manual edit after a fix clears the confirmation banner.
+  useEffect(() => {
+    const applied = appliedRef.current;
+    if (applied && (subject !== applied.subject || body !== applied.body)) {
+      appliedRef.current = null;
+      setFixed(null);
+    }
+  }, [subject, body]);
+
+  const r = check.data;
+  const style = r ? SPAM_LEVEL_STYLES[r.level] || SPAM_LEVEL_STYLES.low : null;
+
+  return (
+    <div className="rounded-lg border border-white/5 bg-white/[0.02] p-3.5">
+      <div className="flex items-center justify-between">
+        <p className="flex items-center gap-2 text-[12px] font-semibold text-slate-300">
+          <ShieldCheck className="w-4 h-4 text-indigo-400" />
+          Spam risk
+        </p>
+        {r && style && (
+          <span
+            className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${style.chip}`}
+          >
+            {style.label} · {r.score}%
+          </span>
+        )}
+      </div>
+
+      {check.isLoading && (
+        <p className="mt-2 text-[11.5px] text-slate-500">Analyzing the script…</p>
+      )}
+
+      {r && style && (
+        <>
+          <div className="mt-2.5 h-1.5 rounded-full bg-white/5 overflow-hidden">
+            <div
+              className={`h-full rounded-full ${style.bar} transition-all`}
+              style={{ width: `${r.score}%` }}
+            />
+          </div>
+
+          {r.findings.length === 0 ? (
+            <p className="mt-2.5 text-[12px] text-emerald-300">
+              No spam triggers found — this script reads like a normal
+              professional email.
+            </p>
+          ) : (
+            <>
+              <p className="mt-2.5 text-[11.5px] text-slate-500">
+                What could trigger a spam filter:
+              </p>
+              <ul className="mt-1.5 space-y-1.5">
+                {r.findings.map((f: SpamFinding) => (
+                  <li key={f.rule} className="flex items-start gap-2 text-[12px] text-slate-300">
+                    <span
+                      className={`mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full ${SPAM_SEVERITY_DOT[f.severity] || SPAM_SEVERITY_DOT.low}`}
+                    />
+                    <span>
+                      {f.message}
+                      {f.count > 1 && (
+                        <span className="text-slate-500"> ({f.count}x)</span>
+                      )}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              <button
+                onClick={() => improve.mutate()}
+                disabled={improve.isPending}
+                className="mt-3 flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-[12.5px] font-semibold text-white hover:bg-indigo-500 disabled:opacity-50"
+              >
+                <Wand2 className="w-3.5 h-3.5" />
+                {improve.isPending ? "Fixing…" : "Fix in one click"}
+              </button>
+              <p className="mt-1.5 text-[11px] text-slate-500">
+                The improved script replaces the fields above — review it
+                before scheduling.
+              </p>
+            </>
+          )}
+
+          {fixed && (
+            <p className="mt-2 rounded-lg border border-emerald-500/25 bg-emerald-500/10 px-3 py-2 text-[11.5px] text-emerald-300">
+              {fixed}
+            </p>
+          )}
+
+          <p className="mt-2 text-[11px] text-slate-600">
+            Estimated by our own content rules, not Gmail's real filter — a
+            guide, not a guarantee.
+          </p>
+        </>
+      )}
     </div>
   );
 }
@@ -832,10 +1012,22 @@ function CampaignBuilder({
             </label>
           </div>
 
+          {/* Spam risk — live score + the mistakes + the one-click fix. */}
+          <div className="mt-3">
+            <SpamPanel
+              subject={subject}
+              body={body}
+              onApply={(s, b) => {
+                setSubject(s);
+                setBody(b);
+              }}
+            />
+          </div>
+
           {/* Spam check — send the draft to your own inbox before scheduling. */}
           <div className="mt-3 rounded-lg border border-white/5 bg-white/[0.02] p-3.5">
             <p className="text-[12px] font-semibold text-slate-300">
-              Spam check (optional)
+              Inbox spam check (optional)
             </p>
             <p className="mt-1 text-[11.5px] text-slate-500">
               Send this draft to your own email and see where it lands —

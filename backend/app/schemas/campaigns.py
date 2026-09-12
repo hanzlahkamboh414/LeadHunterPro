@@ -112,6 +112,45 @@ class CampaignTestSendOut(BaseModel):
     subject: str
 
 
+class SpamCheckIn(BaseModel):
+    """A pitch to analyze — nothing is created or sent; the script stays
+    in the user's editor."""
+    subject: str = Field(min_length=1, max_length=500)
+    body: str = Field(min_length=1, max_length=20000)
+
+
+class SpamFinding(BaseModel):
+    """One risky thing the analyzer found, in plain words."""
+    rule: str
+    severity: str  # high | medium | low
+    message: str
+    count: int
+
+
+class SpamCheckOut(BaseModel):
+    """The spam-risk report: an estimated 0-100 score (our own rules, not
+    Gmail's real filter — a guide, not a guarantee)."""
+    score: int
+    level: str  # low | medium | high
+    findings: list[SpamFinding] = []
+
+
+class SpamImproveIn(BaseModel):
+    subject: str = Field(min_length=1, max_length=500)
+    body: str = Field(min_length=1, max_length=20000)
+
+
+class SpamImproveOut(BaseModel):
+    """The one-click fix: rewritten subject/body with spam triggers
+    removed. ``method`` says how — 'ai' (best-effort rewrite) or 'rules'
+    (deterministic fallback). The result lands in the user's editor for
+    review; nothing is scheduled or sent by this call."""
+    subject: str
+    body: str
+    method: str
+    notes: list[str] = []
+
+
 class CampaignUpdateIn(BaseModel):
     """Edit the pitch of an existing campaign — name, subject, body.
     Applies to sends that have not gone out yet; already-sent rows keep

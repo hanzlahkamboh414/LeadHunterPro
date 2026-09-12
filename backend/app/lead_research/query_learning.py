@@ -47,6 +47,17 @@ logger = logging.getLogger(__name__)
 #: Dispatched runs before a zero-verified template is considered proven useless.
 MIN_TRIALS = 12
 
+#: Proportional prune (2026-09-12). The 0-verified rule never fires once a
+#: template has a stray verified citation, so a chronically weak dork kept its
+#: full dispatch budget forever — measured live on production: deep:bidaward
+#: sat at 155 trials / 35 verified (23%) and deep:hiring at 151 / 39 (26%)
+#: while screening:email ran at 93%. Once a template has PROP_MIN_TRIALS of
+#: evidence, a persistently poor verified-rate is proven waste too. 30% keeps
+#: deep:expansion (37%) and deep:license (54%) alive — only the true laggards
+#: go.
+PROP_MIN_TRIALS = 40
+PROP_MAX_VERIFIED_RATE = 0.30
+
 _DEFAULT_DB = os.path.join(os.path.dirname(__file__), "..", "..", "output", "lead_research.db")
 
 #: Serializes writes across concurrent research threads (LEADS_CONCURRENCY).
@@ -246,17 +257,32 @@ class QueryYieldStore:
             template never costs another 12 trials per bucket to confirm);
           * a segment decides for itself only once it has its OWN ``MIN_TRIALS``;
           * otherwise it falls back to the global decision (KEEP default).
-        Dropped only when the deciding row has enough real trials AND never once
-        produced a verified citation. No record → keep.
+        A deciding row drops when it has enough real trials AND never once
+        produced a verified citation, OR — the proportional prune — when
+        PROP_MIN_TRIALS trials show a persistently poor verified-rate (a
+        stray citation no longer immunizes a 23% dork forever). No record →
+        keep.
         """
         global_row = self.get(template, "")
-        if global_row is not None and global_row["trials"] >= MIN_TRIALS and global_row["verified"] == 0:
+        if global_row is not None and self._proven_dead(global_row):
             return True  # global DROP — authoritative
         if segment:
             seg_row = self.get(template, segment)
-            if seg_row is not None and seg_row["trials"] >= MIN_TRIALS:
-                return seg_row["verified"] == 0
+            if seg_row is not None and self._proven_dead(seg_row):
+                return True
         return False  # global KEEP default
+
+    @staticmethod
+    def _proven_dead(row: dict[str, int]) -> bool:
+        """A yield row is proven dead: enough trials AND (never a verified
+        citation OR a persistently poor verified-rate — see PROP_MIN_TRIALS)."""
+        trials = row["trials"]
+        if trials < MIN_TRIALS:
+            return False
+        if row["verified"] == 0:
+            return True
+        return (trials >= PROP_MIN_TRIALS
+                and row["verified"] / trials < PROP_MAX_VERIFIED_RATE)
 
     def delete_template(self, template: str) -> None:
         """Manual, logged override — kill a template across ALL segments.

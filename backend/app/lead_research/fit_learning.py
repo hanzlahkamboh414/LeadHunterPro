@@ -50,6 +50,16 @@ logger = logging.getLogger(__name__)
 #: Completed runs before a never-converting label/host is treated as proven junk.
 MIN_TRIALS = 12
 
+#: Proportional prune (2026-09-12). The 0-kept rule never fires once a class
+#: has a STRAY keep — measured live on production: media.governmentnavigator
+#: .com sat at 51 trials / 2 kept (4%) and porttb.com at 102 / 13 (13%),
+#: burning discovery+research budget on every run forever. Once a class has
+#: PROP_MIN_TRIALS of evidence, a persistently poor keep-rate is proven waste
+#: too. The threshold is deliberately conservative (c3.org's 58% and every
+#: proven producer stays far above 15%; goldengate.org's live 17% survives).
+PROP_MIN_TRIALS = 40
+PROP_MAX_KEEP_RATE = 0.15
+
 _DEFAULT_DB = os.path.join(os.path.dirname(__file__), "..", "..", "output", "lead_research.db")
 
 #: Serializes writes across concurrent research threads (LEADS_CONCURRENCY).
@@ -245,9 +255,12 @@ class FitLearningStore:
         Dispatches by namespace: ``company``/``domain`` are skipped on a single
         USER rejection (``user_rejects >= 1``) — one human "not our client"
         verdict outweighs any AI score and needs no trial count, so a purged
-        company stays purged. ``industry``/``source`` keep the old contract:
-        skipped only once they have enough completed trials AND never once
-        became a real lead. No record (never seen) -> keep. Empty key -> keep.
+        company stays purged. ``industry``/``source`` keep the old contract —
+        skipped once they have enough completed trials AND never once became a
+        real lead — PLUS the proportional prune: at PROP_MIN_TRIALS trials a
+        keep-rate under PROP_MAX_KEEP_RATE is proven chronic waste even if a
+        stray lead exists (a single keep no longer immunizes a 4% host
+        forever). No record (never seen) -> keep. Empty key -> keep.
         """
         if not key:
             return False
@@ -256,7 +269,15 @@ class FitLearningStore:
             return False
         if kind in (KIND_COMPANY, KIND_DOMAIN):
             return row["user_rejects"] >= 1
-        return row["trials"] >= MIN_TRIALS and row["kept"] == 0
+        # Proven junk: enough trials, never once a real lead.
+        if row["trials"] >= MIN_TRIALS and row["kept"] == 0:
+            return True
+        # Proportional prune: enough trials, persistently poor rate (see
+        # PROP_MIN_TRIALS — the chronic-low-performer fix).
+        if (row["trials"] >= PROP_MIN_TRIALS
+                and row["kept"] / row["trials"] < PROP_MAX_KEEP_RATE):
+            return True
+        return False
 
     def reject(self, kind: str, key: str) -> None:
         """Record an explicit USER verdict that this (kind,key) is not a client.

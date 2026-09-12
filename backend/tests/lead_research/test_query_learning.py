@@ -18,6 +18,7 @@ from app.lead_research.query_learning import (
     BUCKET_ON_VERTICAL,
     BUCKET_OTHER,
     MIN_TRIALS,
+    PROP_MIN_TRIALS,
     QueryYieldPlanner,
     QueryYieldStore,
     confirmed_bucket,
@@ -85,6 +86,45 @@ def test_should_skip_keeps_verified_template(tmp_path):
 def test_should_skip_unknown_template(tmp_path):
     store = QueryYieldStore(str(tmp_path / "yield.db"))
     assert store.should_skip("never_run") is False
+
+
+# ---------------------------------------------------------------------------
+# should_skip — proportional prune (a stray citation must not immunize a weak dork)
+# ---------------------------------------------------------------------------
+
+def test_should_skip_proportionally_drops_chronic_weak_template(tmp_path):
+    """The live failure this fixes: deep:bidaward sat at 155 trials / 35
+    verified (23%) forever — a stray citation immunized it from the 0-verified
+    rule while screening:email ran at 93%. At PROP_MIN_TRIALS a poor
+    verified-rate is proven waste."""
+    store = QueryYieldStore(str(tmp_path / "yield.db"))
+    store.upsert("deep:bidaward", trials=155, cited=37, verified=35)
+    assert store.should_skip("deep:bidaward") is True
+
+
+def test_should_skip_proportional_keeps_strong_deep_template(tmp_path):
+    """deep:expansion's live 37% survives the 30% bar — only true laggards go."""
+    store = QueryYieldStore(str(tmp_path / "yield.db"))
+    store.upsert("deep:expansion", trials=153, cited=57, verified=57)
+    assert store.should_skip("deep:expansion") is False
+
+
+def test_should_skip_proportional_needs_full_evidence(tmp_path):
+    """A weak rate on FEW trials is not proof: 27% under PROP_MIN_TRIALS keeps
+    the template alive (same default-keep philosophy as MIN_TRIALS)."""
+    store = QueryYieldStore(str(tmp_path / "yield.db"))
+    store.upsert("deep:hiring", trials=PROP_MIN_TRIALS - 10, cited=8, verified=8)
+    assert store.should_skip("deep:hiring") is False
+
+
+def test_should_skip_proportional_segment_drop(tmp_path):
+    """The segment hierarchy keeps working with the proportional rule: a weak
+    segment row drops its own bucket even when the global row is healthy."""
+    store = QueryYieldStore(str(tmp_path / "yield.db"))
+    store.upsert("deep:bidaward", trials=155, cited=57, verified=57)  # global 37% — alive
+    store.upsert("deep:bidaward", segment="other", trials=88, cited=23, verified=22)  # 25% — dead
+    assert store.should_skip("deep:bidaward", "other") is True
+    assert store.should_skip("deep:bidaward", BUCKET_ON_VERTICAL) is False
 
 
 # ---------------------------------------------------------------------------

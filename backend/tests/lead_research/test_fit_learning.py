@@ -22,6 +22,7 @@ from app.lead_research.fit_learning import (
     KIND_INDUSTRY,
     KIND_SOURCE,
     MIN_TRIALS,
+    PROP_MIN_TRIALS,
     FitLearningStore,
     mail_domain,
     normalize_company,
@@ -150,6 +151,49 @@ def test_should_skip_keeps_when_ever_converted(tmp_path):
 def test_should_skip_unknown_is_false(tmp_path):
     s = FitLearningStore(str(tmp_path / "f.db"))
     assert s.should_skip(KIND_INDUSTRY, "never-seen") is False
+
+
+# ---------------------------------------------------------------------------
+# should_skip — proportional prune (a stray keep must not immunize chronic waste)
+# ---------------------------------------------------------------------------
+
+def test_proportional_prune_drops_chronic_low_performer(tmp_path):
+    """The live failure this fixes: media.governmentnavigator.com sat at 51
+    trials / 2 kept (4%) forever because the 0-kept rule never fires on a
+    stray keep. At PROP_MIN_TRIALS a poor rate is proven junk."""
+    s = FitLearningStore(str(tmp_path / "f.db"))
+    for _ in range(49):
+        s.record(KIND_SOURCE, "govnav.org", kept=False)
+    s.record(KIND_SOURCE, "govnav.org", kept=True)
+    s.record(KIND_SOURCE, "govnav.org", kept=False)
+    assert s.get(KIND_SOURCE, "govnav.org") == _row(51, 1)
+    assert s.should_skip_source("https://govnav.org/page") is True
+
+
+def test_proportional_prune_keeps_marginal_producer(tmp_path):
+    """7/40 = 17.5% sits above the threshold — a borderline producer stays
+    alive (goldengate.org's live 17% survives too). Default-keep stands
+    until the rate is genuinely poor."""
+    s = FitLearningStore(str(tmp_path / "f.db"))
+    for _ in range(33):
+        s.record(KIND_SOURCE, "marginal.org", kept=False)
+    for _ in range(7):
+        s.record(KIND_SOURCE, "marginal.org", kept=True)
+    assert s.get(KIND_SOURCE, "marginal.org") == _row(40, 7)
+    assert s.should_skip_source("https://marginal.org/") is False
+
+
+def test_proportional_prune_needs_full_evidence_below_threshold_trials(tmp_path):
+    """A poor rate on FEW trials is not proof: 20 trials at 10% keeps the
+    class alive until PROP_MIN_TRIALS (the same default-keep philosophy as
+    MIN_TRIALS — silence and small samples never prune)."""
+    s = FitLearningStore(str(tmp_path / "f.db"))
+    for _ in range(18):
+        s.record(KIND_INDUSTRY, "engineering firm", kept=False)
+    s.record(KIND_INDUSTRY, "engineering firm", kept=True)
+    s.record(KIND_INDUSTRY, "engineering firm", kept=False)
+    assert s.get(KIND_INDUSTRY, "engineering firm") == _row(20, 1)
+    assert s.should_skip_industry("engineering firm") is False
 
 
 def test_industry_wrappers_normalize(tmp_path):

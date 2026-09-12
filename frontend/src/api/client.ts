@@ -19,6 +19,9 @@ import type {
   AdminVisibility,
   CrmInput,
   CrmState,
+  Campaign,
+  CampaignCreateInput,
+  CampaignSend,
   EmailAccount,
   FolderCreateOut,
   FoldersOut,
@@ -513,6 +516,39 @@ export const api = {
   /** End-to-end proof of one account: a test email from it TO itself. */
   sendTestEmail(id: number): Promise<{ id: number; sent: boolean; to: string }> {
     return request(`/email-accounts/${id}/send-test`, { method: "POST" });
+  },
+
+  // Campaigns (Phase E3) — outreach runs on a connected Gmail account.
+  campaigns(): Promise<Campaign[]> {
+    return request<{ campaigns: Campaign[] }>("/campaigns").then((r) => r.campaigns);
+  },
+
+  getCampaign(id: number): Promise<Campaign & { sends: CampaignSend[] }> {
+    return request(`/campaigns/${id}`);
+  },
+
+  /** Create a scheduled campaign. Leads already emailed by an earlier
+   * campaign are excluded server-side — `excluded` says how many. */
+  createCampaign(
+    input: CampaignCreateInput,
+  ): Promise<{ campaign: Campaign; excluded: number }> {
+    return request("/campaigns", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+  },
+
+  pauseCampaign(id: number): Promise<{ id: number; status: string }> {
+    return request(`/campaigns/${id}/pause`, { method: "POST" });
+  },
+
+  resumeCampaign(id: number): Promise<{ id: number; status: string }> {
+    return request(`/campaigns/${id}/resume`, { method: "POST" });
+  },
+
+  deleteCampaign(id: number): Promise<{ id: number; deleted: boolean }> {
+    return request(`/campaigns/${id}`, { method: "DELETE" });
   },
 
   // CRM pipeline (Phase E1): stage + next action + the immutable timeline.

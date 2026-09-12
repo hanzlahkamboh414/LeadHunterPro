@@ -5,6 +5,7 @@ import Dashboard from "./screens/Dashboard";
 import Execute from "./screens/Execute";
 import Leads from "./screens/Leads";
 import Contacts from "./screens/Contacts";
+import Campaigns from "./screens/Campaigns";
 import LeadDetail from "./screens/LeadDetail";
 import History from "./screens/History";
 import Settings from "./screens/Settings";
@@ -52,6 +53,7 @@ export default function App() {
                 <Route path="/research" element={<Execute />} />
                 <Route path="/leads" element={<Leads />} />
                 <Route path="/contacts" element={<Contacts />} />
+                <Route path="/campaigns" element={<Campaigns />} />
                 <Route path="/leads/:email" element={<LeadDetail />} />
                 <Route path="/history" element={<History />} />
                 <Route path="/settings" element={<Settings />} />
@@ -91,6 +93,7 @@ export default function App() {
             <Route path="/research" element={<Execute />} />
             <Route path="/leads" element={<Leads />} />
             <Route path="/contacts" element={<Contacts />} />
+            <Route path="/campaigns" element={<Campaigns />} />
             <Route path="/leads/:email" element={<LeadDetail />} />
             <Route path="/history" element={<History />} />
             <Route path="/settings" element={<Settings />} />

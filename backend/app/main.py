@@ -37,10 +37,22 @@ async def lifespan(app: FastAPI):
     except Exception:  # noqa: BLE001 — auth failure must never block startup
         logger.exception("admin seed failed — continuing without auth")
 
+    # Campaign scheduler (Phase E3): one daemon thread that slowly drains
+    # running campaigns (pacing, daily caps, 429 backoff). Started here —
+    # NOT at import time — so pytest never spawns a real sending loop.
+    scheduler = None
+    try:
+        from app.campaigns.scheduler import get_scheduler
+        scheduler = get_scheduler()
+        scheduler.start()
+    except Exception:  # noqa: BLE001 — a scheduler failure must not kill the app
+        logger.exception("campaign scheduler failed to start — continuing")
+
     # The sweep is the startup block; yield hands control to the app until it
-    # shuts down (no shutdown work needed — an orphaned job is exactly the
-    # other process's business, the next boot sweeps it).
+    # shuts down.
     yield
+    if scheduler is not None:
+        scheduler.stop()
 
 
 app = FastAPI(

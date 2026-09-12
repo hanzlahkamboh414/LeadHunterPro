@@ -8,6 +8,7 @@ import {
   Settings,
   ShieldCheck,
   LogOut,
+  Send,
 } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
 
@@ -19,6 +20,7 @@ const NAV = [
   { to: "/research", label: "Research", icon: Search, end: false, adminOnly: false },
   { to: "/leads", label: "Companies", icon: Building2, end: false, adminOnly: false },
   { to: "/contacts", label: "Contacts", icon: Users, end: false, adminOnly: false },
+  { to: "/campaigns", label: "Campaigns", icon: Send, end: false, adminOnly: false },
   { to: "/history", label: "Run History", icon: HistoryIcon, end: false, adminOnly: false },
   { to: "/settings", label: "Settings", icon: Settings, end: false, adminOnly: false },
   { to: "/admin", label: "Admin", icon: ShieldCheck, end: false, adminOnly: true },

@@ -230,6 +230,53 @@ export interface CrmInput {
   note?: string;
 }
 
+/** One campaign (Phase E3) — an email outreach run on a connected Gmail. */
+export interface Campaign {
+  id: number;
+  account_id: number;
+  name: string;
+  subject: string;
+  body: string;
+  status: string; // scheduled | running | paused | completed
+  paused_reason: string; // user | account | rate_limited
+  resume_at: string;
+  start_at: string;
+  daily_limit: number;
+  delay_min_s: number;
+  delay_max_s: number;
+  created_at: string;
+  updated_at: string;
+  pending: number;
+  sent: number;
+  failed: number;
+  account_email: string;
+}
+
+/** One row of a campaign's send queue. */
+export interface CampaignSend {
+  id: number;
+  email: string;
+  state: string; // pending | sent | failed
+  subject: string;
+  sent_at: string;
+  attempts: number;
+  error: string;
+}
+
+/** POST /campaigns body. */
+export interface CampaignCreateInput {
+  name: string;
+  account_id: number;
+  subject: string;
+  body: string;
+  emails: string[];
+  /** ISO datetime with offset — the 9:00 AM start, in the user's timezone. */
+  start_at: string;
+  daily_limit?: number;
+  delay_min_s?: number;
+  delay_max_s?: number;
+}
+
 /** A connected sending account (Phase E2) — Gmail via Google OAuth. This is
  * the SAFE public view: OAuth tokens never leave the backend. */
 export interface EmailAccount {

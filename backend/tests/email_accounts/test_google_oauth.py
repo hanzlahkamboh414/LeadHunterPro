@@ -355,6 +355,21 @@ def test_send_test_failure_marks_revoked(tmp_path, monkeypatch):
     assert store.list_for_user(user.id)[0]["status"] == "revoked"
 
 
+def test_send_test_success_clears_revoked_flag(tmp_path, monkeypatch):
+    """A healthy send-test resets a stale 'revoked' status — the account IS
+    working, the UI must not keep saying "Needs reconnect"."""
+    client, user, store = _setup(tmp_path, monkeypatch)
+    store.connect(user.id, "mine@gmail.com", access_token="GOOD", refresh_token="r")
+    account_id = store.list_for_user(user.id)[0]["id"]
+    store.mark_status(account_id, user.id, "revoked")
+
+    monkeypatch.setattr(google, "send_gmail",
+                        lambda access_token, **kw: {"id": "m1"})
+    resp = client.post(f"/api/v1/email-accounts/{account_id}/send-test")
+    assert resp.status_code == 200
+    assert store.list_for_user(user.id)[0]["status"] == "connected"
+
+
 def test_send_test_undecryptable_tokens_409(tmp_path, monkeypatch):
     """Tokens that no longer decrypt (key rotated) = reconnect, not fake send."""
     client, user, store = _setup(tmp_path, monkeypatch)

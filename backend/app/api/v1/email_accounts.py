@@ -166,10 +166,17 @@ def send_test(account_id: int, user: User = Depends(get_current_user)) -> dict[s
     except Exception as exc:  # noqa: BLE001 — Gmail's error shape varies
         logger.warning("Test send via %s failed: %s", creds["email"], exc)
         get_email_store().mark_status(account_id, user.id, "revoked")
-        raise HTTPException(
-            status_code=502,
-            detail=f"Gmail refused the send — reconnect the account "
-                   f"({creds['email']}).",
-        ) from exc
+        detail = f"Gmail refused the send — reconnect the account ({creds['email']})."
+        body = getattr(exc, "response", None)
+        if body is not None:
+            try:
+                g = body.json().get("error", {}).get("message", "")
+                if g:
+                    detail = f"Gmail: {g[:300]}"
+            except Exception:  # noqa: BLE001 — non-JSON body
+                pass
+        raise HTTPException(status_code=502, detail=detail) from exc
+    # A success clears any earlier 'revoked' flag — the account IS healthy.
+    get_email_store().mark_status(account_id, user.id, "connected")
     logger.info("POST /email-accounts/%d/send-test -> OK via %s", account_id, creds["email"])
     return {"id": account_id, "sent": True, "to": creds["email"]}

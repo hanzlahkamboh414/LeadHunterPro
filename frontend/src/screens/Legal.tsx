@@ -33,6 +33,7 @@ const PRIVACY: Section[] = [
       "Gmail connection data — when you connect a Gmail account, Google sends us OAuth access and refresh tokens, which we store encrypted at rest. We never see or store your Google password.",
       "Lead research data — company and contact details (names, roles, public pages) that our pipeline researches from publicly available web sources for the searches you run.",
       "Outreach data — the campaigns you write, which leads were emailed, when, and from which connected account.",
+      "Email opens — campaign emails include an invisible 1-pixel tracking image that records when a recipient opened the email (first open time and total count). Nothing else about the recipient is collected, and the image is served by us, not a third party.",
       "Reply metadata — to detect who answered you, we read only the From and Subject headers of your inbox. Email bodies are never read, and nothing in your inbox is ever modified or deleted.",
       "Activity logs — sign-ins and searches, for security and administration.",
     ],

@@ -50,6 +50,7 @@ from app.campaigns.personalize import (
 )
 from app.campaigns.store import CampaignStore
 from app.campaigns.templates import context_for, render
+from app.campaigns.tracking import pixel_url
 from app.email_accounts import google
 from app.email_accounts.store import EmailAccountStore
 from app.lead_research.models import CRM_STATUSES
@@ -423,6 +424,7 @@ class CampaignScheduler:
             google.send_gmail(
                 access_token, to=send["email"], subject=subject, body=body,
                 from_email=creds["email"],
+                tracking_url=pixel_url(send["id"]),
             )
         except Exception as exc:  # noqa: BLE001 — mapped below by cause
             self._on_send_error(c, send, exc, stats, account_id=account_id,

@@ -285,6 +285,19 @@ export interface CampaignSend {
   error: string;
   /** Which account sent this row (0 = pending / pre-E5). */
   account_id: number;
+  /** First open time from the tracking pixel ('' = never opened). */
+  opened_at: string;
+  /** Total opens recorded (image loads — a signal, not a proof). */
+  opened_count: number;
+  /** When this lead's reply arrived ('' = no reply yet). */
+  replied_at: string;
+}
+
+/** PUT /campaigns/{id} body — edit the pitch of a started campaign. */
+export interface CampaignUpdateInput {
+  name: string;
+  subject: string;
+  body: string;
 }
 
 /** A follow-up rung in a POST /campaigns body (Phase E4). */

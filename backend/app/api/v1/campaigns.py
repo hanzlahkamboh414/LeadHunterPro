@@ -12,12 +12,14 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import Response
 
 from app.auth.dependencies import get_current_user
 from app.auth.models import User
 from app.campaigns.scheduler import ensure_access_token, parse_ts
 from app.campaigns.store import get_campaign_store
 from app.campaigns.templates import render, sample_context
+from app.campaigns.tracking import PIXEL_GIF, parse_token
 from app.email_accounts import google
 from app.email_accounts.store import get_email_store
 from app.schemas.campaigns import (
@@ -27,6 +29,7 @@ from app.schemas.campaigns import (
     CampaignOut,
     CampaignTestSendIn,
     CampaignTestSendOut,
+    CampaignUpdateIn,
     CampaignsOut,
 )
 
@@ -186,20 +189,71 @@ def list_campaigns(user: User = Depends(get_current_user)) -> dict:
     return {"campaigns": out}
 
 
-@router.get("/{campaign_id}", response_model=CampaignDetailOut)
-def get_campaign(campaign_id: int,
-                 user: User = Depends(get_current_user)) -> dict:
-    store = get_campaign_store()
+@router.get("/track/{token}")
+def track_open(token: str) -> Response:
+    """The open-tracking pixel: an invisible 1x1 GIF named by an
+    HMAC-signed send id. Deliberately UNAUTHENTICATED — an <img> tag
+    carries no JWT; the signature in the token is the auth. A random or
+    forged URL gets the same gif and marks nothing (no probing oracle)."""
+    if token.endswith(".png"):
+        token = token[:-4]
+    send_id = parse_token(token)
+    if send_id is not None:
+        get_campaign_store().mark_opened(
+            send_id, opened_at=datetime.now(timezone.utc).isoformat())
+    return Response(
+        content=PIXEL_GIF, media_type="image/gif",
+        headers={"Cache-Control": "no-store, max-age=0"},
+    )
+
+
+def _campaign_detail(store, campaign_id: int, user: User,
+                     by_id: dict[int, str]) -> dict | None:
+    """The GET /campaigns/{id} payload, shared with PUT (edit returns the
+    refreshed detail so the UI updates in one round-trip)."""
     c = store.get(campaign_id, user.id)
     if c is None:
-        raise HTTPException(status_code=404, detail="no such campaign")
-    by_id = {a["id"]: a["email"]
-             for a in get_email_store().list_for_user(user.id)}
+        return None
     sends = store.sends(campaign_id, user.id) or []
     c["account_email"] = by_id.get(c["account_id"], "")
     c["account_emails"] = [by_id[a] for a in c["account_ids"] if a in by_id]
     c["sends"] = sends
     c["followups"] = store.followups(campaign_id)
+    return c
+
+
+@router.get("/{campaign_id}", response_model=CampaignDetailOut)
+def get_campaign(campaign_id: int,
+                 user: User = Depends(get_current_user)) -> dict:
+    by_id = {a["id"]: a["email"]
+             for a in get_email_store().list_for_user(user.id)}
+    c = _campaign_detail(get_campaign_store(), campaign_id, user, by_id)
+    if c is None:
+        raise HTTPException(status_code=404, detail="no such campaign")
+    return c
+
+
+@router.put("/{campaign_id}", response_model=CampaignDetailOut)
+def update_campaign(
+    campaign_id: int, body: CampaignUpdateIn,
+    user: User = Depends(get_current_user),
+) -> dict:
+    """Edit the pitch (name/subject/body) of a campaign that already
+    started. Every send that has NOT gone out yet uses the new text;
+    already-sent rows keep the subject they were actually sent with."""
+    store = get_campaign_store()
+    if store.get(campaign_id, user.id) is None:
+        raise HTTPException(status_code=404, detail="no such campaign")
+    if not store.update_campaign(
+            campaign_id, user.id, name=body.name.strip(),
+            subject=body.subject, body=body.body):
+        raise HTTPException(status_code=404, detail="no such campaign")
+    logger.info("campaign %d pitch edited by %s", campaign_id, user.username)
+    by_id = {a["id"]: a["email"]
+             for a in get_email_store().list_for_user(user.id)}
+    c = _campaign_detail(store, campaign_id, user, by_id)
+    if c is None:
+        raise HTTPException(status_code=404, detail="no such campaign")
     return c
 
 

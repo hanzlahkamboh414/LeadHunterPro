@@ -186,6 +186,13 @@ class CampaignStore:
             if "account_id" not in cols:
                 conn.execute("ALTER TABLE campaign_sends "
                              "ADD COLUMN account_id INTEGER NOT NULL DEFAULT 0")
+            # Open tracking (E5 polish): first open time + total count.
+            if "opened_at" not in cols:
+                conn.execute("ALTER TABLE campaign_sends "
+                             "ADD COLUMN opened_at TEXT NOT NULL DEFAULT ''")
+            if "opened_count" not in cols:
+                conn.execute("ALTER TABLE campaign_sends "
+                             "ADD COLUMN opened_count INTEGER NOT NULL DEFAULT 0")
             # Every campaign's primary account becomes a campaign_accounts row
             # (idempotent) — pre-E5 campaigns keep working unchanged.
             conn.execute(
@@ -304,17 +311,24 @@ class CampaignStore:
             conn.close()
             return None
         rows = conn.execute(
-            "SELECT id, email, step, state, subject, sent_at, not_before, "
-            "attempts, error, account_id FROM campaign_sends "
-            "WHERE campaign_id = ? "
-            "ORDER BY CASE state WHEN 'pending' THEN 0 ELSE 1 END, id LIMIT ?",
+            "SELECT s.id, s.email, s.step, s.state, s.subject, s.sent_at, "
+            "s.not_before, s.attempts, s.error, s.account_id, s.opened_at, "
+            "s.opened_count, cr.received_at "
+            "FROM campaign_sends s "
+            "LEFT JOIN campaign_replies cr "
+            "ON cr.campaign_id = s.campaign_id AND cr.email = s.email "
+            "WHERE s.campaign_id = ? "
+            "ORDER BY CASE s.state WHEN 'pending' THEN 0 ELSE 1 END, s.id "
+            "LIMIT ?",
             (campaign_id, int(limit)),
         ).fetchall()
         conn.close()
         return [
             {"id": r[0], "email": r[1], "step": r[2], "state": r[3],
              "subject": r[4], "sent_at": r[5] or "", "not_before": r[6] or "",
-             "attempts": r[7], "error": r[8] or "", "account_id": r[9] or 0}
+             "attempts": r[7], "error": r[8] or "", "account_id": r[9] or 0,
+             "opened_at": r[10] or "", "opened_count": r[11] or 0,
+             "replied_at": r[12] or ""}
             for r in rows
         ]
 
@@ -628,6 +642,37 @@ class CampaignStore:
         conn.close()
 
     # -- Status transitions ------------------------------------------------
+
+    def mark_opened(self, send_id: int, *, opened_at: str) -> bool:
+        """The tracking pixel fired: count this open, keep the FIRST open
+        time. Only a SENT row can open — a forged token naming a pending
+        or failed row marks nothing."""
+        conn = self._conn()
+        cur = conn.execute(
+            "UPDATE campaign_sends SET "
+            "opened_count = opened_count + 1, "
+            "opened_at = CASE WHEN opened_at = '' THEN ? ELSE opened_at END "
+            "WHERE id = ? AND state = 'sent'",
+            (opened_at, send_id),
+        )
+        conn.commit()
+        conn.close()
+        return cur.rowcount > 0
+
+    def update_campaign(self, campaign_id: int, user_id: str, *,
+                        name: str, subject: str, body: str) -> bool:
+        """Edit the pitch of an existing campaign (name/subject/body).
+        Applies to every send that has NOT gone out yet — already-sent
+        rows keep the subject they were sent with (their own record)."""
+        conn = self._conn()
+        cur = conn.execute(
+            "UPDATE campaigns SET name = ?, subject = ?, body = ?, "
+            "updated_at = ? WHERE id = ? AND user_id = ?",
+            (name, subject, body, _now(), campaign_id, user_id),
+        )
+        conn.commit()
+        conn.close()
+        return cur.rowcount > 0
 
     def set_status(self, campaign_id: int, *, status: str,
                    paused_reason: str = "", resume_at: str = "") -> bool:

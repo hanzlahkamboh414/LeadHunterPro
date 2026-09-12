@@ -21,7 +21,9 @@ import type {
   CrmState,
   Campaign,
   CampaignCreateInput,
+  CampaignFollowup,
   CampaignSend,
+  CampaignUpdateInput,
   EmailAccount,
   FolderCreateOut,
   FoldersOut,
@@ -560,6 +562,20 @@ export const api = {
 
   resumeCampaign(id: number): Promise<{ id: number; status: string }> {
     return request(`/campaigns/${id}/resume`, { method: "POST" });
+  },
+
+  /** Edit the pitch (name/subject/body) of a campaign that already
+   * started — pending sends use the new text, sent ones keep their
+   * record. Returns the refreshed detail. */
+  updateCampaign(
+    id: number,
+    input: CampaignUpdateInput,
+  ): Promise<Campaign & { sends: CampaignSend[]; followups: CampaignFollowup[] }> {
+    return request(`/campaigns/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
   },
 
   deleteCampaign(id: number): Promise<{ id: number; deleted: boolean }> {

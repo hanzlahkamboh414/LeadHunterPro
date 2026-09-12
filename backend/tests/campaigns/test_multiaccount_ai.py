@@ -90,7 +90,7 @@ def _setup(tmp_path, monkeypatch, *, accounts: int = 2, ai_ask=None,
 
 
 def _make_campaign(ctx, *, emails, account_ids=None, ai_personalize=False,
-                   daily_limit=30):
+                   daily_limit=30, followups=None):
     """A RUNNING campaign (past start, zero delay -> every pass can send)."""
     for e in emails:
         ctx["leads"].save(_dossier(e))
@@ -103,6 +103,7 @@ def _make_campaign(ctx, *, emails, account_ids=None, ai_personalize=False,
         daily_limit=daily_limit, delay_min_s=0, delay_max_s=0,
         account_ids=(account_ids or ctx["account_ids"])[1:],
         ai_personalize=ai_personalize,
+        followups=followups,
     )
 
 

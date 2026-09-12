@@ -50,6 +50,12 @@ class CampaignSendOut(BaseModel):
     error: str
     """Which account sent this row (0 = pending / pre-E5)."""
     account_id: int = 0
+    """First open time from the tracking pixel ('' = never opened)."""
+    opened_at: str = ""
+    """Total opens recorded (image loads — a signal, not a proof)."""
+    opened_count: int = 0
+    """When this lead's reply arrived ('' = no reply yet)."""
+    replied_at: str = ""
 
 
 class FollowupOut(BaseModel):
@@ -104,6 +110,16 @@ class CampaignTestSendOut(BaseModel):
     to: str
     from_email: str
     subject: str
+
+
+class CampaignUpdateIn(BaseModel):
+    """Edit the pitch of an existing campaign — name, subject, body.
+    Applies to sends that have not gone out yet; already-sent rows keep
+    their own record. The follow-up ladder is not editable (its rungs
+    may already be queued per lead)."""
+    name: str = Field(min_length=1, max_length=120)
+    subject: str = Field(min_length=1, max_length=500)
+    body: str = Field(min_length=1, max_length=20000)
 
 
 class CampaignsOut(BaseModel):

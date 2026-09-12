@@ -23,6 +23,7 @@ import base64
 import binascii
 import hashlib
 import hmac
+import html
 import json
 import time
 from email.message import EmailMessage
@@ -153,18 +154,33 @@ def decode_id_token(id_token: str) -> dict[str, Any]:
 
 
 def send_gmail(access_token: str, *, to: str, subject: str, body: str,
-               from_email: str) -> dict[str, Any]:
+               from_email: str,
+               tracking_url: str = "") -> dict[str, Any]:
     """Send ONE plain-text email via the Gmail API; returns the API response.
 
     The raw message is RFC 2822 MIME base64url — Gmail's send contract. A
     non-2xx raises :class:`requests.HTTPError`; the caller maps 401/403 to a
     revoked/expired account and 429 to the Phase-E3 backoff.
+
+    ``tracking_url`` (campaign sends only) switches the message to
+    multipart/alternative: the same plain-text body plus an HTML part
+    ending in the 1x1 open-tracking image. Test sends pass no URL — they
+    create nothing, so there is nothing to track.
     """
     msg = EmailMessage()
     msg["To"] = to
     msg["From"] = from_email
     msg["Subject"] = subject
     msg.set_content(body)
+    if tracking_url:
+        html_body = (
+            html.escape(body)
+            .replace("\r\n", "\n")
+            .replace("\n\n", "<br><br>")
+            .replace("\n", "<br>")
+            + f'\n<img src="{tracking_url}" width="1" height="1" alt="">'
+        )
+        msg.add_alternative(html_body, subtype="html")
     raw = _b64url(msg.as_bytes())
     resp = requests.post(
         GMAIL_SEND_URL,

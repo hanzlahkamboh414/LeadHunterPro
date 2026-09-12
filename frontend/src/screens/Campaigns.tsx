@@ -11,10 +11,18 @@ import {
   CheckCircle2,
   AlertTriangle,
   Info,
+  Eye,
+  Pencil,
 } from "lucide-react";
 import { ApiError, api } from "../api/client";
 import { PageHeader } from "../components/PageHeader";
-import type { EmailAccount, LeadSummary } from "../types";
+import type {
+  Campaign,
+  CampaignSend,
+  CampaignUpdateInput,
+  EmailAccount,
+  LeadSummary,
+} from "../types";
 import type { FollowupInput } from "../types";
 
 /** Template variables — the ONLY facts that can appear in an email (all from
@@ -41,6 +49,29 @@ const PAUSE_REASONS: Record<string, string> = {
   user: "Paused by you",
   rate_limited: "Rate limited by Gmail — auto-resumes after cooldown",
   account: "Gmail account disconnected — resumes when reconnected",
+};
+
+const INPUT =
+  "w-full bg-white/[0.04] border border-white/5 rounded-lg px-3.5 py-2.5 text-[13px] text-slate-300 placeholder:text-slate-500 outline-none focus:ring-2 focus:ring-indigo-500/40";
+
+/** One send row's status chip. */
+function sendStatus(s: CampaignSend): { label: string; cls: string } {
+  if (s.replied_at)
+    return { label: "Replied", cls: "bg-amber-500/15 text-amber-300" };
+  if (s.state === "sent")
+    return { label: "Sent", cls: "bg-emerald-500/15 text-emerald-300" };
+  if (s.state === "pending")
+    return { label: "Queued", cls: "bg-sky-500/15 text-sky-300" };
+  if (s.state === "failed")
+    return { label: "Failed", cls: "bg-rose-500/15 text-rose-300" };
+  return {
+    label: s.error === "lead replied" ? "Stopped (replied)" : "Cancelled",
+    cls: "bg-slate-500/15 text-slate-400",
+  };
+}
+
+function stepLabel(step: number): string {
+  return step === 0 ? "Email" : `Follow-up ${step}`;
 };
 
 function fmtLocal(iso: string): string {
@@ -73,6 +104,14 @@ export default function Campaigns() {
     queryKey: ["campaigns"],
     queryFn: () => api.campaigns(),
     refetchInterval: 15000,
+  });
+
+  // Sending-account addresses for the per-send "Via" column.
+  const accountsById = useQuery({
+    queryKey: ["email-accounts"],
+    queryFn: () => api.emailAccounts(),
+    select: (list: EmailAccount[]) =>
+      Object.fromEntries(list.map((a) => [a.id, a.email])) as Record<number, string>,
   });
 
   const pause = useMutation({
@@ -160,83 +199,317 @@ export default function Campaigns() {
       )}
 
       <div className="mt-5 space-y-3">
-        {(campaigns.data || []).map((c) => {
-          const total = c.pending + c.sent + c.failed;
-          const pct = total > 0 ? Math.round((c.sent / total) * 100) : 0;
-          return (
-            <div key={c.id} className="rounded-xl border border-white/5 bg-white/[0.02] p-5">
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2.5">
-                    <h2 className="text-[15px] font-semibold text-white truncate">{c.name}</h2>
-                    <span
-                      className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold ${STATUS_STYLES[c.status] || STATUS_STYLES.completed}`}
-                    >
-                      {c.status === "paused" && c.paused_reason
-                        ? PAUSE_REASONS[c.paused_reason] || "Paused"
-                        : c.status}
-                    </span>
-                  </div>
-                  <p className="mt-1 text-[12.5px] text-slate-500 truncate">
-                    from {c.account_email || `account #${c.account_id}`}
-                    {(c.account_emails?.length || 0) > 1 &&
-                      ` +${c.account_emails.length - 1} more`}
-                    {c.ai_personalize && " · AI opening lines"}
-                    {" · starts "}
-                    {fmtLocal(c.start_at)}
-                  </p>
-                </div>
-                <div className="flex items-center gap-2 shrink-0">
-                  {(c.status === "running" || c.status === "scheduled") && (
-                    <button
-                      onClick={() => pause.mutate(c.id)}
-                      disabled={pause.isPending}
-                      className="flex items-center gap-1.5 rounded-lg border border-white/5 px-3 py-1.5 text-[12.5px] text-slate-300 hover:bg-white/[0.04]"
-                    >
-                      <Pause className="w-3.5 h-3.5" />
-                      Pause
-                    </button>
-                  )}
-                  {c.status === "paused" && (
-                    <button
-                      onClick={() => resume.mutate(c.id)}
-                      disabled={resume.isPending}
-                      className="flex items-center gap-1.5 rounded-lg border border-white/5 px-3 py-1.5 text-[12.5px] text-emerald-300 hover:bg-emerald-500/10"
-                    >
-                      <Play className="w-3.5 h-3.5" />
-                      Resume
-                    </button>
-                  )}
-                  <button
-                    onClick={() => remove.mutate(c.id)}
-                    disabled={remove.isPending}
-                    className="flex items-center gap-1.5 rounded-lg border border-white/5 px-3 py-1.5 text-[12.5px] text-rose-400 hover:bg-rose-500/10"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              </div>
+        {(campaigns.data || []).map((c) => (
+          <CampaignCard
+            key={c.id}
+            c={c}
+            accountsById={accountsById.data || {}}
+            onPause={() => pause.mutate(c.id)}
+            onResume={() => resume.mutate(c.id)}
+            onRemove={() => remove.mutate(c.id)}
+            actionsPending={pause.isPending || resume.isPending || remove.isPending}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
 
-              <div className="mt-4">
-                <div className="flex items-center justify-between text-[12px] text-slate-500">
-                  <span>
-                    {c.sent} sent · {c.pending} pending
-                    {c.replied > 0 && ` · ${c.replied} replied`}
-                    {c.failed > 0 && ` · ${c.failed} failed`}
-                    {c.skipped > 0 && ` · ${c.skipped} skipped (replied)`}
-                  </span>
-                  <span>max {c.daily_limit}/day</span>
-                </div>
-                <div className="mt-1.5 h-1.5 rounded-full bg-white/5 overflow-hidden">
-                  <div
-                    className="h-full rounded-full bg-emerald-500 transition-all"
-                    style={{ width: `${pct}%` }}
-                  />
-                </div>
-              </div>
+// ---------------------------------------------------------------------------
+// One campaign card — progress + the Sends log + the Edit-pitch form
+// ---------------------------------------------------------------------------
+
+function CampaignCard({
+  c,
+  accountsById,
+  onPause,
+  onResume,
+  onRemove,
+  actionsPending,
+}: {
+  c: Campaign;
+  accountsById: Record<number, string>;
+  onPause: () => void;
+  onResume: () => void;
+  onRemove: () => void;
+  actionsPending: boolean;
+}) {
+  const [showSends, setShowSends] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const queryClient = useQueryClient();
+
+  const total = c.pending + c.sent + c.failed;
+  const pct = total > 0 ? Math.round((c.sent / total) * 100) : 0;
+
+  // The send log — every lead, its step, when it went out, opened, replied.
+  const detail = useQuery({
+    queryKey: ["campaign", c.id],
+    queryFn: () => api.getCampaign(c.id),
+    enabled: showSends,
+    refetchInterval: 15000,
+  });
+  const sends: CampaignSend[] = detail.data?.sends || [];
+
+  const edit = useMutation({
+    mutationFn: (input: CampaignUpdateInput) => api.updateCampaign(c.id, input),
+    onSuccess: () => {
+      setEditing(false);
+      queryClient.invalidateQueries({ queryKey: ["campaigns"] });
+      queryClient.invalidateQueries({ queryKey: ["campaign", c.id] });
+    },
+  });
+
+  return (
+    <div className="rounded-xl border border-white/5 bg-white/[0.02] p-5">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2.5">
+            <h2 className="text-[15px] font-semibold text-white truncate">{c.name}</h2>
+            <span
+              className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold ${STATUS_STYLES[c.status] || STATUS_STYLES.completed}`}
+            >
+              {c.status === "paused" && c.paused_reason
+                ? PAUSE_REASONS[c.paused_reason] || "Paused"
+                : c.status}
+            </span>
+          </div>
+          <p className="mt-1 text-[12.5px] text-slate-500 truncate">
+            from {c.account_email || `account #${c.account_id}`}
+            {(c.account_emails?.length || 0) > 1 &&
+              ` +${c.account_emails.length - 1} more`}
+            {c.ai_personalize && " · AI opening lines"}
+            {" · starts "}
+            {fmtLocal(c.start_at)}
+          </p>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            onClick={() => {
+              setShowSends((v) => !v);
+              setEditing(false);
+            }}
+            className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[12.5px] hover:bg-white/[0.04] ${
+              showSends
+                ? "border-indigo-500/30 text-indigo-300"
+                : "border-white/5 text-slate-300"
+            }`}
+          >
+            <Eye className="w-3.5 h-3.5" />
+            Sends
+          </button>
+          {c.status !== "completed" && (
+            <button
+              onClick={() => {
+                setEditing((v) => !v);
+                setShowSends(false);
+              }}
+              className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[12.5px] hover:bg-white/[0.04] ${
+                editing
+                  ? "border-indigo-500/30 text-indigo-300"
+                  : "border-white/5 text-slate-300"
+              }`}
+            >
+              <Pencil className="w-3.5 h-3.5" />
+              Edit pitch
+            </button>
+          )}
+          {(c.status === "running" || c.status === "scheduled") && (
+            <button
+              onClick={onPause}
+              disabled={actionsPending}
+              className="flex items-center gap-1.5 rounded-lg border border-white/5 px-3 py-1.5 text-[12.5px] text-slate-300 hover:bg-white/[0.04]"
+            >
+              <Pause className="w-3.5 h-3.5" />
+              Pause
+            </button>
+          )}
+          {c.status === "paused" && (
+            <button
+              onClick={onResume}
+              disabled={actionsPending}
+              className="flex items-center gap-1.5 rounded-lg border border-white/5 px-3 py-1.5 text-[12.5px] text-emerald-300 hover:bg-emerald-500/10"
+            >
+              <Play className="w-3.5 h-3.5" />
+              Resume
+            </button>
+          )}
+          <button
+            onClick={onRemove}
+            disabled={actionsPending}
+            className="flex items-center gap-1.5 rounded-lg border border-white/5 px-3 py-1.5 text-[12.5px] text-rose-400 hover:bg-rose-500/10"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      </div>
+
+      <div className="mt-4">
+        <div className="flex items-center justify-between text-[12px] text-slate-500">
+          <span>
+            {c.sent} sent · {c.pending} pending
+            {c.replied > 0 && ` · ${c.replied} replied`}
+            {c.failed > 0 && ` · ${c.failed} failed`}
+            {c.skipped > 0 && ` · ${c.skipped} skipped (replied)`}
+          </span>
+          <span>max {c.daily_limit}/day</span>
+        </div>
+        <div className="mt-1.5 h-1.5 rounded-full bg-white/5 overflow-hidden">
+          <div
+            className="h-full rounded-full bg-emerald-500 transition-all"
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+      </div>
+
+      {editing && <EditPitchForm c={c} onSave={(input) => edit.mutate(input)} saving={edit.isPending} />}
+
+      {showSends && (
+        <div className="mt-4">
+          {detail.isLoading ? (
+            <p className="text-[12.5px] text-slate-500">Loading sends…</p>
+          ) : detail.isError ? (
+            <p className="text-[12.5px] text-rose-400">Could not load sends.</p>
+          ) : (
+            <div className="overflow-x-auto rounded-lg border border-white/5">
+              <table className="w-full text-[12px]">
+                <thead>
+                  <tr className="text-left text-slate-500 border-b border-white/5">
+                    <th className="px-3 py-2 font-medium">Lead</th>
+                    <th className="px-3 py-2 font-medium">Step</th>
+                    <th className="px-3 py-2 font-medium">Status</th>
+                    <th className="px-3 py-2 font-medium">Sent</th>
+                    <th className="px-3 py-2 font-medium">Follow-up due</th>
+                    <th className="px-3 py-2 font-medium">Opened</th>
+                    <th className="px-3 py-2 font-medium">Replied</th>
+                    <th className="px-3 py-2 font-medium">Via</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sends.map((s) => {
+                    const st = sendStatus(s);
+                    return (
+                      <tr key={s.id} className="border-b border-white/5 last:border-0">
+                        <td className="px-3 py-2 text-slate-300 whitespace-nowrap">{s.email}</td>
+                        <td className="px-3 py-2 text-slate-400 whitespace-nowrap">{stepLabel(s.step)}</td>
+                        <td className="px-3 py-2 whitespace-nowrap">
+                          <span
+                            className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${st.cls}`}
+                          >
+                            {st.label}
+                          </span>
+                        </td>
+                        <td className="px-3 py-2 text-slate-400 whitespace-nowrap">
+                          {fmtLocal(s.sent_at) || "—"}
+                        </td>
+                        <td className="px-3 py-2 text-slate-400 whitespace-nowrap">
+                          {s.state === "pending" && s.not_before
+                            ? fmtLocal(s.not_before)
+                            : "—"}
+                        </td>
+                        <td className="px-3 py-2 whitespace-nowrap">
+                          {s.opened_at ? (
+                            <span className="text-emerald-300">
+                              {fmtLocal(s.opened_at)}
+                              {s.opened_count > 1 && ` (${s.opened_count}x)`}
+                            </span>
+                          ) : s.state === "sent" ? (
+                            <span className="text-slate-500">Not yet</span>
+                          ) : (
+                            <span className="text-slate-600">—</span>
+                          )}
+                        </td>
+                        <td className="px-3 py-2 whitespace-nowrap">
+                          {s.replied_at ? (
+                            <span className="text-amber-300">{fmtLocal(s.replied_at)}</span>
+                          ) : (
+                            <span className="text-slate-600">—</span>
+                          )}
+                        </td>
+                        <td className="px-3 py-2 text-slate-400 whitespace-nowrap">
+                          {s.account_id
+                            ? accountsById[s.account_id] || `account #${s.account_id}`
+                            : "—"}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {sends.length === 0 && (
+                    <tr>
+                      <td colSpan={8} className="px-3 py-3 text-slate-500">
+                        No sends queued yet.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
             </div>
-          );
-        })}
+          )}
+          <p className="mt-2 text-[11.5px] text-slate-500">
+            "Opened" comes from the tracking image in the email — a signal, not
+            a proof (some inboxes block or pre-fetch images). "Not yet" means
+            no open recorded so far.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Edit the pitch of a started campaign (applies to not-yet-sent emails)
+// ---------------------------------------------------------------------------
+
+function EditPitchForm({
+  c,
+  onSave,
+  saving,
+}: {
+  c: Campaign;
+  onSave: (input: CampaignUpdateInput) => void;
+  saving: boolean;
+}) {
+  const [name, setName] = useState(c.name);
+  const [subject, setSubject] = useState(c.subject);
+  const [body, setBody] = useState(c.body);
+
+  const canSave =
+    name.trim() !== "" && subject.trim() !== "" && body.trim() !== "" && !saving;
+
+  return (
+    <div className="mt-4 rounded-lg border border-indigo-500/20 bg-white/[0.02] p-3.5">
+      <p className="text-[12px] font-semibold text-slate-300">Edit pitch</p>
+      <p className="mt-1 text-[11.5px] text-slate-500">
+        Applies to emails that have not gone out yet. Emails already sent keep
+        their own record. The follow-up ladder stays as it is.
+      </p>
+      <div className="mt-2.5 space-y-2">
+        <input
+          className={INPUT}
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="Campaign name"
+        />
+        <input
+          className={INPUT}
+          value={subject}
+          onChange={(e) => setSubject(e.target.value)}
+          placeholder="Subject"
+        />
+        <textarea
+          className={`${INPUT} h-32 resize-y`}
+          value={body}
+          onChange={(e) => setBody(e.target.value)}
+          placeholder="Email script"
+        />
+        <div className="flex justify-end gap-2">
+          <button
+            onClick={() => onSave({ name: name.trim(), subject, body })}
+            disabled={!canSave}
+            className="rounded-lg bg-indigo-600 px-4 py-2 text-[12.5px] font-semibold text-white hover:bg-indigo-500 disabled:opacity-50"
+          >
+            {saving ? "Saving…" : "Save pitch"}
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -423,8 +696,7 @@ function CampaignBuilder({
   const emailOk = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(testEmail.trim());
   const canTest = !!accountId && subject.trim() !== "" && body.trim() !== "" && emailOk;
 
-  const input =
-    "w-full bg-white/[0.04] border border-white/5 rounded-lg px-3.5 py-2.5 text-[13px] text-slate-300 placeholder:text-slate-500 outline-none focus:ring-2 focus:ring-indigo-500/40";
+  const input = INPUT;
 
   return (
     <div className="mt-5 rounded-xl border border-indigo-500/20 bg-white/[0.02] p-5">

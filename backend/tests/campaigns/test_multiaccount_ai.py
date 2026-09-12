@@ -97,7 +97,7 @@ def _make_campaign(ctx, *, emails, account_ids=None, ai_personalize=False,
     return ctx["store"].create(
         ctx["user"].id, account_id=(account_ids or ctx["account_ids"])[0],
         name="E5", subject="Estimating for {{company_name}}",
-        body="Hi {{first_name}}, saw {{company_name}}.\n\n— Us",
+        body="Hi {{first_name}}, saw {{company_name}}.",
         emails=list(emails),
         start_at=_iso(NOW - timedelta(minutes=1)),
         daily_limit=daily_limit, delay_min_s=0, delay_max_s=0,
@@ -240,6 +240,66 @@ def test_personalize_clean_hook_rules():
     assert personalize.clean_hook("Hi {{first_name}}!") == ""  # tokens leak
 
 
+def test_personalize_clean_hook_never_leaves_dashes():
+    """Em/en-dashes are the loudest AI tell — they never survive, even when
+    the model uses them despite the prompt."""
+    assert personalize.clean_hook("Saw Acme — broke ground") == \
+        "Saw Acme, broke ground"
+    assert personalize.clean_hook("Saw Acme —broke ground") == \
+        "Saw Acme, broke ground"
+    assert personalize.clean_hook("a – b") == "a, b"
+    assert personalize.clean_hook("x—y") == "x, y"
+    # A comma run from the swap collapses to one comma.
+    assert personalize.clean_hook("Acme, — Dallas — broke ground") == \
+        "Acme, Dallas, broke ground"
+    # A dash-only hook sanitizes to nothing honest -> plain send.
+    assert personalize.clean_hook("—") == ""
+
+
+def test_personalize_prompt_bans_dashes_and_greeting():
+    prompt = personalize.build_prompt(_dossier_with_evidence())
+    assert "—" in prompt           # the rule names the character itself
+    assert "no greeting" in prompt.lower()
+
+
+def test_personalize_greeting_fallbacks():
+    assert personalize.greeting_for(_dossier("jane@acme.com")) == "Hi Jane,"
+    # No person found -> greet the company.
+    d = _dossier("info@acme.com", person="")
+    assert personalize.greeting_for(d) == "Hi Acme Corp,"
+    # Nobody and nothing to greet -> no greeting line at all.
+    d = _dossier("x@y.com", company="", person="")
+    assert personalize.greeting_for(d) == ""
+
+
+def test_personalize_strip_leading_greeting():
+    strip = personalize.strip_leading_greeting
+    assert strip("Hi Jane, saw Acme.") == "Saw Acme."
+    assert strip("Hello Jane Smith,\n\nwe help GCs.") == "We help GCs."
+    assert strip("Dear Mr. Smith, quick note") == "Quick note"
+    # No greeting -> untouched.
+    assert strip("We help GCs estimate.") == "We help GCs estimate."
+    # Something that merely starts with 'Hi' but isn't a greeting -> kept.
+    assert strip("Hiring is busy, we know.") == "Hiring is busy, we know."
+
+
+def test_personalize_assemble_opening():
+    d = _dossier("jane@acme.com")
+    out = personalize.assemble_opening(
+        d, "Saw Acme broke ground on the Riverside job.",
+        "Hi Jane, we help GCs estimate.")
+    assert out == ("Hi Jane,\n\n"
+                   "Saw Acme broke ground on the Riverside job.\n\n"
+                   "We help GCs estimate.")
+    # No hook (NONE / AI down) -> the uniform greeting + script remain.
+    assert personalize.assemble_opening(d, "", "Hi Jane, we help GCs.") == \
+        "Hi Jane,\n\nWe help GCs."
+    # No name at all -> hook + script stack in order, nothing invented.
+    d = _dossier("x@y.com", company="", person="")
+    assert personalize.assemble_opening(d, "Nice hook.", "Plain script.") == \
+        "Nice hook.\n\nPlain script."
+
+
 def test_personalize_generate_hook():
     calls = []
 
@@ -368,8 +428,11 @@ def test_scheduler_ai_hook_prepended_and_cached(tmp_path, monkeypatch):
     c = _make_campaign(ctx, emails=["jane@acme.com"], ai_personalize=True)
     ctx["sched"].run_once()
     assert len(sent) == 1
-    assert sent[0]["body"].startswith(
-        "Saw Acme broke ground on the Riverside job.\n\nHi Jane,")
+    # Greeting first, then the AI line, then the script (its own "Hi" gone,
+    # remainder capitalized) — one professional email, greeted exactly once.
+    assert sent[0]["body"] == ("Hi Jane,\n\n"
+                               "Saw Acme broke ground on the Riverside job."
+                               "\n\nSaw Acme Corp.")
     # Cached — a re-run asks the AI nothing new.
     assert ctx["store"].get_hook(c["id"], "jane@acme.com") == \
         "Saw Acme broke ground on the Riverside job."
@@ -384,9 +447,11 @@ def test_scheduler_ai_failure_sends_plain(tmp_path, monkeypatch):
     sent = _capture_send(monkeypatch)
     _make_campaign(ctx, emails=["jane@acme.com"], ai_personalize=True)
     stats = ctx["sched"].run_once()
-    # Best-effort: the plain template went out, campaign healthy.
+    # Best-effort: the uniform greeting + plain script went out, campaign
+    # healthy, and the failure was NOT cached as an honest empty hook.
     assert stats["sent"] == 1
-    assert sent[0]["body"] == "Hi Jane, saw Acme Corp.\n\n— Us"
+    assert sent[0]["body"] == "Hi Jane,\n\nSaw Acme Corp."
+    assert ctx["store"].get_hook(1, "jane@acme.com") is None
 
 
 def test_scheduler_ai_none_is_honest_and_cached(tmp_path, monkeypatch):
@@ -400,7 +465,8 @@ def test_scheduler_ai_none_is_honest_and_cached(tmp_path, monkeypatch):
     sent = _capture_send(monkeypatch)
     c = _make_campaign(ctx, emails=["jane@acme.com"], ai_personalize=True)
     ctx["sched"].run_once()
-    assert sent[0]["body"] == "Hi Jane, saw Acme Corp.\n\n— Us"
+    # NONE -> no hook, but the uniform greeting + script still go out.
+    assert sent[0]["body"] == "Hi Jane,\n\nSaw Acme Corp."
     # '' cached = generated, nothing honest to say — never re-asked.
     assert ctx["store"].get_hook(c["id"], "jane@acme.com") == ""
     assert len(calls) == 1
@@ -411,7 +477,8 @@ def test_scheduler_ai_off_sends_plain(tmp_path, monkeypatch):
     sent = _capture_send(monkeypatch)
     _make_campaign(ctx, emails=["jane@acme.com"], ai_personalize=False)
     ctx["sched"].run_once()
-    assert sent[0]["body"] == "Hi Jane, saw Acme Corp.\n\n— Us"
+    # AI off -> the user's template exactly as written, untouched.
+    assert sent[0]["body"] == "Hi Jane, saw Acme Corp."
 
 
 def test_scheduler_followup_not_personalized(tmp_path, monkeypatch):
@@ -435,11 +502,13 @@ def test_scheduler_followup_not_personalized(tmp_path, monkeypatch):
         ai_personalize=True,
     )
     ctx["leads"].save(_dossier("jane@acme.com"))
-    sched.run_once()  # step 0 — personalized
+    sched.run_once()  # step 0 — personalized (greeting + hook + script)
     clock.advance(3 * 86400)
     sched.run_once()  # step 1 — the follow-up is NOT personalized
     assert len(sent) == 2
-    assert sent[0]["body"].startswith("Saw Acme broke ground")
+    assert sent[0]["body"] == ("Hi Jane,\n\n"
+                               "Saw Acme broke ground on the Riverside job."
+                               "\n\nFirst.")
     assert sent[1]["body"] == "Hi Jane, bumping this."
 
 

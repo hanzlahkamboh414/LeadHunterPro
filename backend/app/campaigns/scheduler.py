@@ -42,7 +42,12 @@ import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from app.campaigns.personalize import Ask, default_ask, generate_hook
+from app.campaigns.personalize import (
+    Ask,
+    assemble_opening,
+    default_ask,
+    generate_hook,
+)
 from app.campaigns.store import CampaignStore
 from app.campaigns.templates import context_for, render
 from app.email_accounts import google
@@ -457,9 +462,11 @@ class CampaignScheduler:
 
     def _with_hook(self, c: dict[str, Any], send: dict[str, Any],
                    dossier: Any, body: str) -> str:
-        """Prepend the lead's AI opening line to the rendered body. Cached
-        per (campaign, lead); an AI failure sends the plain template (logged)
-        and never blocks the campaign."""
+        """Assemble the personalized opening: greeting, then the AI opening
+        line, then the user's script (its own leading greeting removed so
+        the email greets exactly once). The hook is cached per (campaign,
+        lead); an AI failure still gets the uniform greeting + plain script
+        (logged) and never blocks the campaign."""
         hook = self._store.get_hook(c["id"], send["email"])
         if hook is None:
             if self._ai_ask is None:
@@ -469,11 +476,10 @@ class CampaignScheduler:
             except Exception as exc:  # noqa: BLE001 — best-effort by design
                 logger.warning("AI opening line for %s failed: %s "
                                "(sending without one)", send["email"], exc)
-                return body
-            self._store.set_hook(c["id"], send["email"], hook)
-        if not hook:
-            return body  # generated, nothing honest to say
-        return f"{hook}\n\n{body}"
+                hook = ""  # uniform opening, no cached empty on a FAILURE
+            else:
+                self._store.set_hook(c["id"], send["email"], hook)
+        return assemble_opening(dossier, hook, body)
 
     def _crm_event(self, email: str, *, user_id: str,
                    note: str, promote_to: str | None = None) -> None:

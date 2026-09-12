@@ -548,10 +548,13 @@ function CampaignBuilder({
               <span>
                 <span className="font-medium">AI opening line</span>{" "}
                 <span className="text-slate-500">
-                  — the first email to each lead starts with one or two
-                  AI-written sentences about their VERIFIED dossier facts
-                  (news, projects, events with sources). Nothing is invented;
-                  if a lead has no verified facts, the plain script goes out.
+                  — each first email opens "Hi [name]," (person or company),
+                  then one or two AI-written sentences from the lead's
+                  VERIFIED dossier facts (news, projects, events with
+                  sources), then your script below. Nothing is invented, no
+                  "Hi" needed in your script (it's removed automatically),
+                  and no AI-style dashes — plain professional text only. No
+                  verified facts? The plain script goes out.
                 </span>
               </span>
             </label>

@@ -5,7 +5,8 @@ openid email/profile (to know WHICH Gmail connected). Both Gmail scopes are
 Google RESTRICTED scopes: the app runs in the operator's own Google Cloud
 project, and Testing mode (100 test users, 7-day refresh token expiry) is
 fine for private use — production/public onboarding needs Google's
-verification (documented in docs/email_oauth_setup.md).
+verification (the operator checklist lives in docs/google_verification.md;
+the public privacy/terms pages it requires are Phase E6).
 
 Accounts connected BEFORE Phase E4 hold only ``gmail.send`` — sending keeps
 working, but reply detection is skipped for them until they reconnect (the

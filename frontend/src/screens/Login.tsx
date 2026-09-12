@@ -97,6 +97,18 @@ export default function Login() {
             </Link>
           </div>
         </form>
+
+        {/* Public legal pages (E6 Google verification) — linked from the
+            page Google's consent screen points at. */}
+        <p className="mt-5 text-center text-[12px] text-slate-500">
+          <Link to="/privacy" className="hover:text-indigo-400 transition-colors">
+            Privacy Policy
+          </Link>
+          <span className="mx-2">·</span>
+          <Link to="/terms" className="hover:text-indigo-400 transition-colors">
+            Terms of Service
+          </Link>
+        </p>
       </div>
     </div>
   );

@@ -14,6 +14,7 @@ import AdminGate from "./screens/AdminGate";
 import Login from "./screens/Login";
 import Signup from "./screens/Signup";
 import ResetPassword from "./screens/ResetPassword";
+import { PrivacyPolicy, TermsOfService } from "./screens/Legal";
 import { useAuth } from "./contexts/AuthContext";
 
 // h-screen (a FIXED height), not min-h-screen: with a minimum the shell grew with
@@ -62,6 +63,10 @@ export default function App() {
                 <Route path="/login" element={<Navigate to="/" replace />} />
                 <Route path="/signup" element={<Navigate to="/" replace />} />
                 <Route path="/reset-password" element={<Navigate to="/" replace />} />
+                {/* Public legal pages (E6 Google verification — reachable
+                    without a session, from any branch). */}
+                <Route path="/privacy" element={<PrivacyPolicy />} />
+                <Route path="/terms" element={<TermsOfService />} />
                 <Route path="*" element={<Navigate to="/" replace />} />
               </Routes>
             </main>
@@ -76,6 +81,9 @@ export default function App() {
         <Route path="/login" element={<Login />} />
         <Route path="/signup" element={<Signup />} />
         <Route path="/reset-password" element={<ResetPassword />} />
+        {/* Public legal pages (E6 Google verification). */}
+        <Route path="/privacy" element={<PrivacyPolicy />} />
+        <Route path="/terms" element={<TermsOfService />} />
         <Route path="*" element={<Navigate to="/login" replace />} />
       </Routes>
     );
@@ -101,6 +109,9 @@ export default function App() {
                 session that's already admin. */}
             <Route path="/admin4269" element={<Navigate to="/admin" replace />} />
             {user.is_admin && <Route path="/admin" element={<Admin />} />}
+            {/* Public legal pages (E6 Google verification). */}
+            <Route path="/privacy" element={<PrivacyPolicy />} />
+            <Route path="/terms" element={<TermsOfService />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </main>

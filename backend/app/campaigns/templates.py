@@ -34,6 +34,23 @@ def context_for(dossier: LeadDossier) -> dict[str, str]:
     }
 
 
+def sample_context() -> dict[str, str]:
+    """A fixed, clearly-sample lead for TEST sends only (the spam check):
+    the user previews exactly how their drafted template reads once a real
+    dossier fills it. Never used for a real campaign send."""
+    return {
+        "first_name": "Alex",
+        "last_name": "Morgan",
+        "person_name": "Alex Morgan",
+        "role": "Project Manager",
+        "company_name": "Acme Construction",
+        "company": "Acme Construction",
+        "location": "Dallas, TX",
+        "domain": "acmeconstruction.com",
+        "email": "alex@acmeconstruction.com",
+    }
+
+
 def render(template: str, context: dict[str, str]) -> str:
     """Fill every {{token}}. Unknown tokens and empty values both render as
     "" — honest gaps, never placeholders or invented facts."""

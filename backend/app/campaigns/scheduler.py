@@ -80,6 +80,36 @@ def parse_ts(ts: str) -> datetime | None:
         return None
 
 
+def ensure_access_token(email_store: EmailAccountStore, *, account_id: int,
+                        user_id: str, creds: dict[str, Any],
+                        now: datetime) -> str:
+    """A valid access token, refreshing it if expired. Empty string =
+    refresh failed (caller decides — the send path pauses the campaign /
+    refuses a test send, reply detection simply waits)."""
+    expires = parse_ts(creds.get("token_expires_at") or "")
+    fresh = expires is not None and expires > now + timedelta(
+        seconds=TOKEN_EXPIRY_MARGIN_S)
+    if creds["access_token"] and fresh:
+        return creds["access_token"]
+    if not creds["refresh_token"]:
+        return ""
+    try:
+        tokens = google.refresh_access_token(creds["refresh_token"])
+    except Exception:  # noqa: BLE001 — Google's error shape varies
+        logger.warning("token refresh failed for account %s",
+                       creds["email"])
+        return ""
+    new_access = tokens.get("access_token", "")
+    if not new_access:
+        return ""
+    expires_at = _iso(now + timedelta(seconds=int(tokens.get("expires_in", 3600))))
+    email_store.update_tokens(
+        account_id, user_id, access_token=new_access,
+        token_expires_at=expires_at,
+    )
+    return new_access
+
+
 class CampaignScheduler:
     """Owns the drain loop. Constructed once by the app lifespan; tests
     construct their own with injected stores."""
@@ -371,31 +401,11 @@ class CampaignScheduler:
 
     def _access_token(self, *, account_id: int, user_id: str,
                       creds: dict[str, Any], now: datetime) -> str:
-        """A valid access token, refreshing it if expired. Empty string =
-        refresh failed (caller decides — the send path pauses the campaign,
-        reply detection simply waits)."""
-        expires = parse_ts(creds.get("token_expires_at") or "")
-        fresh = expires is not None and expires > now + timedelta(
-            seconds=TOKEN_EXPIRY_MARGIN_S)
-        if creds["access_token"] and fresh:
-            return creds["access_token"]
-        if not creds["refresh_token"]:
-            return ""
-        try:
-            tokens = google.refresh_access_token(creds["refresh_token"])
-        except Exception:  # noqa: BLE001 — Google's error shape varies
-            logger.warning("token refresh failed for account %s",
-                           creds["email"])
-            return ""
-        new_access = tokens.get("access_token", "")
-        if not new_access:
-            return ""
-        expires_at = _iso(now + timedelta(seconds=int(tokens.get("expires_in", 3600))))
-        self._email_store.update_tokens(
-            account_id, user_id, access_token=new_access,
-            token_expires_at=expires_at,
-        )
-        return new_access
+        """Delegates to the shared ``ensure_access_token`` (also used by the
+        campaigns test-send endpoint — one refresh path, not two)."""
+        return ensure_access_token(
+            self._email_store, account_id=account_id, user_id=user_id,
+            creds=creds, now=now)
 
     def _on_send_error(self, c: dict[str, Any], send: dict[str, Any],
                        exc: Exception, stats: dict[str, int]) -> None:

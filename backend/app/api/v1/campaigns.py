@@ -15,14 +15,18 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.auth.dependencies import get_current_user
 from app.auth.models import User
-from app.campaigns.scheduler import parse_ts
+from app.campaigns.scheduler import ensure_access_token, parse_ts
 from app.campaigns.store import get_campaign_store
+from app.campaigns.templates import render, sample_context
+from app.email_accounts import google
 from app.email_accounts.store import get_email_store
 from app.schemas.campaigns import (
     CampaignCreateIn,
     CampaignCreateOut,
     CampaignDetailOut,
     CampaignOut,
+    CampaignTestSendIn,
+    CampaignTestSendOut,
     CampaignsOut,
 )
 
@@ -90,6 +94,74 @@ def create_campaign(
     logger.info("POST /campaigns -> %s (%d leads, %d excluded as already-sent)",
                 campaign["name"], len(emails), len(already))
     return {"campaign": campaign, "excluded": len(already)}
+
+
+@router.post("/test-send", response_model=CampaignTestSendOut)
+def campaign_test_send(
+    body: CampaignTestSendIn, user: User = Depends(get_current_user)
+) -> dict:
+    """Send the DRAFT pitch to your own address — the spam check. The drafted
+    subject/body render with a sample lead, then go out immediately via the
+    chosen account. Creates nothing: no campaign, no send row, no CRM event,
+    and the recipient is never counted as already-emailed (so you can test as
+    often as you like without polluting future campaigns)."""
+    email_store = get_email_store()
+    account = next(
+        (a for a in email_store.list_for_user(user.id)
+         if a["id"] == body.account_id), None)
+    if account is None:
+        raise HTTPException(status_code=404, detail="no such connected account")
+    if account["status"] != "connected":
+        raise HTTPException(
+            status_code=409,
+            detail=f"account {account['email']} is {account['status']} — "
+                   f"reconnect it first",
+        )
+    creds = email_store.get_credentials(body.account_id, user.id)
+    if creds is None or (not creds["access_token"]
+                         and not creds["refresh_token"]):
+        # Undecryptable tokens (key rotated) — honest reset, not a fake send.
+        raise HTTPException(status_code=409,
+                            detail="account tokens unreadable — reconnect Gmail")
+
+    ctx = sample_context()
+    subject = render(body.subject, ctx)
+    email_body = render(body.body, ctx)
+
+    access_token = ensure_access_token(
+        email_store, account_id=body.account_id, user_id=user.id,
+        creds=creds, now=datetime.now(timezone.utc))
+    if not access_token:
+        email_store.mark_status(body.account_id, user.id, "revoked")
+        raise HTTPException(status_code=409,
+                            detail="token refresh failed — reconnect the account")
+
+    try:
+        google.send_gmail(
+            access_token, to=body.to_email, subject=subject, body=email_body,
+            from_email=creds["email"],
+        )
+    except Exception as exc:  # noqa: BLE001 — Gmail's error shape varies
+        logger.warning("Campaign test send via %s failed: %s",
+                       creds["email"], exc)
+        email_store.mark_status(body.account_id, user.id, "revoked")
+        detail = f"Gmail refused the send — reconnect the account ({creds['email']})."
+        resp = getattr(exc, "response", None)
+        if resp is not None:
+            try:
+                g = resp.json().get("error", {}).get("message", "")
+                if g:
+                    detail = f"Gmail: {g[:300]}"
+            except Exception:  # noqa: BLE001 — non-JSON body
+                pass
+        raise HTTPException(status_code=502, detail=detail) from exc
+
+    # A success clears any earlier 'revoked' flag — the account IS healthy.
+    email_store.mark_status(body.account_id, user.id, "connected")
+    logger.info("POST /campaigns/test-send -> %s via %s",
+                body.to_email, creds["email"])
+    return {"sent": True, "to": body.to_email, "from_email": creds["email"],
+            "subject": subject}
 
 
 @router.get("", response_model=CampaignsOut)

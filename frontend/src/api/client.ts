@@ -543,6 +543,21 @@ export const api = {
     return request(`/campaigns/${id}/pause`, { method: "POST" });
   },
 
+  /** Spam check: send the drafted subject/body (rendered with a sample
+   * lead) to your own address. Creates nothing — no campaign, no send row. */
+  campaignTestSend(input: {
+    account_id: number;
+    to_email: string;
+    subject: string;
+    body: string;
+  }): Promise<{ sent: boolean; to: string; from_email: string; subject: string }> {
+    return request("/campaigns/test-send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+  },
+
   resumeCampaign(id: number): Promise<{ id: number; status: string }> {
     return request(`/campaigns/${id}/resume`, { method: "POST" });
   },

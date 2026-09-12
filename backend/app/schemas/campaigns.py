@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field
 
 
 class FollowupIn(BaseModel):
@@ -71,6 +71,24 @@ class CampaignOut(BaseModel):
     skipped: int
     replied: int
     account_email: str = ""
+
+
+class CampaignTestSendIn(BaseModel):
+    """A draft send to your OWN address — the spam check. The drafted
+    subject/body are rendered with a sample lead so you see exactly what a
+    lead would receive. Creates nothing: no campaign, no send row, no CRM
+    event, and the recipient is never counted as already-emailed."""
+    account_id: int
+    to_email: EmailStr
+    subject: str = Field(min_length=1, max_length=500)
+    body: str = Field(min_length=1, max_length=20000)
+
+
+class CampaignTestSendOut(BaseModel):
+    sent: bool
+    to: str
+    from_email: str
+    subject: str
 
 
 class CampaignsOut(BaseModel):

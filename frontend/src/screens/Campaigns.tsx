@@ -331,6 +331,9 @@ function CampaignBuilder({
   const [fu2Days, setFu2Days] = useState(7);
   const [fu2Subject, setFu2Subject] = useState("");
   const [fu2Body, setFu2Body] = useState("");
+  // Spam check: send the current draft to your own inbox before scheduling.
+  const [testEmail, setTestEmail] = useState("");
+  const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null);
   const [error, setError] = useState("");
 
   const accounts = useQuery({ queryKey: ["email-accounts"], queryFn: () => api.emailAccounts() });
@@ -383,8 +386,31 @@ function CampaignBuilder({
       setError(e instanceof ApiError ? e.message : "Could not create campaign"),
   });
 
+  const testSend = useMutation({
+    mutationFn: () =>
+      api.campaignTestSend({
+        account_id: accountId!,
+        to_email: testEmail.trim(),
+        subject,
+        body,
+      }),
+    onSuccess: (r) =>
+      setTestResult({
+        ok: true,
+        text: `Sent to ${r.to} — check that inbox (and its spam folder).`,
+      }),
+    onError: (e) =>
+      setTestResult({
+        ok: false,
+        text: e instanceof ApiError ? e.message : "Test send failed — is the backend reachable?",
+      }),
+  });
+
   const canCreate =
     name.trim() && accountId && subject.trim() && body.trim() && poolLeads.length > 0 && startAt;
+
+  const emailOk = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(testEmail.trim());
+  const canTest = !!accountId && subject.trim() !== "" && body.trim() !== "" && emailOk;
 
   const input =
     "w-full bg-white/[0.04] border border-white/5 rounded-lg px-3.5 py-2.5 text-[13px] text-slate-300 placeholder:text-slate-500 outline-none focus:ring-2 focus:ring-indigo-500/40";
@@ -464,6 +490,46 @@ function CampaignBuilder({
               Variables fill from the lead's researched dossier. Missing facts
               render blank — nothing is ever invented.
             </p>
+          </div>
+
+          {/* Spam check — send the draft to your own inbox before scheduling. */}
+          <div className="mt-3 rounded-lg border border-white/5 bg-white/[0.02] p-3.5">
+            <p className="text-[12px] font-semibold text-slate-300">
+              Spam check (optional)
+            </p>
+            <p className="mt-1 text-[11.5px] text-slate-500">
+              Send this draft to your own email and see where it lands —
+              variables fill with a sample lead so you see the real email.
+              Nothing is created or counted.
+            </p>
+            <div className="mt-2.5 flex gap-2">
+              <input
+                type="email"
+                className={input}
+                value={testEmail}
+                onChange={(e) => {
+                  setTestEmail(e.target.value);
+                  setTestResult(null);
+                }}
+                placeholder="you@example.com"
+              />
+              <button
+                onClick={() => testSend.mutate()}
+                disabled={!canTest || testSend.isPending}
+                className="shrink-0 rounded-lg border border-white/10 px-4 text-[12.5px] font-semibold text-slate-200 hover:bg-white/[0.06] disabled:opacity-50"
+              >
+                {testSend.isPending ? "Sending…" : "Send test"}
+              </button>
+            </div>
+            {testResult && (
+              <p
+                className={`mt-2 text-[12px] ${
+                  testResult.ok ? "text-emerald-400" : "text-rose-400"
+                }`}
+              >
+                {testResult.text}
+              </p>
+            )}
           </div>
 
           {/* Follow-up ladder (Phase E4) — stops automatically on a reply. */}

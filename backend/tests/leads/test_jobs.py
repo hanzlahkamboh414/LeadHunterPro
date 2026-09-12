@@ -418,3 +418,190 @@ def test_exception_mid_run_persists_real_delivery_counts(tmp_path, monkeypatch):
     assert done.state is JobState.failed
     assert done.leads_found == 1
     assert done.working_leads == 1
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 admission control — bounded concurrent pipelines (MAX_ACTIVE_JOBS).
+# 10 simultaneous users must queue behind the search throttle's drain
+# capacity instead of bursting past its 30s budget (breaker-trip failure).
+# ---------------------------------------------------------------------------
+
+def _wait_until(cond, timeout: float = 5.0, what: str = "condition") -> None:
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout:
+        if cond():
+            return
+        time.sleep(0.01)
+    raise TimeoutError(f"{what} not met in {timeout}s")
+
+
+def _has_queue_event(manager: JobManager, job_id: str) -> bool:
+    return any(e.phase == "queue" for e in manager.get(job_id).events)
+
+
+def test_admission_control_queues_extra_jobs(tmp_path, monkeypatch):
+    """With the cap at 2, a third simultaneous job stays HONESTLY queued (with
+    a queue event telling the frontend why) and auto-starts when a slot frees."""
+    from app.core import config
+    monkeypatch.setattr(config.settings, "MAX_ACTIVE_JOBS", 2)
+    release = {t: threading.Event() for t in "abc"}
+    started = {t: threading.Event() for t in "abc"}
+
+    def _hold(query, emit=None, cancel=None, store=None, paused=None, user_id=""):
+        started[query.trade].set()
+        release[query.trade].wait(timeout=10)
+        return {"leads_found": 0, "discovery_passes": [], "results": []}
+
+    monkeypatch.setattr("app.leads.jobs.run_full", _hold)
+    manager = JobManager(db_path=str(tmp_path / "jobs.db"))
+    jobs = {t: manager.submit(ResearchQuery(trade=t, location="TX", target_emails=1))
+            for t in "abc"}
+
+    # Exactly two run (whichever two); the third waits in the queue.
+    _wait_until(lambda: sum(e.is_set() for e in started.values()) == 2,
+                what="two jobs admitted")
+    waiting = next(t for t in "abc" if not started[t].is_set())
+    assert manager.get(jobs[waiting].id).state is JobState.queued
+    assert _has_queue_event(manager, jobs[waiting].id)  # honest "why" for the UI
+
+    # Free one slot -> the queued job starts automatically.
+    running = next(t for t in "abc" if started[t].is_set())
+    release[running].set()
+    _wait_until(lambda: started[waiting].is_set(), what="queued job admitted")
+    assert manager.get(jobs[waiting].id).state is JobState.running
+
+    for t in "abc":
+        release[t].set()
+    for t in "abc":
+        assert _wait_finished(manager, jobs[t].id).state is JobState.completed
+
+
+def test_admission_cancel_while_queued_never_runs(tmp_path, monkeypatch):
+    """A job cancelled while waiting in the queue is marked cancelled WITHOUT
+    ever entering the pipeline — no slot taken, no searches burned."""
+    from app.core import config
+    monkeypatch.setattr(config.settings, "MAX_ACTIVE_JOBS", 1)
+    release = threading.Event()
+    ran = {"n": 0}
+
+    def _hold(query, emit=None, cancel=None, store=None, paused=None, user_id=""):
+        ran["n"] += 1
+        release.wait(timeout=10)
+        return {"leads_found": 0, "discovery_passes": [], "results": []}
+
+    monkeypatch.setattr("app.leads.jobs.run_full", _hold)
+    manager = JobManager(db_path=str(tmp_path / "jobs.db"))
+    j1 = manager.submit(ResearchQuery(trade="a", location="TX", target_emails=1))
+    j2 = manager.submit(ResearchQuery(trade="b", location="TX", target_emails=1))
+
+    # One runs, one queues (whichever — the test is order-independent).
+    _wait_until(lambda: ran["n"] == 1, what="one job admitted")
+    queued, running = (
+        (j2, j1) if manager.get(j2.id).state is JobState.queued else (j1, j2)
+    )
+    assert manager.get(running.id).state is JobState.running
+
+    # Cancel the queued job: cancelled without running.
+    assert manager.cancel(queued.id) is True
+    done = _wait_finished(manager, queued.id)
+    assert done.state is JobState.cancelled
+
+    # The running job finishes; the cancelled one NEVER entered the pipeline.
+    release.set()
+    assert _wait_finished(manager, running.id).state is JobState.completed
+    assert ran["n"] == 1
+
+
+def test_admission_slot_released_on_failure(tmp_path, monkeypatch):
+    """A crashed pipeline must not leak its slot — the queued job behind it
+    still runs."""
+    from app.core import config
+    monkeypatch.setattr(config.settings, "MAX_ACTIVE_JOBS", 1)
+    started_b = threading.Event()
+    release_b = threading.Event()
+
+    def _flaky(query, emit=None, cancel=None, store=None, paused=None, user_id=""):
+        if query.trade == "a":
+            raise RuntimeError("pipeline exploded")
+        started_b.set()
+        release_b.wait(timeout=10)
+        return {"leads_found": 0, "discovery_passes": [], "results": []}
+
+    monkeypatch.setattr("app.leads.jobs.run_full", _flaky)
+    manager = JobManager(db_path=str(tmp_path / "jobs.db"))
+    j1 = manager.submit(ResearchQuery(trade="a", location="TX", target_emails=1))
+    j2 = manager.submit(ResearchQuery(trade="b", location="TX", target_emails=1))
+
+    # Whichever order admission picked, BOTH must reach a terminal state and
+    # BOTH must have run (the failure freed its slot for the other).
+    d1 = _wait_finished(manager, j1.id)
+    _wait_until(started_b.is_set, what="second job admitted after failure")
+    release_b.set()
+    d2 = _wait_finished(manager, j2.id)
+    assert {d1.state, d2.state} == {JobState.failed, JobState.completed}
+    assert "pipeline exploded" in (d1.error or d2.error)
+
+
+def test_admission_disabled_when_zero(tmp_path, monkeypatch):
+    """MAX_ACTIVE_JOBS=0 is the kill-switch: every job runs immediately (the
+    pre-Phase-4 behavior)."""
+    from app.core import config
+    monkeypatch.setattr(config.settings, "MAX_ACTIVE_JOBS", 0)
+    started = {t: threading.Event() for t in "abc"}
+    release = threading.Event()
+
+    def _hold(query, emit=None, cancel=None, store=None, paused=None, user_id=""):
+        started[query.trade].set()
+        release.wait(timeout=10)
+        return {"leads_found": 0, "discovery_passes": [], "results": []}
+
+    monkeypatch.setattr("app.leads.jobs.run_full", _hold)
+    manager = JobManager(db_path=str(tmp_path / "jobs.db"))
+    jobs = {t: manager.submit(ResearchQuery(trade=t, location="TX", target_emails=1))
+            for t in "abc"}
+
+    # All three run at once — no admission wait, no queue events.
+    _wait_until(lambda: all(e.is_set() for e in started.values()),
+                what="all three jobs running concurrently")
+    assert not any(_has_queue_event(manager, jobs[t].id) for t in "abc")
+    release.set()
+    for t in "abc":
+        assert _wait_finished(manager, jobs[t].id).state is JobState.completed
+
+
+def test_admission_fifo_first_come_first_served(tmp_path, monkeypatch):
+    """Slots are handed out in submit order: while job B waits (queue event
+    observed), a later job C submitted behind it cannot jump the line."""
+    from app.core import config
+    monkeypatch.setattr(config.settings, "MAX_ACTIVE_JOBS", 1)
+    release = {t: threading.Event() for t in "abc"}
+    started = {t: threading.Event() for t in "abc"}
+
+    def _hold(query, emit=None, cancel=None, store=None, paused=None, user_id=""):
+        started[query.trade].set()
+        release[query.trade].wait(timeout=10)
+        return {"leads_found": 0, "discovery_passes": [], "results": []}
+
+    monkeypatch.setattr("app.leads.jobs.run_full", _hold)
+    manager = JobManager(db_path=str(tmp_path / "jobs.db"))
+    ja = manager.submit(ResearchQuery(trade="a", location="TX", target_emails=1))
+    _wait_until(lambda: manager.get(ja.id).state is JobState.running,
+                what="job a admitted")
+
+    jb = manager.submit(ResearchQuery(trade="b", location="TX", target_emails=1))
+    # Wait until B is REGISTERED as a waiter (its queue event exists) BEFORE
+    # submitting C — that makes B provably ahead in the waiter queue.
+    _wait_until(lambda: _has_queue_event(manager, jb.id), what="job b queued")
+    jc = manager.submit(ResearchQuery(trade="c", location="TX", target_emails=1))
+
+    release["a"].set()
+    # B (first in line) starts; C is still queued.
+    _wait_until(lambda: started["b"].is_set(), what="job b admitted in FIFO order")
+    assert not started["c"].is_set()
+    assert manager.get(jc.id).state is JobState.queued
+
+    release["b"].set()
+    _wait_until(lambda: started["c"].is_set(), what="job c admitted")
+    release["c"].set()
+    for j in (ja, jb, jc):
+        assert _wait_finished(manager, j.id).state is JobState.completed

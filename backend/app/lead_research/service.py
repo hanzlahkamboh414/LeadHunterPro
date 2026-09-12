@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import threading
 from typing import Any
 
 from app.lead_research.agent import AILeadResearchAgent, DEAD_DOMAIN_MARKER
@@ -53,6 +54,37 @@ def _is_rejection_reason(reason: str) -> bool:
     return any(m in r for m in _REJECTION_REASON_MARKS)
 
 
+#: Serializes store construction across the process's worker threads. Every
+#: job worker builds a LeadResearchStore / PendingLeadsStore on the SAME DB
+#: file, and ``_init_db`` runs check-then-ALTER migrations: two concurrent
+#: constructions both see a column missing, both ALTER, and the loser dies
+#: with ``duplicate column name`` (the measured Phase 4 admission-control
+#: flake — a queued job failed at construction instead of running). The
+#: folders REBUILD (rename → create → copy → drop) cannot be made
+#: race-tolerant with a catch, so the lock is the primary fix;
+#: :func:`_add_column`'s duplicate-column tolerance is defense-in-depth.
+_INIT_DB_LOCK = threading.RLock()
+
+
+def _add_column(conn: sqlite3.Connection, table: str, name: str, decl: str) -> None:
+    """Guarded additive ALTER — the same pattern JobStore._init_db uses.
+
+    TOCTOU-safe: a racing construction may have added the column between
+    our PRAGMA check and our ALTER; "duplicate column name" then means the
+    migration already happened, not a failure. Any OTHER OperationalError
+    still raises — swallowing a real lock/schema error would leave the
+    schema silently missing a column.
+    """
+    cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if name in cols:
+        return
+    try:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+    except sqlite3.OperationalError as exc:
+        if "duplicate column" not in str(exc):
+            raise
+
+
 class LeadResearchStore:
     """SQLite store for LeadDossier results."""
 
@@ -78,7 +110,14 @@ class LeadResearchStore:
         return conn
 
     def _init_db(self) -> None:
+        # Serialized (see _INIT_DB_LOCK): under 10-user load several workers
+        # construct this store at once and their migrations must not race.
+        with _INIT_DB_LOCK:
+            self._init_db_serialized()
+
+    def _init_db_serialized(self) -> None:
         import os
+        import time as _time
         os.makedirs(os.path.dirname(self._db_path), exist_ok=True)
         conn = self._conn()
         # WAL (permanent, §7 fix for "searching never started"): in the default
@@ -89,7 +128,20 @@ class LeadResearchStore:
         # reader ALWAYS serve the last committed snapshot, so a discovery
         # writer never blocks the frontend. journal_mode persists in the DB
         # header the first time it is set (a later set is a no-op).
-        conn.execute("PRAGMA journal_mode=WAL")
+        #
+        # The pragma needs a momentary exclusive lock and does NOT always
+        # invoke the busy handler, so under concurrent store constructions
+        # (every job worker builds a LeadResearchStore on the same file) it
+        # can surface SQLITE_BUSY outright. Retry — whoever wins the race
+        # sets the persistent header and everyone else's pragma is a no-op.
+        for _attempt in range(5):
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+                break
+            except sqlite3.OperationalError:
+                if _attempt == 4:
+                    raise
+                _time.sleep(0.2)
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS dossiers (
@@ -102,48 +154,32 @@ class LeadResearchStore:
             )
         """)
         # Additive migration — user organization metadata (Phase B). Existing
-        # live DBs predate these columns, so add them guarded by PRAGMA and
-        # never touch dossier_json. `save()`'s upsert only updates
-        # dossier_json+updated_at on conflict, so these ride along untouched and
-        # survive a pipeline re-research (user metadata is never clobbered).
-        cols = {row[1] for row in conn.execute("PRAGMA table_info(dossiers)")}
-        if "folder" not in cols:
-            conn.execute("ALTER TABLE dossiers ADD COLUMN folder TEXT NOT NULL DEFAULT ''")
-        if "tags" not in cols:
-            conn.execute("ALTER TABLE dossiers ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'")
+        # live DBs predate these columns, so add them guarded (never touch
+        # dossier_json). `save()`'s upsert only updates dossier_json+updated_at
+        # on conflict, so these ride along untouched and survive a pipeline
+        # re-research (user metadata is never clobbered).
+        _add_column(conn, "dossiers", "folder", "TEXT NOT NULL DEFAULT ''")
+        _add_column(conn, "dossiers", "tags", "TEXT NOT NULL DEFAULT '[]'")
         # Additive migration — admin visibility flag (Dashboard data control).
-        # The admin HIDES a date/search/lead from the USER views; the dossier stays
-        # in the DB (reversible via SHOW) and the admin dashboard still sees it.
-        # Same guarded-ALTER pattern as folder/tags; default 0 keeps every existing
-        # caller byte-compatible (old code simply ignores the new column).
-        if "hidden" not in cols:
-            conn.execute(
-                "ALTER TABLE dossiers ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0"
-            )
-        # Additive migration — persisted FILTER columns (Phase 2, frontend speed).
-        # The leads list used to materialize EVERY dossier (full JSON) + re-gate it
-        # in Python + paginate LAST, so a request scanned the whole store — the root
-        # cause of a slow Companies screen. recommendation / potential_score / bound
-        # let list_leads filter, sort and paginate IN SQL. They are written at
-        # save() (the deterministic gate, never a stale AI-era label) and backfilled
+        # The admin HIDES a date/search/lead from the USER views; the dossier
+        # stays in the DB (reversible via SHOW) and the admin dashboard still
+        # sees it. Default 0 keeps every existing caller byte-compatible (old
+        # code simply ignores the new column).
+        _add_column(conn, "dossiers", "hidden", "INTEGER NOT NULL DEFAULT 0")
+        # Additive migration — persisted FILTER columns (Phase 2, frontend
+        # speed). The leads list used to materialize EVERY dossier (full JSON)
+        # + re-gate it in Python + paginate LAST, so a request scanned the
+        # whole store — the root cause of a slow Companies screen.
+        # recommendation / potential_score / bound let list_leads filter,
+        # sort and paginate IN SQL. They are written at save() (the
+        # deterministic gate, never a stale AI-era label) and backfilled
         # once below — same guarded-ALTER pattern as folder/tags/hidden.
-        if "recommendation" not in cols:
-            conn.execute(
-                "ALTER TABLE dossiers ADD COLUMN recommendation TEXT NOT NULL DEFAULT ''"
-            )
-        if "potential_score" not in cols:
-            conn.execute(
-                "ALTER TABLE dossiers ADD COLUMN potential_score REAL NOT NULL DEFAULT 0"
-            )
-        if "bound" not in cols:
-            conn.execute(
-                "ALTER TABLE dossiers ADD COLUMN bound INTEGER NOT NULL DEFAULT 0"
-            )
-        # Per-user data isolation. Empty string = pre-migration rows (admin sees all).
-        if "user_id" not in cols:
-            conn.execute(
-                "ALTER TABLE dossiers ADD COLUMN user_id TEXT NOT NULL DEFAULT ''"
-            )
+        _add_column(conn, "dossiers", "recommendation", "TEXT NOT NULL DEFAULT ''")
+        _add_column(conn, "dossiers", "potential_score", "REAL NOT NULL DEFAULT 0")
+        _add_column(conn, "dossiers", "bound", "INTEGER NOT NULL DEFAULT 0")
+        # Per-user data isolation. Empty string = pre-migration rows (admin
+        # sees all).
+        _add_column(conn, "dossiers", "user_id", "TEXT NOT NULL DEFAULT ''")
         # Phase B.2 — first-class folder catalog. A folder is a persisted, clickable
         # group (empty folders included — "create the folder first, then move leads").
         # Names are also backfilled from dossiers on read, so folders that only ever
@@ -1243,6 +1279,12 @@ class PendingLeadsStore:
         return conn
 
     def _init_db(self) -> None:
+        # Serialized (see _INIT_DB_LOCK) — same construction race as
+        # LeadResearchStore; the two stores share the DB file.
+        with _INIT_DB_LOCK:
+            self._init_db_serialized()
+
+    def _init_db_serialized(self) -> None:
         import os
         os.makedirs(os.path.dirname(self._db_path), exist_ok=True)
         conn = self._conn()
@@ -1265,25 +1307,14 @@ class PendingLeadsStore:
         # cooldown (a research-ERROR lead is skipped for a while, not served
         # and re-failed on every Execute). Existing DBs predate the columns,
         # so add each guarded.
-        cols = {row[1] for row in conn.execute("PRAGMA table_info(pending_leads)")}
-        if "dead" not in cols:
-            conn.execute(
-                "ALTER TABLE pending_leads ADD COLUMN dead INTEGER NOT NULL DEFAULT 0"
-            )
-        if "attempted_at" not in cols:
-            conn.execute("ALTER TABLE pending_leads ADD COLUMN attempted_at TIMESTAMP")
-        if "attempt_count" not in cols:
-            conn.execute(
-                "ALTER TABLE pending_leads ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0"
-            )
+        _add_column(conn, "pending_leads", "dead", "INTEGER NOT NULL DEFAULT 0")
+        _add_column(conn, "pending_leads", "attempted_at", "TIMESTAMP")
+        _add_column(conn, "pending_leads", "attempt_count", "INTEGER NOT NULL DEFAULT 0")
         # ``dork`` (Phase G) — the Layer-1 dork template that surfaced this
         # lead, persisted so a cached lead researched in a LATER run can still
         # credit its producing dork's yield. Additive, default ''. Live DBs
         # predate the column; a plain ADD is safe ('' = unattributable).
-        if "dork" not in cols:
-            conn.execute(
-                "ALTER TABLE pending_leads ADD COLUMN dork TEXT NOT NULL DEFAULT ''"
-            )
+        _add_column(conn, "pending_leads", "dork", "TEXT NOT NULL DEFAULT ''")
         # ``gated`` (Galti #3) — a cached row rejected by the serve-time vertical
         # gate. Rows cached BEFORE the non-client boundary existed (the DCTA
         # transit/mobility junk) were silently skipped by ``take``'s Python
@@ -1292,10 +1323,7 @@ class PendingLeadsStore:
         # zero claims, zero dossiers, silent. Marking them lets the SQL window
         # ADVANCE past them — invisible to serving, exactly like ``dead``, same
         # additive guarded-ALTER pattern. Default 0 keeps old code compatible.
-        if "gated" not in cols:
-            conn.execute(
-                "ALTER TABLE pending_leads ADD COLUMN gated INTEGER NOT NULL DEFAULT 0"
-            )
+        _add_column(conn, "pending_leads", "gated", "INTEGER NOT NULL DEFAULT 0")
         conn.commit()
         conn.close()
 

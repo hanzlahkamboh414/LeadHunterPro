@@ -139,6 +139,15 @@ class FitLearningStore:
         return conn
 
     def _init_db(self) -> None:
+        # Serialized under the module write lock: every job worker's agent
+        # constructs a FitLearningStore on the SAME DB file, and this
+        # check-then-ALTER migration races exactly like the service-store
+        # ones did (duplicate column name on the loser). The lock is not
+        # held by any caller of the constructor, so this cannot deadlock.
+        with _write_lock:
+            self._init_db_serialized()
+
+    def _init_db_serialized(self) -> None:
         os.makedirs(os.path.dirname(self._db_path), exist_ok=True)
         conn = self._conn()
         try:

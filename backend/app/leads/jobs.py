@@ -88,9 +88,21 @@ class JobStore:
         self._db_path = db_path
         self._init_db()
 
+    def _connect(self) -> sqlite3.Connection:
+        """Open a connection that WAITS under lock contention.
+
+        Under multi-user load every worker thread appends job events and the
+        API reads job lists on this same file concurrently; without a busy
+        timeout a colliding write fails the caller outright ("database is
+        locked"). Same pattern as every other store (service._conn).
+        """
+        conn = sqlite3.connect(self._db_path)
+        conn.execute("PRAGMA busy_timeout = 5000")
+        return conn
+
     def _init_db(self) -> None:
         os.makedirs(os.path.dirname(self._db_path), exist_ok=True)
-        conn = sqlite3.connect(self._db_path)
+        conn = self._connect()
         conn.execute("""
             CREATE TABLE IF NOT EXISTS jobs (
                 id TEXT PRIMARY KEY,
@@ -126,7 +138,7 @@ class JobStore:
         conn.close()
 
     def save(self, job: Job) -> None:
-        conn = sqlite3.connect(self._db_path)
+        conn = self._connect()
         conn.execute(
             """
             INSERT INTO jobs (id, query_json, state, events_json, results_json,
@@ -170,7 +182,7 @@ class JobStore:
         conn.close()
 
     def get(self, job_id: str) -> Job | None:
-        conn = sqlite3.connect(self._db_path)
+        conn = self._connect()
         cur = conn.execute(
             "SELECT * FROM jobs WHERE id = ?", (job_id,)
         )
@@ -200,7 +212,7 @@ class JobStore:
 
     def list_all(self, user_id: str | None = None,
                  include_legacy: bool = False) -> list[Job]:
-        conn = sqlite3.connect(self._db_path)
+        conn = self._connect()
         if user_id and include_legacy:
             # The admin's own-dashboard scope: own jobs PLUS the legacy
             # pre-auth runs (user_id='') that belong to the admin alone.
@@ -260,6 +272,55 @@ class JobManager:
         # Live worker threads — for on-the-fly dead-worker detection when the
         # process is alive but a worker died (root cause of "running stuck").
         self._workers: dict[str, threading.Thread] = {}
+        # Phase 4 admission control: how many pipelines are ACTIVE right now
+        # and a condition to wake the next queued worker when a slot frees.
+        # Condition over the SAME lock (RLock reentrant) so slot accounting,
+        # state transitions and event appends stay mutually consistent.
+        self._active_jobs = 0
+        self._slot_cond = threading.Condition(self._lock)
+
+    def _wait_for_slot(self, job_id: str, max_active: int) -> bool:
+        """Phase 4 admission control: block until an ACTIVE-job slot is free.
+
+        Bounds concurrent pipelines to ``max_active`` (settings.MAX_ACTIVE_
+        JOBS) so N simultaneous users queue behind the search throttle's drain
+        capacity instead of bursting past its budget (breaker-trip failure
+        mode). The job stays honestly ``queued`` while it waits — a resumed
+        (restart-continued) job comes in as ``running`` and is set back — and
+        a queue event tells the frontend why. ``Condition.wait`` wakes waiters
+        FIFO in CPython, so slots are handed out first-come-first-served.
+
+        Returns True when a slot was acquired, False when the job was CANCELLED
+        while queued (the caller must mark it cancelled without running it).
+        """
+        with self._lock:
+            if self._active_jobs >= max_active:
+                job = self._store.get(job_id)
+                if job is not None and job.state is JobState.running:
+                    job.state = JobState.queued
+                    job.updated_at = _now()
+                    self._store.save(job)
+                self._append_event(job_id, JobEvent(
+                    phase="queue", step=0, total=0,
+                    message=(
+                        f"waiting for a free search slot ({self._active_jobs} "
+                        f"searches running) — starts automatically, first come "
+                        f"first served"
+                    ),
+                    ts=_now(),
+                ))
+                logger.info(
+                    "Job %s queued behind %d active job(s) (cap %d)",
+                    job_id, self._active_jobs, max_active,
+                )
+            while self._active_jobs >= max_active:
+                if self._cancel_flags.get(job_id):
+                    return False
+                # Timeout re-checks the cancel flag even without a notify, so
+                # a cancelled queued job never lingers past one interval.
+                self._slot_cond.wait(timeout=0.5)
+            self._active_jobs += 1
+            return True
 
     def recover_orphans(self) -> int:
         """Mark jobs stuck in a live state as failed (root-cause fix).
@@ -456,6 +517,21 @@ class JobManager:
     # -- worker ----
 
     def _run(self, job_id: str) -> None:
+        from app.core.config import settings
+
+        max_active = max(0, settings.MAX_ACTIVE_JOBS)
+        # Phase 4 admission: wait for a slot BEFORE doing any work. A job
+        # cancelled while queued is marked cancelled without ever running.
+        if max_active and not self._wait_for_slot(job_id, max_active):
+            with self._lock:
+                job = self._store.get(job_id)
+                job.state = JobState.cancelled
+                job.updated_at = _now()
+                self._store.save(job)
+            logger.info("Job %s cancelled while queued (never ran)", job_id)
+            self._workers.pop(job_id, None)
+            return
+
         query = ResearchQuery.from_dict(self._store.get(job_id).query)
         t0 = datetime.now(timezone.utc)
 
@@ -482,11 +558,15 @@ class JobManager:
             return ev is not None and not ev.is_set()
 
         # Persist researched dossiers to the same DB file the job store uses,
-        # so the leads list/detail endpoints can read them.
+        # so the leads list/detail endpoints can read them. INSIDE the try:
+        # under 10-user load several workers construct a store on the same DB
+        # at once, and if that raises (lock window) the job must fail HONESTLY
+        # (except below) and release its admission slot (finally below) — a
+        # construction outside the try killed the worker AND leaked the slot.
         from app.lead_research.service import LeadResearchStore
-        lead_store = LeadResearchStore(db_path=self._store._db_path)
 
         try:
+            lead_store = LeadResearchStore(db_path=self._store._db_path)
             outcome = run_full(
                 query, emit=emit, cancel=cancel, paused=paused, store=lead_store,
                 user_id=job.user_id,
@@ -562,6 +642,12 @@ class JobManager:
             # Always clean up — completed, failed, or cancelled, the worker
             # thread is no longer live. sweep_dead_workers uses this ref.
             self._workers.pop(job_id, None)
+            # Release the admission slot and wake the next queued worker
+            # (FIFO) — even on failure, the slot must not leak.
+            if max_active:
+                with self._lock:
+                    self._active_jobs = max(0, self._active_jobs - 1)
+                    self._slot_cond.notify()
 
     def _append_event(self, job_id: str, event: JobEvent) -> None:
         with self._lock:

@@ -150,6 +150,18 @@ class Settings(BaseSettings):
     # verdict quality ever regresses.
     HOMEPAGE_PRE_VERDICT: bool = True
 
+    # Phase 4 load management — bounded CONCURRENT pipelines. Every submitted
+    # job used to spawn its worker immediately, so 10 simultaneous users meant
+    # 10 streaming pipelines (10 discovery producers + 30 research consumer
+    # threads) all at once: aligned search bursts outran the 5 qps global
+    # SearXNG throttle's 30s queue budget (the measured breaker-trip → Tavily
+    # blackout failure mode), and the AI router saw 30+ concurrent calls.
+    # Admission control bounds the ACTIVE pipelines; extra jobs stay honestly
+    # `queued` (FIFO) and auto-start the moment a slot frees. 4 slots ≈ the
+    # throttle's drain capacity (each active job demands ~1 qps post-pre-
+    # verdict), so searches stay under budget. 0 = unlimited (old behavior).
+    MAX_ACTIVE_JOBS: int = 4
+
     # Optional lightweight auth for the Leads API (M12 baseline). When set,
     # requests must carry `X-API-Key: <key>`. When empty, the Leads API is
     # open (localhost/dev). Full user auth is a later phase.

@@ -22,14 +22,16 @@ extra AI call or provider credit:
   (root cause of the 54-lead DCTA transit-vendor flood).
 
 * ``company`` / ``domain`` — USER verdicts, not research outcomes. When the
-  user deletes a dossier as ``irrelevant`` / ``not our client``, the company
-  name and mail domain are recorded as USER-REJECTED. This is DECISIVE: one
-  human rejection outweighs any number of AI scores, so ``user_rejects >= 1``
-  skips that company/domain on the next discovery pass — the concrete fix for
-  the 2026-09-08 purge (24 confirmed-irrelevant dossiers whose companies would
-  otherwise resurface and burn credit again). Unlike ``industry``/``source``
-  there is NO ``MIN_TRIALS`` and NO AI self-served credit on these namespaces:
-  only the user's own delete verdict teaches them.
+  user deletes a dossier as ``not our client``, the company name and mail
+  domain are recorded as USER-REJECTED. One verdict is NOT blindly decisive
+  (2026-09-12 gaming guard): a lone uncorroborated click could just be a user
+  tidying their list, and purging an identity globally on it would burn the
+  whole market's data. A rejection is DECISIVE only when the research itself
+  agreed (``corroborated`` — the dossier's grounded fit said "not our client",
+  or an admin made the call) or when TWO DISTINCT users independently chose
+  the same identity. Unlike ``industry``/``source`` there is NO ``MIN_TRIALS``
+  and NO AI self-served credit on these namespaces: only user delete verdicts
+  teach them.
 
 Default-KEEP is the safe choice everywhere: a label/host with too little data,
 or any single real lead in its history, is never skipped. Pruning starts only
@@ -183,6 +185,19 @@ class FitLearningStore:
                 conn.execute(
                     "ALTER TABLE fit_learning ADD COLUMN user_rejects INTEGER NOT NULL DEFAULT 0"
                 )
+            # Corroboration columns (2026-09-12 gaming guard): ``rejector_ids`` is
+            # the comma-separated DISTINCT user ids that chose "not our client"
+            # (two INDEPENDENT users are needed when the verdict is uncorroborated);
+            # ``corroborated`` counts rejections the research itself backed (or an
+            # admin made). Defaults keep every pre-guard row byte-compatible.
+            if "rejector_ids" not in cols:
+                conn.execute(
+                    "ALTER TABLE fit_learning ADD COLUMN rejector_ids TEXT NOT NULL DEFAULT ''"
+                )
+            if "corroborated" not in cols:
+                conn.execute(
+                    "ALTER TABLE fit_learning ADD COLUMN corroborated INTEGER NOT NULL DEFAULT 0"
+                )
             conn.commit()
         finally:
             conn.close()
@@ -217,26 +232,32 @@ class FitLearningStore:
         conn = self._conn()
         try:
             row = conn.execute(
-                "SELECT trials, kept, user_rejects FROM fit_learning WHERE kind = ? AND key = ?",
+                "SELECT trials, kept, user_rejects, rejector_ids, corroborated "
+                "FROM fit_learning WHERE kind = ? AND key = ?",
                 (kind, key),
             ).fetchone()
         finally:
             conn.close()
         if row is None:
             return None
-        return {"trials": row[0], "kept": row[1], "user_rejects": row[2]}
+        return {
+            "trials": row[0], "kept": row[1], "user_rejects": row[2],
+            "rejector_ids": row[3], "corroborated": row[4],
+        }
 
     def all(self, kind: str | None = None) -> dict[str, dict[str, int]]:
         conn = self._conn()
         try:
             if kind:
                 rows = conn.execute(
-                    "SELECT kind, key, trials, kept, user_rejects FROM fit_learning WHERE kind = ?",
+                    "SELECT kind, key, trials, kept, user_rejects, rejector_ids, corroborated "
+                    "FROM fit_learning WHERE kind = ?",
                     (kind,),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT kind, key, trials, kept, user_rejects FROM fit_learning"
+                    "SELECT kind, key, trials, kept, user_rejects, rejector_ids, corroborated "
+                    "FROM fit_learning"
                 ).fetchall()
         finally:
             conn.close()
@@ -245,6 +266,8 @@ class FitLearningStore:
                 "trials": r[2],
                 "kept": r[3],
                 "user_rejects": r[4],
+                "rejector_ids": r[5],
+                "corroborated": r[6],
             }
             for r in rows
         }
@@ -252,15 +275,21 @@ class FitLearningStore:
     def should_skip(self, kind: str, key: str) -> bool:
         """True to auto-skip this (kind,key) on the next run.
 
-        Dispatches by namespace: ``company``/``domain`` are skipped on a single
-        USER rejection (``user_rejects >= 1``) — one human "not our client"
-        verdict outweighs any AI score and needs no trial count, so a purged
-        company stays purged. ``industry``/``source`` keep the old contract —
+        Dispatches by namespace: ``industry``/``source`` keep the old contract —
         skipped once they have enough completed trials AND never once became a
         real lead — PLUS the proportional prune: at PROP_MIN_TRIALS trials a
         keep-rate under PROP_MAX_KEEP_RATE is proven chronic waste even if a
         stray lead exists (a single keep no longer immunizes a 4% host
         forever). No record (never seen) -> keep. Empty key -> keep.
+
+        ``company``/``domain`` are identity-level purges and carry the gaming
+        guard (2026-09-12): a lone UNCORROBORATED "not our client" — one user
+        clicking the strong reason on a lead the research itself LIKED — no
+        longer purges a company globally (a user "sirf safai" kar raha ho to
+        poora market ka data nahi jalna chahiye). Decisive only when:
+          * the research itself agreed (``corroborated`` — the AI's grounded
+            verdict or an admin backed the rejection), OR
+          * TWO DISTINCT users independently rejected the same identity.
         """
         if not key:
             return False
@@ -268,7 +297,10 @@ class FitLearningStore:
         if row is None:
             return False
         if kind in (KIND_COMPANY, KIND_DOMAIN):
-            return row["user_rejects"] >= 1
+            if row["corroborated"] >= 1:
+                return True
+            distinct = {i for i in (row["rejector_ids"] or "").split(",") if i}
+            return len(distinct) >= 2
         # Proven junk: enough trials, never once a real lead.
         if row["trials"] >= MIN_TRIALS and row["kept"] == 0:
             return True
@@ -279,30 +311,42 @@ class FitLearningStore:
             return True
         return False
 
-    def reject(self, kind: str, key: str) -> None:
+    def reject(self, kind: str, key: str, *, user_id: str = "",
+               corroborated: bool = False) -> None:
         """Record an explicit USER verdict that this (kind,key) is not a client.
 
-        Unlike :meth:`record`, this is decisive and not gated by trials: a human
-        rejection of a real company/domain is treated as ground truth. Repeated
-        rejections accumulate (auditable), and existing research counts on the
-        row ride along untouched — but the first rejection already wins, because
-        :meth:`should_skip` reads ``user_rejects`` and ignores trials/kept for
-        the company/domain namespaces. Empty key -> no-op (never learned).
+        ``user_id`` names WHO rejected (distinct ids are the gaming guard —
+        see :meth:`should_skip`); ``corroborated`` marks a rejection the
+        research itself backed or an admin made (decisive on its own).
+        Rejections accumulate for audit (``user_rejects``); the corroborated
+        flag only ever moves UP (never unset); existing research counts on
+        the row ride along untouched. Empty key -> no-op (never learned).
         """
         if not kind or not key:
             return
         with _write_lock:
             conn = self._conn()
             try:
+                row = conn.execute(
+                    "SELECT rejector_ids FROM fit_learning WHERE kind = ? AND key = ?",
+                    (kind, key),
+                ).fetchone()
+                ids = [i for i in ((row[0] if row else "") or "").split(",") if i]
+                if user_id and user_id not in ids:
+                    ids.append(user_id)
                 conn.execute(
                     """
-                    INSERT INTO fit_learning (kind, key, trials, kept, user_rejects, last_seen)
-                    VALUES (?, ?, 0, 0, 1, CURRENT_TIMESTAMP)
+                    INSERT INTO fit_learning
+                        (kind, key, trials, kept, user_rejects, rejector_ids,
+                         corroborated, last_seen)
+                    VALUES (?, ?, 0, 0, 1, ?, ?, CURRENT_TIMESTAMP)
                     ON CONFLICT(kind, key) DO UPDATE SET
                         user_rejects = user_rejects + 1,
+                        rejector_ids = excluded.rejector_ids,
+                        corroborated = MAX(corroborated, excluded.corroborated),
                         last_seen = CURRENT_TIMESTAMP
                     """,
-                    (kind, key),
+                    (kind, key, ",".join(ids), 1 if corroborated else 0),
                 )
                 conn.commit()
             finally:
@@ -332,14 +376,18 @@ class FitLearningStore:
     def should_skip_source(self, source_url: str) -> bool:
         return self.should_skip(KIND_SOURCE, source_host(source_url))
 
-    def reject_company(self, company_name: str) -> None:
-        self.reject(KIND_COMPANY, normalize_company(company_name))
+    def reject_company(self, company_name: str, *, user_id: str = "",
+                       corroborated: bool = False) -> None:
+        self.reject(KIND_COMPANY, normalize_company(company_name),
+                    user_id=user_id, corroborated=corroborated)
 
     def should_skip_company(self, company_name: str) -> bool:
         return self.should_skip(KIND_COMPANY, normalize_company(company_name))
 
-    def reject_domain(self, domain: str) -> None:
-        self.reject(KIND_DOMAIN, mail_domain(domain))
+    def reject_domain(self, domain: str, *, user_id: str = "",
+                      corroborated: bool = False) -> None:
+        self.reject(KIND_DOMAIN, mail_domain(domain),
+                    user_id=user_id, corroborated=corroborated)
 
     def should_skip_domain(self, domain: str) -> bool:
         return self.should_skip(KIND_DOMAIN, mail_domain(domain))

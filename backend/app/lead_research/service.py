@@ -418,19 +418,26 @@ class LeadResearchStore:
         conn.close()
         return n
 
-    def delete(self, email: str, *, reason: str = "manual") -> bool:
+    def delete(self, email: str, *, reason: str = "manual", user_id: str = "",
+               is_admin: bool = False) -> bool:
         """Delete one dossier by email; return True if it existed.
 
-        ``reason`` records WHY (``manual`` = per-lead Delete, ``junk`` = the
-        Junk sweep) into the ``deleted_leads`` audit trail the admin screen
-        reads ("kon kon c email delete ki"). Same transaction, so the log can
-        never show a deletion the dossier survived (or vice versa).
+        ``reason`` records WHY into the ``deleted_leads`` audit trail the admin
+        screen reads ("kon kon c email delete ki") — the user-facing delete
+        dialog sends a structured slug (``not_our_client`` / ``bad_data`` /
+        ``duplicate`` / ``already_contacted`` / ``low_quality`` / ``other``).
+        Same transaction, so the log can never show a deletion the dossier
+        survived (or vice versa).
 
-        When ``reason`` carries a rejection verdict ("irrelevant" / "not our
-        client"), the deleted dossier's company+domain are fed to fit-learning
-        as a USER rejection (Phase E) — so a company the user proves is not a
-        client stays purged on the next discovery pass instead of resurfacing
-        to burn credit again (root cause of the 2026-09-08 purge).
+        When ``reason`` carries a rejection verdict (``not_our_client`` —
+        folded to "not our client" by the mark matcher), the dossier's
+        company+domain are fed to fit-learning as a USER rejection, WITH the
+        corroboration context: ``user_id`` names the rejector (two DISTINCT
+        users are needed to purge an identity on user verdicts alone) and the
+        rejection is immediately decisive only when the RESEARCH itself
+        agreed (the dossier's own grounded "not our client" verdict) or an
+        admin made it — the gaming guard against a user casually clicking
+        the strong reason to "sirf safai" karne ke liye.
         """
         eh = _email_hash(email)
         conn = self._conn()
@@ -447,28 +454,43 @@ class LeadResearchStore:
             )
             conn.commit()
             if row is not None and _is_rejection_reason(reason):
-                self._feed_user_rejection(LeadDossier.from_dict(json.loads(row[0])))
+                self._feed_user_rejection(
+                    LeadDossier.from_dict(json.loads(row[0])),
+                    user_id=user_id, is_admin=is_admin,
+                )
         conn.close()
         return cur.rowcount > 0
 
-    def _feed_user_rejection(self, dossier: LeadDossier) -> None:
+    def _feed_user_rejection(self, dossier: LeadDossier, *, user_id: str = "",
+                             is_admin: bool = False) -> None:
         """Teach fit-learning that this dossier's company+domain are NOT clients.
 
         Called only on rejection-class deletes. Company name and mail domain
         are recorded from the dossier itself (the SAME names the next discovery
-        pass would surface), so a user's "delete as irrelevant" is a permanent
-        identity-level skip. Uses the same DB file as this store so the learning
-        table and the dossiers table can never drift apart.
+        pass would surface), so a user's "not our client" delete is a
+        permanent identity-level skip — gated by the corroboration rule:
+
+        ``corroborated`` is True when an ADMIN rejected (the operator is
+        trusted) or when the dossier's OWN research already said "not our
+        client" (the AI's grounded verdict agrees with the user — two
+        independent signals). An uncorroborated single-user rejection is
+        still recorded (it counts toward the two-DISTINCT-users purge rule
+        and the audit trail) but does not purge the identity alone.
         """
         from app.lead_research.fit_learning import FitLearningStore
 
         learning = FitLearningStore(self._db_path)
+        corroborated = bool(
+            is_admin or "not our client" in (dossier.fit or "").lower()
+        )
         company = dossier.refined_company or dossier.company.name
         if company:
-            learning.reject_company(company)
+            learning.reject_company(company, user_id=user_id,
+                                    corroborated=corroborated)
         domain = dossier.refined_domain or dossier.domain
         if domain:
-            learning.reject_domain(domain)
+            learning.reject_domain(domain, user_id=user_id,
+                                   corroborated=corroborated)
 
     def deleted_log(self, limit: int = 100) -> list[dict[str, str]]:
         """The admin audit trail: emails deleted, when, and why (newest first)."""

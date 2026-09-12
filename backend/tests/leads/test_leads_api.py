@@ -574,6 +574,46 @@ def test_delete_lead_removes_dossier_and_pending(tmp_path, monkeypatch):
     assert client.delete("/api/v1/leads/nope@x.com").status_code == 404
 
 
+def test_delete_lead_reason_feeds_learning_with_user_identity(tmp_path, monkeypatch):
+    """The delete dialog's structured reason reaches fit-learning WITH the
+    caller's user id: ``not_our_client`` records a rejection attributed to this
+    user, but a LONE uncorroborated verdict (the fake dossier's research liked
+    the company) does not purge the identity — the 2026-09-12 gaming guard."""
+    from app.lead_research.fit_learning import KIND_DOMAIN, FitLearningStore
+
+    client = _setup(tmp_path, monkeypatch)
+    store = leads_module._store
+    store.save(_dossier("a@x.com", "x.com"))
+
+    r = client.delete("/api/v1/leads/a@x.com?reason=not_our_client")
+    assert r.status_code == 200
+
+    learning = FitLearningStore(store._db_path)
+    row = learning.get(KIND_DOMAIN, "x.com")
+    assert row is not None and row["user_rejects"] == 1
+    assert row["rejector_ids"] != ""  # attributed to the calling user
+    assert row["corroborated"] == 0  # research did not agree
+    assert learning.should_skip_domain("x.com") is False  # guard: not decisive
+
+
+def test_delete_lead_admin_reason_is_corroborated(tmp_path, monkeypatch):
+    """An ADMIN's not-our-client delete is decisive immediately — the operator
+    is trusted (corroborated=1)."""
+    from app.lead_research.fit_learning import KIND_DOMAIN, FitLearningStore
+
+    client = _setup(tmp_path, monkeypatch, admin=True)
+    store = leads_module._store
+    store.save(_dossier("a@x.com", "x.com"))
+
+    r = client.delete("/api/v1/leads/a@x.com?reason=not_our_client")
+    assert r.status_code == 200
+
+    learning = FitLearningStore(store._db_path)
+    row = learning.get(KIND_DOMAIN, "x.com")
+    assert row is not None and row["corroborated"] == 1
+    assert learning.should_skip_domain("x.com") is True
+
+
 def test_clear_junk_removes_only_hidden_skip(tmp_path, monkeypatch):
     """clear-junk purges every re-gated skip dossier (junk: dead domain, low
     score, generic mail) but never touches actionable/nurture leads."""

@@ -44,9 +44,12 @@ from tests.lead_research.conftest import (
 _MX_OK = lambda d: True  # noqa: E731
 
 
-#: A full store row — get()/all() now carry user_rejects too.
-def _row(trials, kept, user_rejects=0):
-    return {"trials": trials, "kept": kept, "user_rejects": user_rejects}
+#: A full store row — get()/all() now carry the corroboration fields too.
+def _row(trials, kept, user_rejects=0, rejector_ids="", corroborated=0):
+    return {
+        "trials": trials, "kept": kept, "user_rejects": user_rejects,
+        "rejector_ids": rejector_ids, "corroborated": corroborated,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -421,29 +424,35 @@ def test_mail_domain_normalizes_case_www_at_and_dots():
 
 
 def test_reject_company_is_decisive_with_zero_trials(tmp_path):
-    """ONE human rejection skips a company immediately — no MIN_TRIALS, no AI
-    self-credit needed (Phase E: the user's delete verdict is ground truth)."""
+    """A CORROBORATED rejection skips a company immediately — no MIN_TRIALS, no
+    AI self-credit needed (Phase E: the research/admin-backed verdict is ground
+    truth)."""
     s = FitLearningStore(str(tmp_path / "f.db"))
     assert s.should_skip_company("Acme Construction") is False
-    s.reject_company("  ACME   CONSTRUCTION LLC ")
-    assert s.get(KIND_COMPANY, "acme construction llc") == _row(0, 0, user_rejects=1)
+    s.reject_company("  ACME   CONSTRUCTION LLC ", corroborated=True)
+    assert s.get(KIND_COMPANY, "acme construction llc") == _row(
+        0, 0, user_rejects=1, corroborated=1)
     assert s.should_skip_company("Acme Construction LLC") is True
 
 
 def test_reject_accumulates_and_persists_across_instances(tmp_path):
     """Repeated rejections accumulate the audit counter (user_rejects=2) and a
-    fresh store on the same path still sees the decisive verdict."""
+    fresh store on the same path still sees the decisive verdict. The
+    corroborated flag only ever moves UP (an admin backing an already-plain
+    rejection makes it decisive; nothing un-corroborates it)."""
     db = str(tmp_path / "f.db")
-    FitLearningStore(db).reject_company("Acme Construction")
-    FitLearningStore(db).reject_company("Acme Construction")
+    FitLearningStore(db).reject_company("Acme Construction", user_id="u1")
+    FitLearningStore(db).reject_company("Acme Construction", user_id="u1",
+                                        corroborated=True)
     s = FitLearningStore(db)
-    assert s.get(KIND_COMPANY, "acme construction") == _row(0, 0, user_rejects=2)
+    assert s.get(KIND_COMPANY, "acme construction") == _row(
+        0, 0, user_rejects=2, rejector_ids="u1", corroborated=1)
     assert s.should_skip_company("Acme Construction") is True
 
 
 def test_reject_domain_decisive_case_and_www_insensitive(tmp_path):
     s = FitLearningStore(str(tmp_path / "f.db"))
-    s.reject_domain("WWW.Acme.Com.")
+    s.reject_domain("WWW.Acme.Com.", corroborated=True)
     assert s.should_skip_domain("acme.com") is True
     assert s.should_skip_domain("@Acme.Com") is True
 
@@ -465,7 +474,7 @@ def test_domain_rejection_isolated_from_industry_and_source(tmp_path):
     s = FitLearningStore(str(tmp_path / "f.db"))
     s.record_industry("General Contractor", kept=True)
     s.record_source("https://dcta.net/list.pdf", kept=True)
-    s.reject_domain("acme.com")
+    s.reject_domain("acme.com", corroborated=True)
     assert s.should_skip_domain("acme.com") is True
     assert s.should_skip_industry("General Contractor") is False
     assert s.should_skip_source("https://dcta.net/") is False
@@ -475,7 +484,7 @@ def test_company_rejection_isolated_from_domain(tmp_path):
     """Rejecting a company name prunes that name only — the domain stays alive
     (a different firm may legitimately sit on the same mail host)."""
     s = FitLearningStore(str(tmp_path / "f.db"))
-    s.reject_company("Acme Construction")
+    s.reject_company("Acme Construction", corroborated=True)
     assert s.should_skip_company("Acme Construction") is True
     assert s.should_skip_domain("acme.com") is False
 
@@ -511,7 +520,121 @@ def test_migration_adds_user_rejects_to_old_table(tmp_path):
     assert s.get(KIND_INDUSTRY, "gc") == _row(5, 0)
     assert s.should_skip_industry("gc") is False  # 5 trials < MIN_TRIALS, no verdict
     # The migrated column now accepts a decisive user verdict.
-    s.reject_company("Acme Construction")
+    s.reject_company("Acme Construction", corroborated=True)
+    assert s.should_skip_company("Acme Construction") is True
+
+
+def test_migration_adds_corroboration_columns_to_phase_e_table(tmp_path):
+    """A live DB whose fit_learning table predates the gaming guard (has
+    user_rejects but NOT rejector_ids/corroborated) must gain both columns on
+    init. Pre-guard company/domain rows default to corroborated=0 /
+    rejector_ids='' — an uncorroborated lone rejection — so they stop being
+    decisive until a second distinct user or a research-backed verdict arrives."""
+    import sqlite3
+
+    db = str(tmp_path / "phase-e.db")
+    conn = sqlite3.connect(db)
+    conn.execute(
+        """
+        CREATE TABLE fit_learning (
+            kind TEXT NOT NULL,
+            key TEXT NOT NULL,
+            trials INTEGER NOT NULL DEFAULT 0,
+            kept INTEGER NOT NULL DEFAULT 0,
+            user_rejects INTEGER NOT NULL DEFAULT 0,
+            last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (kind, key)
+        )
+        """
+    )
+    # A pre-guard decisive row: 1 rejection, no user id recorded.
+    conn.execute(
+        "INSERT INTO fit_learning (kind, key, trials, kept, user_rejects) "
+        "VALUES (?, ?, 0, 0, 1)",
+        (KIND_COMPANY, "old rejected co"),
+    )
+    conn.commit()
+    conn.close()
+
+    s = FitLearningStore(db)
+    row = s.get(KIND_COMPANY, "old rejected co")
+    assert row == _row(0, 0, user_rejects=1, rejector_ids="", corroborated=0)
+    # The gaming guard reads the migrated row honestly: the legacy verdict's
+    # rejector is ANONYMOUS (no id was recorded pre-guard), so one later named
+    # user still leaves only one distinct named rejector — not decisive.
+    assert s.should_skip_company("Old Rejected Co") is False
+    s.reject_company("Old Rejected Co", user_id="u2")
+    assert s.get(KIND_COMPANY, "old rejected co") == _row(
+        0, 0, user_rejects=2, rejector_ids="u2")
+    assert s.should_skip_company("Old Rejected Co") is False
+    # The migration path for such rows is the backfill script: it replays the
+    # admin-confirmed purge as corroborated, which IS decisive.
+    s.reject_company("Old Rejected Co", user_id="u2", corroborated=True)
+    assert s.should_skip_company("Old Rejected Co") is True
+
+
+# ---------------------------------------------------------------------------
+# Gaming guard (2026-09-12) — is the "not our client" click the TRUTH?
+# ---------------------------------------------------------------------------
+
+def test_uncorroborated_single_user_rejection_is_not_decisive(tmp_path):
+    """One user clicking the strong reason on a lead the research itself LIKED
+    (no corroborated flag) must NOT purge the identity globally — the user may
+    just be tidying up ("sirf safai"). The verdict is recorded for audit, but
+    the gate stays open."""
+    s = FitLearningStore(str(tmp_path / "f.db"))
+    s.reject_company("Acme Construction", user_id="u1")
+    s.reject_domain("acme.com", user_id="u1")
+    assert s.get(KIND_COMPANY, "acme construction") == _row(
+        0, 0, user_rejects=1, rejector_ids="u1")
+    assert s.should_skip_company("Acme Construction") is False
+    assert s.should_skip_domain("acme.com") is False
+
+
+def test_same_user_rejecting_twice_is_still_not_decisive(tmp_path):
+    """The guard counts DISTINCT users — u1 clicking "not our client" on every
+    email the company owns is still one opinion, not two. Duplicate clicks only
+    accumulate the audit counter (user_rejects), never the rejector set."""
+    s = FitLearningStore(str(tmp_path / "f.db"))
+    for _ in range(3):
+        s.reject_company("Acme Construction", user_id="u1")
+    assert s.get(KIND_COMPANY, "acme construction") == _row(
+        0, 0, user_rejects=3, rejector_ids="u1")
+    assert s.should_skip_company("Acme Construction") is False
+
+
+def test_second_distinct_user_rejection_is_decisive(tmp_path):
+    """TWO INDEPENDENT users choosing the same identity is strong evidence the
+    verdict is real, not a cleaning spree — that is decisive."""
+    s = FitLearningStore(str(tmp_path / "f.db"))
+    s.reject_company("Acme Construction", user_id="u1")
+    assert s.should_skip_company("Acme Construction") is False
+    s.reject_company("Acme Construction", user_id="u2")
+    assert s.get(KIND_COMPANY, "acme construction") == _row(
+        0, 0, user_rejects=2, rejector_ids="u1,u2")
+    assert s.should_skip_company("Acme Construction") is True
+
+
+def test_corroborated_rejection_is_immediately_decisive(tmp_path):
+    """When the research itself agreed (the dossier's fit said "not our
+    client") or an admin made the call, ONE verdict is decisive — the user's
+    click merely confirms evidence that already existed."""
+    s = FitLearningStore(str(tmp_path / "f.db"))
+    s.reject_company("Acme Construction", user_id="u1", corroborated=True)
+    s.reject_domain("acme.com", user_id="u1", corroborated=True)
+    assert s.should_skip_company("Acme Construction") is True
+    assert s.should_skip_domain("acme.com") is True
+
+
+def test_corroboration_cannot_be_unset_by_later_plain_rejections(tmp_path):
+    """corroborated only moves UP: a later uncorroborated delete (any user)
+    must never downgrade a research-backed purge back to open."""
+    s = FitLearningStore(str(tmp_path / "f.db"))
+    s.reject_company("Acme Construction", user_id="u1", corroborated=True)
+    s.reject_company("Acme Construction", user_id="u2")
+    row = s.get(KIND_COMPANY, "acme construction")
+    assert row["user_rejects"] == 2
+    assert row["corroborated"] == 1
     assert s.should_skip_company("Acme Construction") is True
 
 
@@ -523,7 +646,7 @@ def test_user_rejected_company_short_circuits_before_person(tmp_path):
     """A company the user already deleted as not-a-client is auto-skipped at
     Stage 1c — before person research — and the reason names the purge."""
     store = FitLearningStore(str(tmp_path / "f.db"))
-    store.reject_company("Acme Construction")
+    store.reject_company("Acme Construction", corroborated=True)
     assert store.should_skip_company("Acme Construction") is True
 
     person_calls = {"n": 0}
@@ -542,7 +665,7 @@ def test_user_rejected_domain_short_circuits_before_person(tmp_path):
     """A rejected mail domain auto-skips on the next pass even when the company
     name differs slightly — the domain is the durable purge key."""
     store = FitLearningStore(str(tmp_path / "f.db"))
-    store.reject_domain("acme.com")
+    store.reject_domain("acme.com", corroborated=True)
     assert store.should_skip_domain("acme.com") is True
 
     person_calls = {"n": 0}

@@ -3,13 +3,15 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Mail, Globe, Phone, Trash2 } from "lucide-react";
 import { api } from "../api/client";
 import { Spinner } from "../components/StatusChip";
+import DeleteReasonDialog, { type DeleteReason } from "../components/DeleteReasonDialog";
 
 /**
  * Contacts — the LEAN outreach list. Only identity + contact channels render:
  * name, email, phone (future-ready, empty today), LinkedIn. No scores, no
  * recommendation badges, no reason — that depth belongs on the Companies
  * screen. The user can delete a contact (data management), which removes its
- * dossier + discovery-cache entry so it is never re-researched.
+ * dossier + discovery-cache entry so it is never re-researched — after picking
+ * a MANDATORY structured reason (the delete dialog) so the AI learns honestly.
  */
 export default function Contacts() {
   const qc = useQueryClient();
@@ -22,19 +24,26 @@ export default function Contacts() {
   });
 
   const [busyEmail, setBusyEmail] = useState<string | null>(null);
+  // The pending delete: which email the dialog will remove once a reason is
+  // chosen. null = dialog closed.
+  const [pendingDelete, setPendingDelete] = useState<string | null>(null);
 
   const del = useMutation({
-    mutationFn: (email: string) => api.deleteLead(email),
+    mutationFn: (v: { email: string; reason: DeleteReason }) =>
+      api.deleteLead(v.email, v.reason),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["leads"] }),
   });
 
-  async function handleDelete(email: string) {
-    if (!window.confirm(`Delete ${email}?\n\nYe contact remove ho jayega (dossier + discovery cache dono se).`)) {
-      return;
-    }
-    setBusyEmail(email);
+  function handleDelete(email: string) {
+    setPendingDelete(email); // open the mandatory-reason dialog
+  }
+
+  async function confirmDelete(reason: DeleteReason) {
+    if (!pendingDelete) return;
+    setBusyEmail(pendingDelete);
     try {
-      await del.mutateAsync(email);
+      await del.mutateAsync({ email: pendingDelete, reason });
+      setPendingDelete(null);
     } finally {
       setBusyEmail(null);
     }
@@ -139,6 +148,14 @@ export default function Contacts() {
           </table>
         </div>
       )}
+
+      {/* Mandatory structured reason before any delete — the AI learning gate. */}
+      <DeleteReasonDialog
+        count={pendingDelete ? 1 : 0}
+        busy={del.isPending}
+        onClose={() => setPendingDelete(null)}
+        onConfirm={confirmDelete}
+      />
     </div>
   );
 }

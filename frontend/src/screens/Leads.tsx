@@ -5,6 +5,7 @@ import { Download, CheckSquare, Inbox, Layers, Square, Tag, Trash2, X } from "lu
 import { api } from "../api/client";
 import { Spinner } from "../components/StatusChip";
 import ManageMenu from "../components/ManageMenu";
+import DeleteReasonDialog, { type DeleteReason } from "../components/DeleteReasonDialog";
 import type { EvidenceFact } from "../types";
 import { recommendationBadge, recommendationLabel, scoreColor } from "../lib/format";
 
@@ -237,8 +238,13 @@ export default function Leads() {
   const qc = useQueryClient();
   const [busyEmail, setBusyEmail] = useState<string | null>(null);
   const [junkNote, setJunkNote] = useState("");
+  // Pending delete: a single email, or "*" for the whole bulk selection. The
+  // reason dialog must answer BEFORE anything is deleted (mandatory reason).
+  const [pendingDelete, setPendingDelete] = useState<string | null>(null);
+  const [bulkDeleteBusy, setBulkDeleteBusy] = useState(false);
   const del = useMutation({
-    mutationFn: (email: string) => api.deleteLead(email),
+    mutationFn: (v: { email: string; reason: DeleteReason }) =>
+      api.deleteLead(v.email, v.reason),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["leads"] });
       qc.invalidateQueries({ queryKey: ["folders"] });
@@ -257,15 +263,38 @@ export default function Leads() {
     },
   });
 
-  async function handleDelete(email: string) {
-    if (!window.confirm(`Delete ${email}?\n\nYe lead remove ho jayegi (dossier + discovery cache se).`)) {
+  function handleDelete(email: string) {
+    setPendingDelete(email); // the mandatory-reason dialog decides from here
+  }
+
+  async function confirmDelete(reason: DeleteReason) {
+    if (pendingDelete === "*") {
+      // Bulk: the chosen reason applies to every selected lead.
+      const emails = [...selected];
+      if (emails.length > 0) {
+        setBulkDeleteBusy(true);
+        try {
+          await Promise.allSettled(
+            emails.map((email) => api.deleteLead(email, reason)),
+          );
+          setSelected(new Set());
+        } finally {
+          setBulkDeleteBusy(false);
+          qc.invalidateQueries({ queryKey: ["leads"] });
+          qc.invalidateQueries({ queryKey: ["folders"] });
+        }
+      }
+      setPendingDelete(null);
       return;
     }
-    setBusyEmail(email);
-    try {
-      await del.mutateAsync(email);
-    } finally {
-      setBusyEmail(null);
+    if (pendingDelete) {
+      setBusyEmail(pendingDelete);
+      try {
+        await del.mutateAsync({ email: pendingDelete, reason });
+      } finally {
+        setBusyEmail(null);
+      }
+      setPendingDelete(null);
     }
   }
 
@@ -330,26 +359,9 @@ export default function Leads() {
     }
   }
 
-  const [bulkDeleteBusy, setBulkDeleteBusy] = useState(false);
-  async function handleBulkDelete() {
-    const emails = [...selected];
-    if (emails.length === 0) return;
-    if (
-      !window.confirm(
-        `Delete ${emails.length} selected lead(s)?\n\nYe ${emails.length} leads remove ho jayengi (dossier + discovery cache se).`,
-      )
-    ) {
-      return;
-    }
-    setBulkDeleteBusy(true);
-    try {
-      await Promise.allSettled(emails.map((email) => api.deleteLead(email)));
-      setSelected(new Set());
-    } finally {
-      setBulkDeleteBusy(false);
-      qc.invalidateQueries({ queryKey: ["leads"] });
-      qc.invalidateQueries({ queryKey: ["folders"] });
-    }
+  function handleBulkDelete() {
+    if (selected.size === 0) return;
+    setPendingDelete("*"); // bulk marker — dialog asks ONE reason for all
   }
 
   // Folder/tag rename + delete + new-folder creation live in the ⚙ Manage
@@ -1110,6 +1122,15 @@ export default function Leads() {
           </div>
         </div>
       )}
+
+      {/* Mandatory structured reason before any delete (single or bulk) —
+          the AI learning gate. count=selected.size for the bulk marker "*". */}
+      <DeleteReasonDialog
+        count={pendingDelete === "*" ? selected.size : pendingDelete ? 1 : 0}
+        busy={del.isPending || bulkDeleteBusy}
+        onClose={() => setPendingDelete(null)}
+        onConfirm={confirmDelete}
+      />
     </div>
   );
 }

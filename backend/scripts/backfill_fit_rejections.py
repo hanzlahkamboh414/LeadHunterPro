@@ -51,7 +51,13 @@ def main() -> int:
         domain = (email or "").rsplit("@", 1)[1].strip().lower()
         if not domain:
             continue
-        store.reject_domain(domain)
+        # The audit trail this replays is the 2026-09-08 purge — deletions the
+        # operator CONFIRMED as irrelevant before deleting. That is an
+        # admin-class verdict, so the replay seeds it as corroborated (decisive
+        # under the 2026-09-12 gaming guard); a plain uncorroborated seed would
+        # silently re-open identities the operator already purged.
+        store.reject_domain(domain, user_id="backfill-purge",
+                            corroborated=True)
         if domain not in seeded:
             seeded.append(domain)
 

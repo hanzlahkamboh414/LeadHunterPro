@@ -699,15 +699,24 @@ def create_folder(body: FolderCreate, user: User = Depends(get_current_user)) ->
 
 
 @router.delete("/{email}", dependencies=[Depends(require_api_key)])
-def delete_lead(email: str, user: User = Depends(get_current_user)) -> dict[str, Any]:
+def delete_lead(email: str, reason: str = "manual",
+                user: User = Depends(get_current_user)) -> dict[str, Any]:
     """Delete ONE lead (dossier + discovery cache) — the user's per-lead data
     management. A dismissed lead is gone and will not be re-researched.
+
+    ``reason`` is MANDATORY in spirit: the frontend delete dialog always sends
+    a structured slug (``not_our_client`` / ``bad_data`` / ``duplicate`` /
+    ``already_contacted`` / ``low_quality`` / ``other``). Only ``not_our_client``
+    feeds identity learning — and it purges the company/domain globally just
+    when the research itself agreed, an admin said it, or a second distinct
+    user repeats it (the gaming guard; see ``FitLearningStore.should_skip``).
 
     Per-user isolation: a non-admin can only delete their OWN dossier.
     """
     if not _user_owns_dossier(email, user):
         raise HTTPException(status_code=404, detail=f"no dossier for {email}")
-    if not _store.delete(email):
+    if not _store.delete(email, reason=reason, user_id=user.id,
+                         is_admin=user.is_admin):
         raise HTTPException(status_code=404, detail=f"no dossier for {email}")
     # Also drop it from the discovery cache so a future run does not re-discover
     # it and re-burn credits on an address the user chose to dismiss.

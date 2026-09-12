@@ -21,7 +21,7 @@ behaves like the deletion never happened.
 
 from __future__ import annotations
 
-from app.lead_research.fit_learning import FitLearningStore
+from app.lead_research.fit_learning import KIND_COMPANY, KIND_DOMAIN, FitLearningStore
 from app.lead_research.models import CompanyProfile, LeadDossier, PersonFindings
 from app.lead_research.service import LeadResearchStore, _is_rejection_reason
 
@@ -63,15 +63,58 @@ def test_is_rejection_reason_excludes_junk_and_manual():
 # ---------------------------------------------------------------------------
 
 def test_rejection_delete_feeds_company_and_domain(tmp_path):
-    """Deleting as 'irrelevant' teaches the learning table (same db file) so a
-    re-discovery pass skips this company+domain."""
+    """Deleting as 'irrelevant' teaches the learning table (same db file). With
+    the 2026-09-12 gaming guard, a LONE uncorroborated delete is recorded for
+    audit but is not yet decisive — the gate opens only on corroboration."""
     db = str(tmp_path / "lead_research.db")
     store = LeadResearchStore(db_path=db)
     store.save(_make_dossier(email="alice@acme.com"))
 
-    assert store.delete("alice@acme.com", reason="irrelevant") is True
+    assert store.delete("alice@acme.com", reason="irrelevant",
+                        user_id="u1") is True
 
     learning = FitLearningStore(db)
+    assert learning.get(KIND_COMPANY, "test co")["user_rejects"] == 1
+    assert learning.get(KIND_DOMAIN, "example.com")["user_rejects"] == 1
+    assert learning.should_skip_company("Test Co") is False  # guard: 1 lone user
+    assert learning.should_skip_domain("example.com") is False
+
+
+def test_rejection_delete_corroborated_by_research_is_decisive(tmp_path):
+    """When the dossier's own research said 'not our client', the user's delete
+    is corroborated — one verdict then purges company+domain decisively (the
+    2026-09-08 purge contract, now evidence-gated)."""
+    db = str(tmp_path / "lead_research.db")
+    store = LeadResearchStore(db_path=db)
+    dossier = _make_dossier(email="alice@acme.com")
+    dossier.fit = "Not our client — self-estimates in-house"
+    store.save(dossier)
+
+    assert store.delete("alice@acme.com", reason="irrelevant",
+                        user_id="u1") is True
+
+    learning = FitLearningStore(db)
+    assert learning.should_skip_company("Test Co") is True
+    assert learning.should_skip_domain("example.com") is True
+
+
+def test_second_distinct_user_delete_is_decisive(tmp_path):
+    """Two INDEPENDENT users deleting the same identity is decisive even with
+    no research agreement — the anti-gaming corroboration path."""
+    db = str(tmp_path / "lead_research.db")
+    store = LeadResearchStore(db_path=db)
+    store.save(_make_dossier(email="alice@acme.com"))
+    assert store.delete("alice@acme.com", reason="irrelevant",
+                        user_id="u1") is True
+    store.save(_make_dossier(email="bob@acme.com"))
+    assert store.delete("bob@acme.com", reason="irrelevant",
+                        user_id="u2") is True
+
+    learning = FitLearningStore(db)
+    assert learning.get(KIND_COMPANY, "test co") == {
+        "trials": 0, "kept": 0, "user_rejects": 2,
+        "rejector_ids": "u1,u2", "corroborated": 0,
+    }
     assert learning.should_skip_company("Test Co") is True
     assert learning.should_skip_domain("example.com") is True
 
@@ -112,8 +155,9 @@ def test_serial_intake_drops_user_rejected_company(monkeypatch, tmp_path):
     db = str(tmp_path / "leads.db")
     pending = PendingLeadsStore(db_path=db)
     dossiers = LeadResearchStore(db_path=db)
-    # The user previously deleted "Rejected Co" as not-a-client.
-    FitLearningStore(db).reject_company("Rejected Co")
+    # The user previously deleted "Rejected Co" as not-a-client (corroborated
+    # — the research agreed).
+    FitLearningStore(db).reject_company("Rejected Co", corroborated=True)
 
     def _discover(trade, location, limit, skip_pdfs=None, yield_store=None, candidate_store=None):
         records = [
@@ -146,8 +190,8 @@ def test_serial_intake_drops_user_rejected_domain(monkeypatch, tmp_path):
     db = str(tmp_path / "leads.db")
     pending = PendingLeadsStore(db_path=db)
     dossiers = LeadResearchStore(db_path=db)
-    # The user deleted an email on this domain as not-a-client.
-    FitLearningStore(db).reject_domain("rejected.com")
+    # The user deleted an email on this domain as not-a-client (corroborated).
+    FitLearningStore(db).reject_domain("rejected.com", corroborated=True)
 
     def _discover(trade, location, limit, skip_pdfs=None, yield_store=None, candidate_store=None):
         records = [
@@ -183,7 +227,7 @@ def test_streaming_intake_never_researches_rejected_lead(monkeypatch, tmp_path):
     db = str(tmp_path / "leads.db")
     store = LeadResearchStore(db_path=db)
     pending = PendingLeadsStore(db_path=db)
-    FitLearningStore(db).reject_domain("rejected.com")
+    FitLearningStore(db).reject_domain("rejected.com", corroborated=True)
 
     calls: list[tuple] = []
 

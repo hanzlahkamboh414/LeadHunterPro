@@ -440,8 +440,16 @@ export const api = {
   },
 
   // Data management (user-controlled): a lead the user dismisses is gone.
-  deleteLead(email: string): Promise<{ email: string; deleted: boolean }> {
-    return request(`/leads/${encodeURIComponent(email)}`, { method: "DELETE" });
+  // ``reason`` is the structured slug from the delete dialog — only
+  // "not_our_client" feeds identity learning (backend applies the guard).
+  deleteLead(
+    email: string,
+    reason = "manual",
+  ): Promise<{ email: string; deleted: boolean }> {
+    return request(
+      `/leads/${encodeURIComponent(email)}?reason=${encodeURIComponent(reason)}`,
+      { method: "DELETE" },
+    );
   },
 
   /** Bulk-remove every junk dossier (re-gated skip: dead domains, low score…). */

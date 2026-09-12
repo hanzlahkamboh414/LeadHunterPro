@@ -727,8 +727,8 @@ def test_pre_verdict_kill_switch(monkeypatch):
 
 def test_learned_domain_skips_before_any_network():
     """A domain the USER rejected is skipped before even the homepage fetch —
-    the Stage-1c domain check moved earlier (one human rejection is decisive,
-    no trial count, per fit_learning.should_skip)."""
+    the Stage-1c domain check moved earlier (a corroborated rejection is
+    decisive, no trial count, per fit_learning.should_skip)."""
     import os
     import tempfile
 
@@ -737,7 +737,7 @@ def test_learned_domain_skips_before_any_network():
     with tempfile.TemporaryDirectory() as td:
         fit_db = os.path.join(td, "fit.db")
         store = FitLearningStore(fit_db)
-        store.reject_domain("acme.com")  # one user "not our client" verdict
+        store.reject_domain("acme.com", corroborated=True)  # research-backed verdict
 
         fetch_calls = {"n": 0}
         pages = _acme_pages()

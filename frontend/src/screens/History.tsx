@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
+import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { Activity, CheckCircle2, ListChecks, PlayCircle } from "lucide-react";
 import { api } from "../api/client";
 import { PageHeader } from "../components/PageHeader";
 import type { JobSummary } from "../types";
@@ -14,6 +16,39 @@ export default function History() {
     queryFn: () => api.listJobs(),
     refetchInterval: 10_000,
   });
+
+  const jobs = data ?? [];
+  const running = jobs.filter((j) => j.state === "running" || j.state === "queued").length;
+  const completed = jobs.filter((j) => j.state === "completed").length;
+  const delivered = jobs.reduce((s, j) => s + (j.working_leads ?? 0), 0);
+
+  // Working leads delivered per day — contiguous 14-day window anchored on
+  // the newest run day, so gaps show as honest zeros (same rule as the
+  // Dashboard trend chart). "YYYY-MM-DD" keys sort lexicographically.
+  const perDay = (() => {
+    if (jobs.length === 0) return [];
+    const byDay = new Map<string, number>();
+    for (const j of jobs) {
+      const day = j.created_at.slice(0, 10);
+      byDay.set(day, (byDay.get(day) ?? 0) + (j.working_leads ?? 0));
+    }
+    const days = [...byDay.keys()].sort().slice(-14);
+    if (days.length === 0) return [];
+    // Fill every day in the window so the axis is continuous.
+    const cur = new Date(days[0]);
+    const out: { day: string; label: string; working: number }[] = [];
+    while (out.length < days.length + 30) {
+      const iso = cur.toISOString().slice(0, 10);
+      if (iso > days[days.length - 1]) break;
+      out.push({
+        day: iso,
+        label: iso.slice(5), // MM-DD — the year is implied by "recent"
+        working: byDay.get(iso) ?? 0,
+      });
+      cur.setDate(cur.getDate() + 1);
+    }
+    return out;
+  })();
 
   return (
     <div className="px-8 py-7 max-w-4xl">
@@ -30,6 +65,62 @@ export default function History() {
           {isFetching ? <Spinner className="h-4 w-4" /> : "↻"} Refresh
         </button>
       </div>
+
+      {/* Stat cards + delivery trend — the run history at a glance,
+          Dashboard-style. */}
+      {jobs.length > 0 && (
+        <>
+          <div className="mt-5 grid grid-cols-2 lg:grid-cols-4 gap-3">
+            <HistStat label="Total runs" value={jobs.length.toLocaleString()} icon={Activity} />
+            <HistStat label="Active now" value={running.toLocaleString()} icon={PlayCircle} tint="indigo" />
+            <HistStat label="Completed" value={completed.toLocaleString()} icon={CheckCircle2} tint="emerald" />
+            <HistStat
+              label="Working leads delivered"
+              value={delivered.toLocaleString()}
+              icon={ListChecks}
+              tint="amber"
+            />
+          </div>
+
+          <section className="mt-4 rounded-xl border border-white/5 bg-white/[0.02] p-5">
+            <h2 className="text-[16px] font-semibold text-white mb-1">Delivery — last 14 days</h2>
+            <p className="text-[12px] text-slate-500 mb-3">
+              Working leads delivered per day (only completed/paused runs contribute their totals).
+            </p>
+            <div className="h-44">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={perDay} margin={{ top: 4, right: 4, bottom: 0, left: -28 }}>
+                  <CartesianGrid stroke="#1e2530" vertical={false} />
+                  <XAxis
+                    dataKey="label"
+                    tick={{ fill: "#64748b", fontSize: 11 }}
+                    tickLine={false}
+                    axisLine={{ stroke: "#1e2530" }}
+                    interval="preserveStartEnd"
+                  />
+                  <YAxis
+                    allowDecimals={false}
+                    tick={{ fill: "#64748b", fontSize: 11 }}
+                    tickLine={false}
+                    axisLine={false}
+                  />
+                  <Tooltip
+                    cursor={{ fill: "rgba(99,102,241,0.08)" }}
+                    contentStyle={{
+                      background: "#0d1117",
+                      border: "1px solid rgba(255,255,255,0.1)",
+                      borderRadius: 8,
+                      fontSize: 12,
+                    }}
+                    labelStyle={{ color: "#94a3b8" }}
+                  />
+                  <Bar dataKey="working" name="working leads" fill="#818cf8" radius={[3, 3, 0, 0]} maxBarSize={28} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </section>
+        </>
+      )}
 
       {isError && (
         <p className="mt-4 text-[13px] text-rose-300 bg-rose-500/10 rounded-lg px-3 py-2">
@@ -60,8 +151,40 @@ export default function History() {
   );
 }
 
-function HistoryRow({ job }: { job: JobSummary }) {
-  const [open, setOpen] = useState(false);
+/** Compact stat card for the History overview strip. */
+function HistStat({
+  label,
+  value,
+  icon: Icon,
+  tint = "slate",
+}: {
+  label: string;
+  value: string;
+  icon: typeof Activity;
+  tint?: "emerald" | "amber" | "indigo" | "slate";
+}) {
+  const tintCls =
+    tint === "emerald"
+      ? "bg-emerald-500/15 text-emerald-300"
+      : tint === "amber"
+        ? "bg-amber-500/15 text-amber-300"
+        : tint === "indigo"
+          ? "bg-indigo-500/15 text-indigo-400"
+          : "bg-slate-500/15 text-slate-400";
+  return (
+    <div className="rounded-xl border border-white/5 bg-white/[0.02] p-4">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[12.5px] text-slate-400">{label}</span>
+        <div className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ${tintCls}`}>
+          <Icon className="h-[15px] w-[15px]" strokeWidth={1.9} />
+        </div>
+      </div>
+      <div className="mt-1.5 text-[22px] font-semibold text-white">{value}</div>
+    </div>
+  );
+}
+
+function HistoryRow({ job }: { job: JobSummary }) {  const [open, setOpen] = useState(false);
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 

@@ -1,7 +1,7 @@
 import { useCallback, useLayoutEffect, useMemo, useState } from "react";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useLocation, useSearchParams } from "react-router-dom";
-import { Download, CheckSquare, Inbox, Layers, Square, Tag, Trash2, X } from "lucide-react";
+import { Download, CheckSquare, Flame, Gauge, Inbox, Layers, Square, Sprout, Tag, Trash2, UserCheck, X } from "lucide-react";
 import { api } from "../api/client";
 import { PageHeader } from "../components/PageHeader";
 import { Combobox, Select } from "../components/Select";
@@ -192,6 +192,14 @@ export default function Leads() {
   // Honest total for the CURRENT filters (from X-Total-Count), so "Show more"
   // knows when it's done and the header can be accurate even on page 1.
   const totalLeads = pageQ.data?.pages[0]?.total ?? 0;
+
+  // Stat-strip tallies — computed from the LOADED rows only (the backend
+  // pages in SQL), so a filtered view with 500 matches still shows honest
+  // numbers for the first page, never a fake full-store count.
+  const contactNowCount = leads.filter((l) => l.recommendation === "contact_now").length;
+  const nurtureCount = leads.filter((l) => l.recommendation === "nurture").length;
+  const boundCount = leads.filter((l) => l.bound).length;
+  const avgScore = leads.length ? leads.reduce((s, l) => s + l.score, 0) / leads.length : 0;
 
   // Folders catalog (Phase B.2) — persisted, empty-allowed clickable groups.
   // The filter + manage panel read from here so a folder exists BEFORE any
@@ -529,6 +537,48 @@ export default function Leads() {
           </button>
         </div>
       </div>
+
+      {/* Mini stat strip — the current view at a glance, Dashboard-style.
+          Clickable cards deep-link into the matching filter (toggle off on
+          second click). Counts are from the loaded rows; "loaded" appears
+          when the server total is larger (honest paging). */}
+      {!isLoading && leads.length > 0 && (
+        <div className="mt-4 grid grid-cols-2 lg:grid-cols-4 gap-3">
+          <StatMini
+            label="In this view"
+            value={totalLeads.toLocaleString()}
+            sub={leads.length < totalLeads ? `${leads.length} loaded — Show more for the rest` : "all loaded"}
+            icon={Layers}
+          />
+          <StatMini
+            label="Contact Now"
+            value={contactNowCount.toLocaleString()}
+            sub={`${pctOf(contactNowCount, leads.length)} of loaded`}
+            icon={Flame}
+            tint="emerald"
+            active={rec === "contact_now"}
+            onClick={() => setRec(rec === "contact_now" ? "" : "contact_now")}
+          />
+          <StatMini
+            label="Nurture"
+            value={nurtureCount.toLocaleString()}
+            sub={`${pctOf(nurtureCount, leads.length)} of loaded`}
+            icon={Sprout}
+            tint="amber"
+            active={rec === "nurture"}
+            onClick={() => setRec(rec === "nurture" ? "" : "nurture")}
+          />
+          <StatMini
+            label="Avg potential"
+            value={avgScore.toFixed(1)}
+            sub={`${pctOf(boundCount, leads.length)} decision-maker bound`}
+            icon={bound === "true" ? UserCheck : Gauge}
+            tint="indigo"
+            active={bound === "true"}
+            onClick={() => setBound(bound === "true" ? "" : "true")}
+          />
+        </div>
+      )}
 
       {/* Places chip bar — the folder/tag surface as ONE row above the table
           (Inbox · All · 📁 per folder · # per tag), so no left rail steals data
@@ -968,7 +1018,19 @@ export default function Leads() {
                         <span className="text-[12px] text-slate-600">—</span>
                       )}
                     </td>
-                    <td className={`px-4 py-3 font-semibold ${scoreColor(l.score)}`}>{l.score.toFixed(1)}</td>
+                    <td className="px-4 py-3">
+                      <div className={`font-semibold ${scoreColor(l.score)}`}>{l.score.toFixed(1)}</div>
+                      {/* Quality bar — the number gets a proportional visual so
+                          strong rows pop while scanning, weak ones don't. */}
+                      <div className="mt-1.5 h-1 w-12 rounded-full bg-white/[0.06] overflow-hidden">
+                        <div
+                          className={`h-full rounded-full ${
+                            l.score >= 7 ? "bg-emerald-300" : l.score >= 4 ? "bg-amber-300" : "bg-slate-400"
+                          }`}
+                          style={{ width: `${Math.min(100, Math.max(0, l.score * 10))}%` }}
+                        />
+                      </div>
+                    </td>
                     <td className="px-4 py-3">
                       <Badge value={l.recommendation} />
                     </td>
@@ -1200,6 +1262,63 @@ function downloadCsvText(text: string, filename: string) {
 
 function Filter({ children }: { children: React.ReactNode }) {
   return <div className="flex flex-col gap-1">{children}</div>;
+}
+
+function pctOf(n: number, total: number): string {
+  if (!total) return "0%";
+  return `${Math.round((n / total) * 100)}%`;
+}
+
+/** Mini stat card for the Leads stat strip — same visual language as the
+ *  Dashboard cards (border/white-2% surface, icon chip, big value), but
+ *  compact. Clickable cards toggle the matching filter. */
+function StatMini({
+  label,
+  value,
+  sub,
+  icon: Icon,
+  tint = "slate",
+  active = false,
+  onClick,
+}: {
+  label: string;
+  value: string;
+  sub: string;
+  icon: typeof Layers;
+  tint?: "emerald" | "amber" | "indigo" | "slate";
+  active?: boolean;
+  onClick?: () => void;
+}) {
+  const tintCls =
+    tint === "emerald"
+      ? "bg-emerald-500/15 text-emerald-300"
+      : tint === "amber"
+        ? "bg-amber-500/15 text-amber-300"
+        : tint === "indigo"
+          ? "bg-indigo-500/15 text-indigo-400"
+          : "bg-slate-500/15 text-slate-400";
+  const cls = `rounded-xl border p-4 text-left transition-colors ${
+    onClick ? "cursor-pointer hover:bg-white/[0.04]" : ""
+  } ${active ? "border-indigo-500/50 bg-indigo-500/[0.08]" : "border-white/5 bg-white/[0.02]"}`;
+  const body = (
+    <>
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[12.5px] text-slate-400">{label}</span>
+        <div className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ${tintCls}`}>
+          <Icon className="h-[15px] w-[15px]" strokeWidth={1.9} />
+        </div>
+      </div>
+      <div className="mt-1.5 text-[22px] font-semibold text-white">{value}</div>
+      <div className="mt-0.5 text-[11.5px] text-slate-500">{sub}</div>
+    </>
+  );
+  return onClick ? (
+    <button type="button" onClick={onClick} className={cls}>
+      {body}
+    </button>
+  ) : (
+    <div className={cls}>{body}</div>
+  );
 }
 
 function PlaceChip({

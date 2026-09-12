@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Mail, Globe, Phone, Trash2 } from "lucide-react";
+import { Globe, Link2, Mail, Phone, Search, Trash2, Users } from "lucide-react";
 import { api } from "../api/client";
 import { PageHeader } from "../components/PageHeader";
 import { Spinner } from "../components/StatusChip";
@@ -23,6 +23,19 @@ export default function Contacts() {
     queryKey: ["leads", { scope: "all" }],
     queryFn: () => api.listLeads({ folder: "*", limit: 1000 }),
   });
+
+  // Client-side live filter — the whole outreach list is already downloaded
+  // (limit 1000), so searching name/company/email/LinkedIn needs no round trip.
+  const [filter, setFilter] = useState("");
+  const q = filter.trim().toLowerCase();
+  const contacts = data ?? [];
+  const visible = q
+    ? contacts.filter((c) =>
+        [c.person, c.company, c.email, c.linkedin].some((v) => (v ?? "").toLowerCase().includes(q)),
+      )
+    : contacts;
+  const withLinkedIn = contacts.filter((c) => c.linkedin).length;
+  const withPhone = contacts.filter((c) => c.phone).length;
 
   const [busyEmail, setBusyEmail] = useState<string | null>(null);
   // The pending delete: which email the dialog will remove once a reason is
@@ -60,6 +73,59 @@ export default function Contacts() {
         />
       </div>
 
+      {/* Overview chips + live search — the outreach list at a glance. */}
+      {contacts.length > 0 && (
+        <div className="mt-5 flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-2 rounded-xl border border-white/5 bg-white/[0.02] px-4 py-2.5">
+            <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-indigo-500/15">
+              <Users className="h-[15px] w-[15px] text-indigo-400" strokeWidth={1.9} />
+            </div>
+            <div>
+              <div className="text-[16px] font-semibold text-white leading-tight">
+                {contacts.length.toLocaleString()}
+              </div>
+              <div className="text-[11px] text-slate-500">contacts</div>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 rounded-xl border border-white/5 bg-white/[0.02] px-4 py-2.5">
+            <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-sky-500/15">
+              <Link2 className="h-[15px] w-[15px] text-sky-300" strokeWidth={1.9} />
+            </div>
+            <div>
+              <div className="text-[16px] font-semibold text-white leading-tight">
+                {withLinkedIn.toLocaleString()}
+                <span className="ml-1 text-[11.5px] font-normal text-slate-500">
+                  ({contacts.length ? Math.round((withLinkedIn / contacts.length) * 100) : 0}%)
+                </span>
+              </div>
+              <div className="text-[11px] text-slate-500">with LinkedIn</div>
+            </div>
+          </div>
+          {withPhone > 0 && (
+            <div className="flex items-center gap-2 rounded-xl border border-white/5 bg-white/[0.02] px-4 py-2.5">
+              <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-emerald-500/15">
+                <Phone className="h-[15px] w-[15px] text-emerald-300" strokeWidth={1.9} />
+              </div>
+              <div>
+                <div className="text-[16px] font-semibold text-white leading-tight">
+                  {withPhone.toLocaleString()}
+                </div>
+                <div className="text-[11px] text-slate-500">with phone</div>
+              </div>
+            </div>
+          )}
+          <div className="relative ml-auto w-full sm:w-64">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
+            <input
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              placeholder="Search name, company, email…"
+              className="w-full rounded-lg border border-white/5 bg-white/[0.04] py-2.5 pl-9 pr-3 text-[13px] text-slate-300 placeholder:text-slate-500 outline-none focus:border-indigo-500/40 focus:ring-2 focus:ring-indigo-500/40"
+            />
+          </div>
+        </div>
+      )}
+
       {isError && (
         <p className="text-[13px] text-rose-300 bg-rose-500/10 rounded-lg px-3 py-2 mt-4">
           Failed to load contacts: {(error as Error).message}
@@ -70,9 +136,13 @@ export default function Contacts() {
         <div className="flex items-center gap-2 text-slate-500 text-sm py-16 justify-center">
           <Spinner /> Loading contacts…
         </div>
-      ) : !data || data.length === 0 ? (
+      ) : contacts.length === 0 ? (
         <div className="rounded-xl border border-dashed border-white/10 py-16 text-center text-slate-500 mt-4">
           No contacts yet. Run a search on the <span className="text-indigo-400">Research</span> screen.
+        </div>
+      ) : visible.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-white/10 py-16 text-center text-slate-500 mt-4">
+          No contacts match “{filter.trim()}”.
         </div>
       ) : (
         <div className="mt-4 overflow-x-auto rounded-xl border border-white/5">
@@ -87,7 +157,7 @@ export default function Contacts() {
               </tr>
             </thead>
             <tbody>
-              {data.map((c) => (
+              {visible.map((c) => (
                 <tr key={c.email} className="border-t border-white/5 hover:bg-white/[0.03]">
                   <td className="px-4 py-3">
                     <div className="font-medium text-white">{c.person || "—"}</div>

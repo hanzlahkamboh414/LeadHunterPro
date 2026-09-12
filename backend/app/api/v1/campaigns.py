@@ -35,13 +35,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/campaigns", tags=["Campaigns"])
 
 
-def _account_email(email_store, account_id: int, user_id: str) -> str:
-    for a in email_store.list_for_user(user_id):
-        if a["id"] == account_id:
-            return a["email"]
-    return ""
-
-
 def _validate_start_at(start_at: str) -> str:
     dt = parse_ts(start_at)
     if dt is None:
@@ -57,17 +50,28 @@ def create_campaign(
     earlier campaign of this user) are excluded and the response says how
     many — never silently re-mailed."""
     email_store = get_email_store()
-    account = next(
-        (a for a in email_store.list_for_user(user.id)
-         if a["id"] == body.account_id), None)
-    if account is None:
-        raise HTTPException(status_code=404, detail="no such connected account")
-    if account["status"] != "connected":
-        raise HTTPException(
-            status_code=409,
-            detail=f"account {account['email']} is {account['status']} — "
-                   f"reconnect it first",
-        )
+    owned = {a["id"]: a for a in email_store.list_for_user(user.id)}
+    # The primary + every extra account must exist, be the caller's, and
+    # be connected (E5 multi-account).
+    wanted = [body.account_id] + [a for a in body.account_ids
+                                  if a != body.account_id]
+    if not wanted:
+        raise HTTPException(status_code=422,
+                            detail="at least one sending account is required")
+    if len(wanted) > 5:
+        raise HTTPException(status_code=422,
+                            detail="at most 5 sending accounts per campaign")
+    for aid in wanted:
+        account = owned.get(aid)
+        if account is None:
+            raise HTTPException(status_code=404,
+                                detail="no such connected account")
+        if account["status"] != "connected":
+            raise HTTPException(
+                status_code=409,
+                detail=f"account {account['email']} is {account['status']} — "
+                       f"reconnect it first",
+            )
     if body.delay_min_s > body.delay_max_s:
         raise HTTPException(status_code=422,
                             detail="delay_min_s must be <= delay_max_s")
@@ -89,10 +93,15 @@ def create_campaign(
         start_at=start_at, daily_limit=body.daily_limit,
         delay_min_s=body.delay_min_s, delay_max_s=body.delay_max_s,
         followups=[fu.model_dump() for fu in body.followups],
+        account_ids=wanted[1:],
+        ai_personalize=body.ai_personalize,
     )
-    campaign["account_email"] = account["email"]
-    logger.info("POST /campaigns -> %s (%d leads, %d excluded as already-sent)",
-                campaign["name"], len(emails), len(already))
+    campaign["account_email"] = owned[body.account_id]["email"]
+    campaign["account_emails"] = [owned[a]["email"] for a in wanted]
+    logger.info("POST /campaigns -> %s (%d leads, %d excluded as already-sent, "
+                "%d accounts, ai_personalize=%s)",
+                campaign["name"], len(emails), len(already), len(wanted),
+                body.ai_personalize)
     return {"campaign": campaign, "excluded": len(already)}
 
 
@@ -166,10 +175,13 @@ def campaign_test_send(
 
 @router.get("", response_model=CampaignsOut)
 def list_campaigns(user: User = Depends(get_current_user)) -> dict:
-    email_store = get_email_store()
+    by_id = {a["id"]: a["email"]
+             for a in get_email_store().list_for_user(user.id)}
     out = []
     for c in get_campaign_store().list_for_user(user.id):
-        c["account_email"] = _account_email(email_store, c["account_id"], user.id)
+        c["account_email"] = by_id.get(c["account_id"], "")
+        c["account_emails"] = [by_id[a] for a in c["account_ids"]
+                               if a in by_id]
         out.append(c)
     return {"campaigns": out}
 
@@ -181,8 +193,11 @@ def get_campaign(campaign_id: int,
     c = store.get(campaign_id, user.id)
     if c is None:
         raise HTTPException(status_code=404, detail="no such campaign")
+    by_id = {a["id"]: a["email"]
+             for a in get_email_store().list_for_user(user.id)}
     sends = store.sends(campaign_id, user.id) or []
-    c["account_email"] = _account_email(get_email_store(), c["account_id"], user.id)
+    c["account_email"] = by_id.get(c["account_id"], "")
+    c["account_emails"] = [by_id[a] for a in c["account_ids"] if a in by_id]
     c["sends"] = sends
     c["followups"] = store.followups(campaign_id)
     return c

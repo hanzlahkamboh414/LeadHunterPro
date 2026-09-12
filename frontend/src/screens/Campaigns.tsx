@@ -121,8 +121,9 @@ export default function Campaigns() {
 
       <div className="mt-5 flex items-center justify-between">
         <p className="text-[13px] text-slate-500">
-          Sends go out with a random 3–7 minute gap, max 30/day per Gmail
-          account, and every send lands on the lead's CRM timeline.
+          Sends go out with a random 3–7 minute gap and a daily cap per Gmail
+          account — add more sending accounts to scale volume safely. Every
+          send lands on the lead's CRM timeline.
         </p>
         <button
           onClick={() => setBuilding(true)}
@@ -177,7 +178,11 @@ export default function Campaigns() {
                     </span>
                   </div>
                   <p className="mt-1 text-[12.5px] text-slate-500 truncate">
-                    from {c.account_email || `account #${c.account_id}`} · starts{" "}
+                    from {c.account_email || `account #${c.account_id}`}
+                    {(c.account_emails?.length || 0) > 1 &&
+                      ` +${c.account_emails.length - 1} more`}
+                    {c.ai_personalize && " · AI opening lines"}
+                    {" · starts "}
                     {fmtLocal(c.start_at)}
                   </p>
                 </div>
@@ -315,6 +320,10 @@ function CampaignBuilder({
 }) {
   const [name, setName] = useState("");
   const [accountId, setAccountId] = useState<number | null>(null);
+  // Extra sending accounts beyond the primary (Phase E5): the scheduler
+  // spreads sends across all of them, so daily volume scales with N.
+  const [extraIds, setExtraIds] = useState<number[]>([]);
+  const [aiPersonalize, setAiPersonalize] = useState(false);
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
   const [folder, setFolder] = useState("");
@@ -369,12 +378,14 @@ function CampaignBuilder({
       return api.createCampaign({
         name: name.trim(),
         account_id: accountId!,
+        account_ids: extraIds.filter((id) => id !== accountId),
         subject,
         body,
         emails: poolLeads.map((l) => l.email),
         start_at: new Date(startAt).toISOString(),
         daily_limit: dailyLimit,
         followups,
+        ai_personalize: aiPersonalize,
       });
     },
     onSuccess: (r) => {
@@ -442,11 +453,16 @@ function CampaignBuilder({
               />
             </div>
             <div>
-              <label className="text-[12px] text-slate-400">From (Gmail account)</label>
+              <label className="text-[12px] text-slate-400">From (primary Gmail account)</label>
               <select
                 className={`${input} mt-1`}
                 value={accountId ?? ""}
-                onChange={(e) => setAccountId(Number(e.target.value) || null)}
+                onChange={(e) => {
+                  const id = Number(e.target.value) || null;
+                  setAccountId(id);
+                  // The primary can never also be an extra.
+                  if (id !== null) setExtraIds((prev) => prev.filter((x) => x !== id));
+                }}
               >
                 <option value="">Select account…</option>
                 {connected.map((a) => (
@@ -455,6 +471,38 @@ function CampaignBuilder({
                   </option>
                 ))}
               </select>
+              {accountId && connected.length > 1 && (
+                <div className="mt-2 space-y-1.5">
+                  <p className="text-[11.5px] text-slate-500">
+                    Also send from (optional, max 4) — sends spread across all
+                    accounts, each keeps its own daily limit:
+                  </p>
+                  {connected
+                    .filter((a) => a.id !== accountId)
+                    .map((a) => (
+                      <label
+                        key={a.id}
+                        className="flex items-center gap-2 text-[12.5px] text-slate-300 cursor-pointer"
+                      >
+                        <input
+                          type="checkbox"
+                          className="accent-indigo-500 w-3.5 h-3.5"
+                          checked={extraIds.includes(a.id)}
+                          onChange={(e) =>
+                            setExtraIds((prev) =>
+                              e.target.checked
+                                ? prev.length >= 4
+                                  ? prev
+                                  : [...prev, a.id]
+                                : prev.filter((x) => x !== a.id),
+                            )
+                          }
+                        />
+                        {a.email}
+                      </label>
+                    ))}
+                </div>
+              )}
             </div>
           </div>
 
@@ -490,6 +538,23 @@ function CampaignBuilder({
               Variables fill from the lead's researched dossier. Missing facts
               render blank — nothing is ever invented.
             </p>
+            <label className="mt-2.5 flex items-start gap-2 text-[12.5px] text-slate-300 cursor-pointer">
+              <input
+                type="checkbox"
+                className="accent-indigo-500 w-3.5 h-3.5 mt-0.5"
+                checked={aiPersonalize}
+                onChange={(e) => setAiPersonalize(e.target.checked)}
+              />
+              <span>
+                <span className="font-medium">AI opening line</span>{" "}
+                <span className="text-slate-500">
+                  — the first email to each lead starts with one or two
+                  AI-written sentences about their VERIFIED dossier facts
+                  (news, projects, events with sources). Nothing is invented;
+                  if a lead has no verified facts, the plain script goes out.
+                </span>
+              </span>
+            </label>
           </div>
 
           {/* Spam check — send the draft to your own inbox before scheduling. */}

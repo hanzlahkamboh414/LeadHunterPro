@@ -17,6 +17,10 @@ class FollowupIn(BaseModel):
 class CampaignCreateIn(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     account_id: int
+    """EXTRA sending accounts beyond the primary (E5 multi-account). The
+    scheduler spreads sends across all of them — pacing and the daily cap
+    apply per account. Primary + extras must total 1..5."""
+    account_ids: list[int] = Field(default_factory=list, max_length=4)
     subject: str = Field(min_length=1, max_length=500)
     body: str = Field(min_length=1, max_length=20000)
     emails: list[str] = Field(min_length=1, max_length=500)
@@ -29,6 +33,9 @@ class CampaignCreateIn(BaseModel):
     followups: list[FollowupIn] = Field(default_factory=list, max_length=3)
     """Optional follow-up emails (max 3). Each fires after_days days past
     the previous send, and is cancelled the moment the lead replies."""
+    """Prepend an AI-written opening line to each first email, built from
+    the lead's VERIFIED dossier evidence only (E5)."""
+    ai_personalize: bool = False
 
 
 class CampaignSendOut(BaseModel):
@@ -41,6 +48,8 @@ class CampaignSendOut(BaseModel):
     not_before: str
     attempts: int
     error: str
+    """Which account sent this row (0 = pending / pre-E5)."""
+    account_id: int = 0
 
 
 class FollowupOut(BaseModel):
@@ -53,6 +62,8 @@ class FollowupOut(BaseModel):
 class CampaignOut(BaseModel):
     id: int
     account_id: int
+    """All sending accounts of this campaign, primary first (E5)."""
+    account_ids: list[int] = []
     name: str
     subject: str
     body: str
@@ -63,6 +74,7 @@ class CampaignOut(BaseModel):
     daily_limit: int
     delay_min_s: int
     delay_max_s: int
+    ai_personalize: bool = False
     created_at: str
     updated_at: str
     pending: int
@@ -71,6 +83,9 @@ class CampaignOut(BaseModel):
     skipped: int
     replied: int
     account_email: str = ""
+    """Resolved addresses for account_ids, primary first (list view only —
+    the detail view fills it; single-account callers keep account_email)."""
+    account_emails: list[str] = []
 
 
 class CampaignTestSendIn(BaseModel):

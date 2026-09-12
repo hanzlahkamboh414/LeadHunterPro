@@ -234,6 +234,8 @@ export interface CrmInput {
 export interface Campaign {
   id: number;
   account_id: number;
+  /** All sending accounts, primary first (Phase E5). */
+  account_ids: number[];
   name: string;
   subject: string;
   body: string;
@@ -244,6 +246,8 @@ export interface Campaign {
   daily_limit: number;
   delay_min_s: number;
   delay_max_s: number;
+  /** AI opening line on first emails, from verified evidence only (E5). */
+  ai_personalize: boolean;
   created_at: string;
   updated_at: string;
   pending: number;
@@ -254,6 +258,8 @@ export interface Campaign {
   /** Leads who answered this campaign (Phase E4). */
   replied: number;
   account_email: string;
+  /** Resolved addresses of account_ids, primary first (E5). */
+  account_emails: string[];
 }
 
 /** One rung of a campaign's follow-up ladder (Phase E4). */
@@ -277,6 +283,8 @@ export interface CampaignSend {
   not_before: string;
   attempts: number;
   error: string;
+  /** Which account sent this row (0 = pending / pre-E5). */
+  account_id: number;
 }
 
 /** A follow-up rung in a POST /campaigns body (Phase E4). */
@@ -290,6 +298,9 @@ export interface FollowupInput {
 export interface CampaignCreateInput {
   name: string;
   account_id: number;
+  /** Extra sending accounts beyond the primary, max 4 (Phase E5). The
+   * scheduler spreads sends across all of them. */
+  account_ids?: number[];
   subject: string;
   body: string;
   emails: string[];
@@ -300,6 +311,8 @@ export interface CampaignCreateInput {
   delay_max_s?: number;
   /** Optional follow-up emails (max 3), each cancelled if the lead replies. */
   followups?: FollowupInput[];
+  /** Prepend an AI opening line (verified evidence only) to first emails. */
+  ai_personalize?: boolean;
 }
 
 /** A connected sending account (Phase E2) — Gmail via Google OAuth. This is

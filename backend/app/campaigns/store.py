@@ -17,6 +17,21 @@ Phase E4 adds the follow-up ladder and reply detection:
   cancel every pending follow-up for that lead.
 * ``reply_checks`` — per-account last inbox-check time (throttling).
 
+Phase E5 adds multi-account sending + AI personalization:
+
+* ``campaign_accounts`` — the 1..N sending accounts of a campaign (the
+  campaigns.account_id column stays as the primary, for display and as the
+  legacy single-account value). Every campaign's primary account is
+  backfilled here at boot, so a campaign ALWAYS has at least one row.
+* ``campaign_sends.account_id`` — which account ACTUALLY sent that row
+  (0 = not sent yet / pre-E5 row; account-scoped queries fall back to the
+  campaign's primary for those legacy rows).
+* ``campaigns.ai_personalize`` — per-campaign flag: prepend an AI-written
+  opening line built from the lead's VERIFIED dossier evidence.
+* ``campaign_hooks`` — the generated opening line per (campaign, lead),
+  cached so a retry never re-calls the AI. A stored empty hook means
+  "generated, nothing honest to say" (never re-asked).
+
 All timestamps are ISO-8601 UTC strings. The STORE is pure persistence +
 queries; every decision (when to send, what to do on 429) lives in
 scheduler.py so it can be tested with injected clocks.
@@ -147,6 +162,36 @@ class CampaignStore:
                     last_check TEXT NOT NULL DEFAULT ''
                 )
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS campaign_accounts (
+                    campaign_id INTEGER NOT NULL,
+                    account_id INTEGER NOT NULL,
+                    UNIQUE (campaign_id, account_id)
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS campaign_hooks (
+                    campaign_id INTEGER NOT NULL,
+                    email TEXT NOT NULL,
+                    hook TEXT NOT NULL DEFAULT '',
+                    UNIQUE (campaign_id, email)
+                )
+            """)
+            # E5 additive migrations (plain ALTERs — no rebuild needed).
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(campaigns)")]
+            if "ai_personalize" not in cols:
+                conn.execute("ALTER TABLE campaigns "
+                             "ADD COLUMN ai_personalize INTEGER NOT NULL DEFAULT 0")
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(campaign_sends)")]
+            if "account_id" not in cols:
+                conn.execute("ALTER TABLE campaign_sends "
+                             "ADD COLUMN account_id INTEGER NOT NULL DEFAULT 0")
+            # Every campaign's primary account becomes a campaign_accounts row
+            # (idempotent) — pre-E5 campaigns keep working unchanged.
+            conn.execute(
+                "INSERT OR IGNORE INTO campaign_accounts (campaign_id, account_id) "
+                "SELECT id, account_id FROM campaigns"
+            )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_sends_campaign "
                 "ON campaign_sends (campaign_id, state)"
@@ -161,27 +206,42 @@ class CampaignStore:
         body: str, emails: list[str], start_at: str,
         daily_limit: int = 30, delay_min_s: int = 180, delay_max_s: int = 420,
         followups: list[dict[str, Any]] | None = None,
+        account_ids: list[int] | None = None,
+        ai_personalize: bool = False,
     ) -> dict[str, Any]:
         """One campaign + its pending step-0 send queue (insertion order =
         send order) + its follow-up definitions (steps 1..N). Duplicate
-        emails within the list are de-duplicated here."""
+        emails within the list are de-duplicated here. ``account_ids`` adds
+        EXTRA sending accounts beyond the primary (E5 multi-account); the
+        primary always comes first and duplicates drop."""
         seen: list[str] = []
         for e in emails:
             if e and e not in seen:
                 seen.append(e)
+        accounts = [account_id]
+        for a in account_ids or []:
+            if a and a not in accounts:
+                accounts.append(int(a))
         now = _now()
         conn = self._conn()
         cur = conn.execute(
             "INSERT INTO campaigns (user_id, account_id, name, subject, body, "
             "status, start_at, daily_limit, delay_min_s, delay_max_s, "
-            "created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, ?, ?, ?)",
+            "ai_personalize, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, ?, ?, ?, ?)",
             (user_id, account_id, name, subject, body, start_at,
-             int(daily_limit), int(delay_min_s), int(delay_max_s), now, now),
+             int(daily_limit), int(delay_min_s), int(delay_max_s),
+             1 if ai_personalize else 0, now, now),
         )
         campaign_id = cur.lastrowid
         conn.executemany(
             "INSERT INTO campaign_sends (campaign_id, email) VALUES (?, ?)",
             [(campaign_id, e) for e in seen],
+        )
+        conn.executemany(
+            "INSERT OR IGNORE INTO campaign_accounts (campaign_id, account_id) "
+            "VALUES (?, ?)",
+            [(campaign_id, a) for a in accounts],
         )
         for i, fu in enumerate(followups or []):
             conn.execute(
@@ -196,34 +256,40 @@ class CampaignStore:
 
     # -- Read -----------------------------------------------------------
 
+    _CAMPAIGN_COLS = ("id, user_id, account_id, name, subject, body, status, "
+                      "paused_reason, resume_at, start_at, daily_limit, "
+                      "delay_min_s, delay_max_s, ai_personalize, "
+                      "created_at, updated_at")
+
     def get(self, campaign_id: int, user_id: str) -> dict[str, Any] | None:
         """One campaign (None when missing or not the caller's) + progress."""
         conn = self._conn()
         row = conn.execute(
-            "SELECT id, user_id, account_id, name, subject, body, status, "
-            "paused_reason, resume_at, start_at, daily_limit, delay_min_s, "
-            "delay_max_s, created_at, updated_at FROM campaigns "
-            "WHERE id = ? AND user_id = ?",
+            f"SELECT {self._CAMPAIGN_COLS} FROM campaigns "
+            f"WHERE id = ? AND user_id = ?",
             (campaign_id, user_id),
         ).fetchone()
         counts = self._counts(conn, [campaign_id]).get(campaign_id, {})
         conn.close()
         if row is None:
             return None
-        return self._row_to_campaign(row, counts)
+        out = self._row_to_campaign(row, counts)
+        out["account_ids"] = self.campaign_accounts(campaign_id)
+        return out
 
     def list_for_user(self, user_id: str) -> list[dict[str, Any]]:
         conn = self._conn()
         rows = conn.execute(
-            "SELECT id, user_id, account_id, name, subject, body, status, "
-            "paused_reason, resume_at, start_at, daily_limit, delay_min_s, "
-            "delay_max_s, created_at, updated_at FROM campaigns "
-            "WHERE user_id = ? ORDER BY id DESC",
+            f"SELECT {self._CAMPAIGN_COLS} FROM campaigns "
+            f"WHERE user_id = ? ORDER BY id DESC",
             (user_id,),
         ).fetchall()
         counts = self._counts(conn, [r[0] for r in rows])
         conn.close()
-        return [self._row_to_campaign(r, counts.get(r[0], {})) for r in rows]
+        out = [self._row_to_campaign(r, counts.get(r[0], {})) for r in rows]
+        for c in out:
+            c["account_ids"] = self.campaign_accounts(c["id"])
+        return out
 
     def sends(self, campaign_id: int, user_id: str,
               limit: int = 200) -> list[dict[str, Any]] | None:
@@ -239,7 +305,8 @@ class CampaignStore:
             return None
         rows = conn.execute(
             "SELECT id, email, step, state, subject, sent_at, not_before, "
-            "attempts, error FROM campaign_sends WHERE campaign_id = ? "
+            "attempts, error, account_id FROM campaign_sends "
+            "WHERE campaign_id = ? "
             "ORDER BY CASE state WHEN 'pending' THEN 0 ELSE 1 END, id LIMIT ?",
             (campaign_id, int(limit)),
         ).fetchall()
@@ -247,7 +314,7 @@ class CampaignStore:
         return [
             {"id": r[0], "email": r[1], "step": r[2], "state": r[3],
              "subject": r[4], "sent_at": r[5] or "", "not_before": r[6] or "",
-             "attempts": r[7], "error": r[8] or ""}
+             "attempts": r[7], "error": r[8] or "", "account_id": r[9] or 0}
             for r in rows
         ]
 
@@ -320,7 +387,8 @@ class CampaignStore:
             "paused_reason": r[7] or "", "resume_at": r[8] or "",
             "start_at": r[9], "daily_limit": r[10],
             "delay_min_s": r[11], "delay_max_s": r[12],
-            "created_at": r[13], "updated_at": r[14],
+            "ai_personalize": bool(r[13]),
+            "created_at": r[14], "updated_at": r[15],
             "pending": counts.get("pending", 0),
             "sent": counts.get("sent", 0),
             "failed": counts.get("failed", 0),
@@ -334,13 +402,32 @@ class CampaignStore:
         """Every RUNNING campaign across users — the scheduler's worklist."""
         conn = self._conn()
         rows = conn.execute(
-            "SELECT id, user_id, account_id, name, subject, body, status, "
-            "paused_reason, resume_at, start_at, daily_limit, delay_min_s, "
-            "delay_max_s, created_at, updated_at FROM campaigns "
-            "WHERE status = 'running' ORDER BY id ASC"
+            f"SELECT {self._CAMPAIGN_COLS} FROM campaigns "
+            f"WHERE status = 'running' ORDER BY id ASC"
         ).fetchall()
         conn.close()
         return [self._row_to_campaign(r, {}) for r in rows]
+
+    def campaign_accounts(self, campaign_id: int) -> list[int]:
+        """The campaign's sending accounts, primary first (E5)."""
+        conn = self._conn()
+        rows = conn.execute(
+            "SELECT account_id FROM campaign_accounts WHERE campaign_id = ? "
+            "ORDER BY rowid ASC",
+            (campaign_id,),
+        ).fetchall()
+        primary = conn.execute(
+            "SELECT account_id FROM campaigns WHERE id = ?",
+            (campaign_id,),
+        ).fetchone()
+        conn.close()
+        ids = [r[0] for r in rows]
+        # The primary (campaigns.account_id) always leads, even if a legacy
+        # row somehow landed out of order.
+        if primary and primary[0] in ids:
+            ids.remove(primary[0])
+            ids.insert(0, primary[0])
+        return ids
 
     def promote_scheduled(self, now_iso: str) -> list[int]:
         """start_at reached -> running. Returns the promoted ids (logged)."""
@@ -385,14 +472,30 @@ class CampaignStore:
         conn.close()
         return (row[0] or "") if row else ""
 
+    def last_sent_at_for_account(self, account_id: int) -> str:
+        """Latest send BY ONE ACCOUNT (all campaigns) — the E5 pacing input.
+        Gmail's sending rhythm is per account, so the 3-7 min gap is now
+        measured per account, not per campaign."""
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT MAX(s.sent_at) FROM campaign_sends s JOIN campaigns c "
+            "ON s.campaign_id = c.id WHERE s.state = 'sent' AND "
+            "(CASE WHEN s.account_id > 0 THEN s.account_id ELSE c.account_id END) = ?",
+            (account_id,),
+        ).fetchone()
+        conn.close()
+        return (row[0] or "") if row else ""
+
     def sent_today_for_account(self, account_id: int, today: str) -> int:
         """Sent count for the ACCOUNT (all campaigns) on one UTC date — the
-        daily cap is per Gmail account, not per campaign."""
+        daily cap is per Gmail account, not per campaign. Pre-E5 rows (no
+        send-level account) count via the campaign's primary account."""
         conn = self._conn()
         row = conn.execute(
             "SELECT COUNT(*) FROM campaign_sends s JOIN campaigns c "
-            "ON s.campaign_id = c.id WHERE c.account_id = ? "
-            "AND s.state = 'sent' AND substr(s.sent_at, 1, 10) = ?",
+            "ON s.campaign_id = c.id WHERE s.state = 'sent' AND "
+            "(CASE WHEN s.account_id > 0 THEN s.account_id ELSE c.account_id END) = ? "
+            "AND substr(s.sent_at, 1, 10) = ?",
             (account_id, today),
         ).fetchone()
         conn.close()
@@ -473,11 +576,13 @@ class CampaignStore:
         conn.close()
 
     def accounts_with_activity(self) -> list[tuple[int, str]]:
-        """DISTINCT (account_id, user_id) of campaigns with at least one SENT
-        email — the reply-detection worklist."""
+        """DISTINCT (account, user) that actually SENT email — the
+        reply-detection worklist (E5: keyed on the send's real account)."""
         conn = self._conn()
         rows = conn.execute(
-            "SELECT DISTINCT c.account_id, c.user_id FROM campaigns c "
+            "SELECT DISTINCT "
+            "CASE WHEN s.account_id > 0 THEN s.account_id ELSE c.account_id END, "
+            "c.user_id FROM campaigns c "
             "JOIN campaign_sends s ON s.campaign_id = c.id "
             "WHERE s.state = 'sent'"
         ).fetchall()
@@ -493,7 +598,9 @@ class CampaignStore:
             "FROM campaign_sends s JOIN campaigns c ON s.campaign_id = c.id "
             "LEFT JOIN campaign_replies r ON r.campaign_id = s.campaign_id "
             "AND r.email = s.email "
-            "WHERE c.account_id = ? AND s.state = 'sent' AND r.email IS NULL "
+            "WHERE (CASE WHEN s.account_id > 0 THEN s.account_id "
+            "ELSE c.account_id END) = ? AND s.state = 'sent' "
+            "AND r.email IS NULL "
             "GROUP BY s.campaign_id, s.email",
             (account_id,),
         ).fetchall()
@@ -561,7 +668,8 @@ class CampaignStore:
         cur = conn.execute(
             f"UPDATE campaigns SET status = 'running', paused_reason = '', "
             f"resume_at = '', updated_at = ? WHERE status = 'paused' "
-            f"AND paused_reason = 'account' AND account_id IN ({marks})",
+            f"AND paused_reason = 'account' AND id IN "
+            f"(SELECT campaign_id FROM campaign_accounts WHERE account_id IN ({marks}))",
             [_now(), *account_ids],
         )
         conn.commit()
@@ -569,12 +677,13 @@ class CampaignStore:
         return cur.rowcount
 
     def account_paused_accounts(self) -> list[tuple[int, str]]:
-        """DISTINCT (account_id, user_id) of campaigns paused for account
-        reasons — the scheduler health-checks these to auto-resume."""
+        """DISTINCT (account, user) of every account on an account-paused
+        campaign — the scheduler health-checks these to auto-resume."""
         conn = self._conn()
         rows = conn.execute(
-            "SELECT DISTINCT account_id, user_id FROM campaigns "
-            "WHERE status = 'paused' AND paused_reason = 'account'"
+            "SELECT DISTINCT ca.account_id, c.user_id FROM campaigns c "
+            "JOIN campaign_accounts ca ON ca.campaign_id = c.id "
+            "WHERE c.status = 'paused' AND c.paused_reason = 'account'"
         ).fetchall()
         conn.close()
         return [(r[0], r[1]) for r in rows]
@@ -588,7 +697,9 @@ class CampaignStore:
         if owns is None:
             conn.close()
             return False
-        for table in ("campaign_sends", "campaign_followups", "campaign_replies"):
+        for table in ("campaign_sends", "campaign_followups",
+                      "campaign_replies", "campaign_accounts",
+                      "campaign_hooks"):
             conn.execute(f"DELETE FROM {table} WHERE campaign_id = ?",
                          (campaign_id,))
         conn.execute("DELETE FROM campaigns WHERE id = ?", (campaign_id,))
@@ -598,12 +709,39 @@ class CampaignStore:
 
     # -- Send outcomes ------------------------------------------------------
 
-    def mark_sent(self, send_id: int, *, subject: str, sent_at: str) -> None:
+    def mark_sent(self, send_id: int, *, subject: str, sent_at: str,
+                  account_id: int = 0) -> None:
         conn = self._conn()
         conn.execute(
             "UPDATE campaign_sends SET state = 'sent', subject = ?, "
-            "sent_at = ?, error = '' WHERE id = ?",
-            (subject, sent_at, send_id),
+            "sent_at = ?, account_id = ?, error = '' WHERE id = ?",
+            (subject, sent_at, int(account_id), send_id),
+        )
+        conn.commit()
+        conn.close()
+
+    # -- AI opening lines (Phase E5) ---------------------------------------
+
+    def get_hook(self, campaign_id: int, email: str) -> str | None:
+        """The cached AI opening line for one lead. None = never generated
+        (generate it); '' = generated and honestly empty (don't re-ask)."""
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT hook FROM campaign_hooks "
+            "WHERE campaign_id = ? AND email = ?",
+            (campaign_id, email),
+        ).fetchone()
+        conn.close()
+        return None if row is None else (row[0] or "")
+
+    def set_hook(self, campaign_id: int, email: str, hook: str) -> None:
+        """Cache the generated opening line (INSERT OR IGNORE — first
+        generation wins, retries never re-call the AI)."""
+        conn = self._conn()
+        conn.execute(
+            "INSERT OR IGNORE INTO campaign_hooks "
+            "(campaign_id, email, hook) VALUES (?, ?, ?)",
+            (campaign_id, email, hook or ""),
         )
         conn.commit()
         conn.close()

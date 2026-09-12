@@ -42,6 +42,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
+from app.campaigns.personalize import Ask, default_ask, generate_hook
 from app.campaigns.store import CampaignStore
 from app.campaigns.templates import context_for, render
 from app.email_accounts import google
@@ -123,6 +124,7 @@ class CampaignScheduler:
         clock: Callable[[], datetime] = _utcnow,
         rng: Callable[[int, int], int] = random.randint,
         reply_interval_s: float = REPLY_CHECK_INTERVAL_S,
+        ai_ask: Ask | None = None,
     ) -> None:
         self._store = store
         self._email_store = email_store
@@ -130,6 +132,15 @@ class CampaignScheduler:
         self._clock = clock
         self._rng = rng
         self._reply_interval_s = reply_interval_s
+        # The AI callable for opening lines (E5). None = build the real
+        # gateway lazily on first personalization; tests inject a fake.
+        self._ai_ask = ai_ask
+        # Per-account 429 cooldowns (E5): account_id -> send-again-not-before.
+        # In-memory on purpose — a cooldown is transient, and a restart at
+        # worst re-earns one 429 from Google.
+        self._cooldowns: dict[int, datetime] = {}
+        # Round-robin counter for tie-breaking equal accounts (E5).
+        self._rr = 0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -263,41 +274,95 @@ class CampaignScheduler:
 
     # -- One campaign, at most one send ------------------------------------
 
+    def _pick_account(self, c: dict[str, Any],
+                      now: datetime) -> tuple[int | None, str]:
+        """Choose the sending account for this pass (E5 multi-account).
+
+        Returns (account_id, "") on success, else (None, reason):
+        'account'      — every account is disconnected/unhealthy -> pause
+        'rate_limited' — every healthy account is in 429 cooldown -> pause
+                         (with auto-resume at the earliest expiry)
+        'capped'       — healthy accounts exist but all hit the daily cap ->
+                         wait for tomorrow, campaign stays running
+
+        Among the available accounts the one with the FEWEST sends today
+        wins (load spreading), ties rotating so two fresh accounts
+        alternate."""
+        accounts = self._store.campaign_accounts(c["id"]) or [c["account_id"]]
+        healthy: list[int] = []
+        for a in accounts:
+            creds = self._email_store.get_credentials(a, c["user_id"])
+            if creds is None:
+                continue
+            status = next((s["status"] for s in
+                           self._email_store.list_for_user(c["user_id"])
+                           if s["id"] == a), "")
+            if (status == "connected"
+                    and (creds["access_token"] or creds["refresh_token"])):
+                healthy.append(a)
+        if not healthy:
+            return None, "account"
+
+        today = _iso(now)[:10]
+        cooling = [a for a in healthy
+                   if self._cooldowns.get(a, now) > now]
+        avail = [a for a in healthy if a not in cooling
+                 and self._store.sent_today_for_account(a, today)
+                 < int(c["daily_limit"])]
+        if not avail:
+            if len(cooling) == len(healthy):
+                return None, "rate_limited"
+            return None, "capped"
+
+        sent_today = {a: self._store.sent_today_for_account(a, today)
+                      for a in avail}
+        least = min(sent_today.values())
+        tied = [a for a in avail if sent_today[a] == least]
+        # Rotate through the tie so equal accounts alternate sends.
+        self._rr += 1
+        return tied[self._rr % len(tied)], ""
+
+    def _earliest_cooldown(self, c: dict[str, Any], now: datetime) -> str:
+        accounts = self._store.campaign_accounts(c["id"]) or [c["account_id"]]
+        times = [self._cooldowns[a] for a in accounts
+                 if a in self._cooldowns and self._cooldowns[a] > now]
+        return _iso(min(times)) if times else _iso(now + timedelta(
+            seconds=RATE_LIMIT_COOLDOWN_S))
+
     def _drain_one(self, c: dict[str, Any], now: datetime,
                    stats: dict[str, int]) -> None:
-        # Account gone (disconnected) -> honest pause, auto-resume on return.
-        creds = self._email_store.get_credentials(c["account_id"], c["user_id"])
-        if creds is None:
-            self._store.set_status(c["id"], status="paused",
-                                   paused_reason="account")
-            stats["paused"] += 1
-            logger.warning("campaign %d paused: account disconnected", c["id"])
+        account_id, reason = self._pick_account(c, now)
+        if account_id is None:
+            if reason == "account":
+                # Every account gone (disconnected) -> honest pause,
+                # auto-resume when any account reconnects.
+                self._store.set_status(c["id"], status="paused",
+                                       paused_reason="account")
+                stats["paused"] += 1
+                logger.warning("campaign %d paused: no healthy sending account",
+                               c["id"])
+            elif reason == "rate_limited":
+                resume_at = self._earliest_cooldown(c, now)
+                self._store.set_status(
+                    c["id"], status="paused", paused_reason="rate_limited",
+                    resume_at=resume_at)
+                stats["paused"] += 1
+                logger.warning(
+                    "campaign %d: all accounts rate-limited -> paused, "
+                    "auto-resume at %s", c["id"], resume_at)
+            # 'capped' — nothing more today, campaign stays running.
             return
-        accounts = self._email_store.list_for_user(c["user_id"])
-        status = next((a["status"] for a in accounts
-                       if a["id"] == c["account_id"]), "")
-        if status != "connected" or (not creds["access_token"] and not creds["refresh_token"]):
-            self._store.set_status(c["id"], status="paused",
-                                   paused_reason="account")
-            stats["paused"] += 1
-            logger.warning("campaign %d paused: account %s (status=%s)",
-                           c["id"], creds["email"], status or "unknown")
-            return
-
-        # Daily cap — per ACCOUNT across all campaigns (Gmail's limit is
-        # per account, not per campaign).
-        today = _iso(now)[:10]
-        if self._store.sent_today_for_account(c["account_id"], today) >= c["daily_limit"]:
-            return  # cap hit — nothing more today, campaign stays running
 
         send = self._store.next_pending(c["id"], _iso(now))
         if send is None:
             self._store.mark_completed_if_drained(c["id"])
             return
 
-        # Random pacing: the gap since this campaign's last send must have
-        # elapsed (a fresh draw each pass — human-jitter by construction).
-        last = parse_ts(self._store.last_sent_at(c["id"]))
+        # Random pacing, measured PER ACCOUNT (E5): Gmail's sending rhythm
+        # is per account, so with N accounts each keeps its own 3-7 min gap
+        # and the campaign's daily volume scales with N. A fresh draw each
+        # pass — human-jitter by construction.
+        last = parse_ts(self._store.last_sent_at_for_account(account_id))
         if last is not None:
             gap = self._rng(int(c["delay_min_s"]), int(c["delay_max_s"]))
             if (now - last).total_seconds() < gap:
@@ -329,16 +394,23 @@ class CampaignScheduler:
             subject_tmpl, body_tmpl = c["subject"], c["body"]
         subject = render(subject_tmpl, ctx)
         body = render(body_tmpl, ctx)
+        # The AI opening line (E5): first email only, from VERIFIED dossier
+        # evidence only, cached per lead, best-effort by design.
+        if send["step"] == 0 and c.get("ai_personalize"):
+            body = self._with_hook(c, send, dossier, body)
 
+        creds = self._email_store.get_credentials(account_id, c["user_id"])
         access_token = self._access_token(
-            account_id=c["account_id"], user_id=c["user_id"], creds=creds,
+            account_id=account_id, user_id=c["user_id"], creds=creds,
             now=now)
         if not access_token:
-            self._email_store.mark_status(c["account_id"], c["user_id"], "revoked")
-            self._store.set_status(c["id"], status="paused",
-                                   paused_reason="account")
-            stats["paused"] += 1
-            logger.warning("campaign %d paused: token refresh failed for %s",
+            self._email_store.mark_status(account_id, c["user_id"], "revoked")
+            remaining, rreason = self._pick_account(c, now)
+            if remaining is None and rreason == "account":
+                self._store.set_status(c["id"], status="paused",
+                                       paused_reason="account")
+                stats["paused"] += 1
+            logger.warning("campaign %d: token refresh failed for account %s",
                            c["id"], creds["email"])
             return
 
@@ -348,13 +420,15 @@ class CampaignScheduler:
                 from_email=creds["email"],
             )
         except Exception as exc:  # noqa: BLE001 — mapped below by cause
-            self._on_send_error(c, send, exc, stats)
+            self._on_send_error(c, send, exc, stats, account_id=account_id,
+                                now=now)
             return
 
-        self._store.mark_sent(send["id"], subject=subject, sent_at=_iso(now))
+        self._store.mark_sent(send["id"], subject=subject, sent_at=_iso(now),
+                              account_id=account_id)
         stats["sent"] += 1
-        logger.info("campaign %d sent to %s (step %d)",
-                    c["id"], send["email"], send["step"])
+        logger.info("campaign %d sent to %s (step %d, account %d)",
+                    c["id"], send["email"], send["step"], account_id)
         # CRM: the first outbound email moves the lead forward to
         # 'contacted'; follow-ups only append a timeline note (a reply or a
         # manually-set later stage is never walked backwards).
@@ -380,6 +454,26 @@ class CampaignScheduler:
                 not_before=not_before)
 
         self._store.mark_completed_if_drained(c["id"])
+
+    def _with_hook(self, c: dict[str, Any], send: dict[str, Any],
+                   dossier: Any, body: str) -> str:
+        """Prepend the lead's AI opening line to the rendered body. Cached
+        per (campaign, lead); an AI failure sends the plain template (logged)
+        and never blocks the campaign."""
+        hook = self._store.get_hook(c["id"], send["email"])
+        if hook is None:
+            if self._ai_ask is None:
+                self._ai_ask = default_ask()
+            try:
+                hook = generate_hook(self._ai_ask, dossier)
+            except Exception as exc:  # noqa: BLE001 — best-effort by design
+                logger.warning("AI opening line for %s failed: %s "
+                               "(sending without one)", send["email"], exc)
+                return body
+            self._store.set_hook(c["id"], send["email"], hook)
+        if not hook:
+            return body  # generated, nothing honest to say
+        return f"{hook}\n\n{body}"
 
     def _crm_event(self, email: str, *, user_id: str,
                    note: str, promote_to: str | None = None) -> None:
@@ -408,29 +502,45 @@ class CampaignScheduler:
             creds=creds, now=now)
 
     def _on_send_error(self, c: dict[str, Any], send: dict[str, Any],
-                       exc: Exception, stats: dict[str, int]) -> None:
-        """Map a Gmail failure to the honest campaign/account action."""
+                       exc: Exception, stats: dict[str, int], *,
+                       account_id: int, now: datetime) -> None:
+        """Map a Gmail failure to the honest campaign/account action (E5:
+        account-scoped — a sick account steps aside, the campaign only
+        pauses when NO account is left)."""
         resp = getattr(exc, "response", None)
         code = resp.status_code if resp is not None else None
         if code == 429:
-            # Rate limited: pause, cool down, self-resume (user's design).
-            resume_at = _iso(self._clock() + timedelta(seconds=RATE_LIMIT_COOLDOWN_S))
-            self._store.set_status(c["id"], status="paused",
-                                   paused_reason="rate_limited",
-                                   resume_at=resume_at)
-            stats["paused"] += 1
-            logger.warning("campaign %d: Gmail 429 -> paused, auto-resume at %s",
-                           c["id"], resume_at)
+            # Rate limited: cool THIS account down, self-healing. The
+            # campaign pauses only when no other account is available.
+            self._cooldowns[account_id] = now + timedelta(
+                seconds=RATE_LIMIT_COOLDOWN_S)
+            remaining, reason = self._pick_account(c, now)
+            if remaining is None and reason == "rate_limited":
+                resume_at = self._earliest_cooldown(c, now)
+                self._store.set_status(
+                    c["id"], status="paused", paused_reason="rate_limited",
+                    resume_at=resume_at)
+                stats["paused"] += 1
+                logger.warning(
+                    "campaign %d: all accounts rate-limited -> paused, "
+                    "auto-resume at %s", c["id"], resume_at)
+            else:
+                logger.warning(
+                    "campaign %d: account %d rate-limited -> cooling down, "
+                    "other accounts continue", c["id"], account_id)
             return
         if code in (401, 403):
-            # Grant revoked / permission gone: account is unhealthy — pause
-            # every campaign on it (they resume when the account reconnects).
-            self._email_store.mark_status(c["account_id"], c["user_id"], "revoked")
-            self._store.set_status(c["id"], status="paused",
-                                   paused_reason="account")
-            stats["paused"] += 1
-            logger.warning("campaign %d: Gmail %s -> account marked revoked",
-                           c["id"], code)
+            # Grant revoked / permission gone: the account is unhealthy and
+            # steps aside (marked revoked). The campaign pauses only when no
+            # healthy account remains; it auto-resumes on reconnect.
+            self._email_store.mark_status(account_id, c["user_id"], "revoked")
+            remaining, reason = self._pick_account(c, now)
+            if remaining is None and reason == "account":
+                self._store.set_status(c["id"], status="paused",
+                                       paused_reason="account")
+                stats["paused"] += 1
+            logger.warning("campaign %d: Gmail %s on account %d -> "
+                           "account marked revoked", c["id"], code, account_id)
             return
         # Anything else: count the attempt, retry while budget remains.
         attempts = send.get("attempts", 0) + 1

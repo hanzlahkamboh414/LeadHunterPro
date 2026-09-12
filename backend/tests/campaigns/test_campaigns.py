@@ -246,7 +246,8 @@ def test_scheduler_sends_one_per_gap_and_updates_crm(tmp_path, monkeypatch):
     # Pass 1: campaign is scheduled -> promoted -> first send.
     stats = ctx["sched"].run_once()
     assert stats == {"promoted": 1, "resumed_rate_limited": 0,
-                     "resumed_account": 0, "sent": 1, "paused": 0}
+                     "resumed_account": 0, "sent": 1, "paused": 0,
+                     "replied": 0, "skipped": 0}
     assert [e for _, kw in sent_calls for e in [kw["to"]]] == ["jane@acme.com"]
     assert "{{" not in sent_calls[0][1]["body"]
     assert sent_calls[0][1]["subject"] == "Estimating for Acme Corp"

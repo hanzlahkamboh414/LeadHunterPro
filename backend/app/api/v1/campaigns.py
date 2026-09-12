@@ -84,6 +84,7 @@ def create_campaign(
         subject=body.subject, body=body.body, emails=emails,
         start_at=start_at, daily_limit=body.daily_limit,
         delay_min_s=body.delay_min_s, delay_max_s=body.delay_max_s,
+        followups=[fu.model_dump() for fu in body.followups],
     )
     campaign["account_email"] = account["email"]
     logger.info("POST /campaigns -> %s (%d leads, %d excluded as already-sent)",
@@ -111,6 +112,7 @@ def get_campaign(campaign_id: int,
     sends = store.sends(campaign_id, user.id) or []
     c["account_email"] = _account_email(get_email_store(), c["account_id"], user.id)
     c["sends"] = sends
+    c["followups"] = store.followups(campaign_id)
     return c
 
 

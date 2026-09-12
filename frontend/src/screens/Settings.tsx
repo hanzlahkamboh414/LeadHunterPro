@@ -144,6 +144,13 @@ export default function Settings() {
                             ? "Needs reconnect"
                             : a.status}
                       </p>
+                      {a.status === "connected" &&
+                        !a.scopes.includes("gmail.readonly") && (
+                          <p className="mt-0.5 text-[11.5px] text-amber-400/90">
+                            Reconnect to enable reply detection (follow-ups
+                            stop when a lead answers)
+                          </p>
+                        )}
                     </div>
                     <span
                       className={`w-1.5 h-1.5 rounded-full shrink-0 ${

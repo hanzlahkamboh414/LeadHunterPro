@@ -130,7 +130,8 @@ def test_store_list_never_exposes_tokens(tmp_path):
     store = EmailAccountStore(db_path=str(tmp_path / "ea.db"))
     store.connect("u1", "a@gmail.com", access_token="SECRET-A", refresh_token="SECRET-R")
     row = store.list_for_user("u1")[0]
-    assert set(row) == {"id", "provider", "email", "display_name", "status", "created_at"}
+    assert set(row) == {"id", "provider", "email", "display_name", "status",
+                        "scopes", "created_at"}
     assert "SECRET" not in str(row)
     # And at rest, the DB never holds plaintext tokens.
     import sqlite3

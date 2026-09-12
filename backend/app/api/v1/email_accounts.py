@@ -112,6 +112,7 @@ def google_callback(
         access_token=tokens.get("access_token", ""),
         refresh_token=tokens.get("refresh_token", ""),
         token_expires_at=str(int(time.time()) + int(tokens.get("expires_in", 3600))),
+        scopes=tokens.get("scope", ""),
     )
     get_activity().record(user_id, "", "email_account",
                           detail=f"Gmail connected: {email}")

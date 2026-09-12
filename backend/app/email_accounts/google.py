@@ -1,10 +1,16 @@
 """Google/Gmail OAuth client — plain HTTPS, no Google SDK (one less dependency).
 
-Scope: ``gmail.send`` + openid email/profile (to know WHICH Gmail connected).
-``gmail.send`` is a Google RESTRICTED scope: the app runs in the operator's
-own Google Cloud project, and Testing mode (100 test users, 7-day refresh
-token expiry) is fine for private use — production/public onboarding needs
-Google's verification (documented in docs/email_oauth_setup.md).
+Scope: ``gmail.send`` + ``gmail.readonly`` (Phase E4 reply detection) +
+openid email/profile (to know WHICH Gmail connected). Both Gmail scopes are
+Google RESTRICTED scopes: the app runs in the operator's own Google Cloud
+project, and Testing mode (100 test users, 7-day refresh token expiry) is
+fine for private use — production/public onboarding needs Google's
+verification (documented in docs/email_oauth_setup.md).
+
+Accounts connected BEFORE Phase E4 hold only ``gmail.send`` — sending keeps
+working, but reply detection is skipped for them until they reconnect (the
+granted scopes are stored on the account row so this is knowable, not
+guessed).
 
 All network I/O lives in module-level functions so tests can monkeypatch
 them (no real Google call ever runs in the suite).
@@ -19,6 +25,7 @@ import hmac
 import json
 import time
 from email.message import EmailMessage
+from email.utils import parseaddr
 from typing import Any
 from urllib.parse import urlencode
 
@@ -29,11 +36,14 @@ from app.core.config import settings
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GMAIL_SEND_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
+GMAIL_MESSAGES_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages"
 
-#: gmail.send is enough to SEND (and read only what we sent — thread replies
-#: come in Phase E4 with gmail.readonly). openid/email/profile identify the
-#: connected account without any extra consent screen friction.
-OAUTH_SCOPES = "openid email profile https://www.googleapis.com/auth/gmail.send"
+#: gmail.send sends; gmail.readonly reads the INBOX — and nothing else — to
+#: detect replies (Phase E4). openid/email/profile identify the connected
+#: account without any extra consent screen friction.
+OAUTH_SCOPES = ("openid email profile "
+                "https://www.googleapis.com/auth/gmail.send "
+                "https://www.googleapis.com/auth/gmail.readonly")
 
 #: The signed `state` lifetime — the CSRF window for the OAuth round-trip.
 STATE_TTL_SECONDS = 600
@@ -163,3 +173,50 @@ def send_gmail(access_token: str, *, to: str, subject: str, body: str,
     )
     resp.raise_for_status()
     return resp.json()
+
+
+def parse_from(from_header: str) -> str:
+    """The bare email address from an RFC-2822 From header, lowercased —
+    ``"Jane <jane@acme.com>"`` -> ``"jane@acme.com"``."""
+    _, addr = parseaddr(from_header or "")
+    return addr.strip().lower()
+
+
+def list_inbox_senders(access_token: str, *, after_unix: int,
+                       limit: int = 50) -> list[dict[str, Any]]:
+    """Who wrote to this inbox since ``after_unix`` (epoch seconds).
+
+    Reply detection (Phase E4): one ``messages.list`` with an ``in:inbox
+    after:`` query (metadata only — bodies are never fetched), then one
+    metadata GET per message for its From/Subject headers. Replies are
+    matched by the CALLER against addresses this account actually emailed —
+    this function reads nothing else and stores nothing.
+
+    A non-2xx raises :class:`requests.HTTPError`; the scheduler treats reply
+    detection as best-effort (a failure never pauses a campaign).
+    """
+    headers = {"Authorization": f"Bearer {access_token}"}
+    resp = requests.get(
+        GMAIL_MESSAGES_URL,
+        headers=headers,
+        params={"q": f"in:inbox after:{int(after_unix)}",
+                "maxResults": min(int(limit), 50)},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    ids = [m["id"] for m in resp.json().get("messages", [])]
+    out: list[dict[str, Any]] = []
+    for mid in ids[: int(limit)]:
+        r = requests.get(
+            f"{GMAIL_MESSAGES_URL}/{mid}",
+            headers=headers,
+            params={"format": "metadata",
+                    "metadataHeaders": ["From", "Subject"]},
+            timeout=15,
+        )
+        r.raise_for_status()
+        hdrs = {h["name"].lower(): h["value"]
+                for h in r.json().get("payload", {}).get("headers", [])}
+        out.append({"from": hdrs.get("from", ""),
+                    "subject": hdrs.get("subject", "")})
+    return out

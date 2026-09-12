@@ -15,6 +15,7 @@ import {
 import { ApiError, api } from "../api/client";
 import { PageHeader } from "../components/PageHeader";
 import type { EmailAccount, LeadSummary } from "../types";
+import type { FollowupInput } from "../types";
 
 /** Template variables — the ONLY facts that can appear in an email (all from
  * the lead's researched dossier; unknown/empty render blank, never
@@ -215,7 +216,9 @@ export default function Campaigns() {
                 <div className="flex items-center justify-between text-[12px] text-slate-500">
                   <span>
                     {c.sent} sent · {c.pending} pending
+                    {c.replied > 0 && ` · ${c.replied} replied`}
                     {c.failed > 0 && ` · ${c.failed} failed`}
+                    {c.skipped > 0 && ` · ${c.skipped} skipped (replied)`}
                   </span>
                   <span>max {c.daily_limit}/day</span>
                 </div>
@@ -230,6 +233,71 @@ export default function Campaigns() {
           );
         })}
       </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// One follow-up rung editor
+// ---------------------------------------------------------------------------
+
+function FollowupEditor({
+  label, on, setOn, days, setDays, subject, setSubject, body, setBody, input,
+}: {
+  label: string;
+  on: boolean;
+  setOn: (v: boolean) => void;
+  days: number;
+  setDays: (v: number) => void;
+  subject: string;
+  setSubject: (v: string) => void;
+  body: string;
+  setBody: (v: string) => void;
+  input: string;
+}) {
+  return (
+    <div className={`rounded-lg border px-3 py-2.5 ${on ? "border-indigo-500/20 bg-white/[0.02]" : "border-white/5"}`}>
+      <div className="flex items-center gap-2.5">
+        <label className="flex items-center gap-2 text-[12.5px] text-slate-300 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={on}
+            onChange={(e) => setOn(e.target.checked)}
+            className="accent-indigo-500 w-3.5 h-3.5"
+          />
+          {label}
+        </label>
+        {on && (
+          <span className="flex items-center gap-1.5 text-[12px] text-slate-400">
+            after
+            <input
+              type="number"
+              min={1}
+              max={30}
+              value={days}
+              onChange={(e) => setDays(Number(e.target.value) || 3)}
+              className="w-16 bg-white/[0.04] border border-white/5 rounded px-2 py-1 text-[12px] text-slate-300 outline-none focus:ring-2 focus:ring-indigo-500/40"
+            />
+            days
+          </span>
+        )}
+      </div>
+      {on && (
+        <div className="mt-2.5 space-y-2">
+          <input
+            className={input}
+            value={subject}
+            onChange={(e) => setSubject(e.target.value)}
+            placeholder="Subject — Re: {{company_name}} estimating"
+          />
+          <textarea
+            className={`${input} h-20 resize-y`}
+            value={body}
+            onChange={(e) => setBody(e.target.value)}
+            placeholder={"Hi {{first_name}}, just bumping this to the top of your inbox…"}
+          />
+        </div>
+      )}
     </div>
   );
 }
@@ -253,6 +321,16 @@ function CampaignBuilder({
   const [recommendation, setRecommendation] = useState("contact_now");
   const [startAt, setStartAt] = useState(defaultStart());
   const [dailyLimit, setDailyLimit] = useState(30);
+  // Follow-up ladder (Phase E4): two optional rungs, day 3 and day 7 by
+  // default. Each is cancelled the moment the lead replies.
+  const [fu1On, setFu1On] = useState(false);
+  const [fu1Days, setFu1Days] = useState(3);
+  const [fu1Subject, setFu1Subject] = useState("");
+  const [fu1Body, setFu1Body] = useState("");
+  const [fu2On, setFu2On] = useState(false);
+  const [fu2Days, setFu2Days] = useState(7);
+  const [fu2Subject, setFu2Subject] = useState("");
+  const [fu2Body, setFu2Body] = useState("");
   const [error, setError] = useState("");
 
   const accounts = useQuery({ queryKey: ["email-accounts"], queryFn: () => api.emailAccounts() });
@@ -277,8 +355,15 @@ function CampaignBuilder({
   const poolLeads: LeadSummary[] = pool.data || [];
 
   const create = useMutation({
-    mutationFn: () =>
-      api.createCampaign({
+    mutationFn: () => {
+      const followups: FollowupInput[] = [];
+      if (fu1On && fu1Subject.trim() && fu1Body.trim()) {
+        followups.push({ after_days: fu1Days, subject: fu1Subject, body: fu1Body });
+      }
+      if (fu2On && fu2Subject.trim() && fu2Body.trim()) {
+        followups.push({ after_days: fu2Days, subject: fu2Subject, body: fu2Body });
+      }
+      return api.createCampaign({
         name: name.trim(),
         account_id: accountId!,
         subject,
@@ -286,7 +371,9 @@ function CampaignBuilder({
         emails: poolLeads.map((l) => l.email),
         start_at: new Date(startAt).toISOString(),
         daily_limit: dailyLimit,
-      }),
+        followups,
+      });
+    },
     onSuccess: (r) => {
       const skipped =
         r.excluded > 0 ? ` (${r.excluded} lead(s) skipped — already emailed)` : "";
@@ -377,6 +464,37 @@ function CampaignBuilder({
               Variables fill from the lead's researched dossier. Missing facts
               render blank — nothing is ever invented.
             </p>
+          </div>
+
+          {/* Follow-up ladder (Phase E4) — stops automatically on a reply. */}
+          <div className="mt-4 rounded-lg border border-white/5 bg-white/[0.02] p-3.5">
+            <p className="text-[12px] font-semibold text-slate-300">
+              Follow-ups (optional)
+            </p>
+            <p className="mt-1 text-[11.5px] text-slate-500">
+              Each fires N days after the previous email. The ladder stops the
+              moment a lead replies (their CRM stage moves to “replied”).
+            </p>
+            <div className="mt-3 space-y-3">
+              <FollowupEditor
+                label="Follow-up 1"
+                on={fu1On} setOn={setFu1On}
+                days={fu1Days} setDays={setFu1Days}
+                subject={fu1Subject} setSubject={setFu1Subject}
+                body={fu1Body} setBody={setFu1Body}
+                input={input}
+              />
+              {fu1On && (
+                <FollowupEditor
+                  label="Follow-up 2"
+                  on={fu2On} setOn={setFu2On}
+                  days={fu2Days} setDays={setFu2Days}
+                  subject={fu2Subject} setSubject={setFu2Subject}
+                  body={fu2Body} setBody={setFu2Body}
+                  input={input}
+                />
+              )}
+            </div>
           </div>
 
           <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">

@@ -50,11 +50,20 @@ class EmailAccountStore:
                     refresh_token TEXT NOT NULL DEFAULT '',
                     token_expires_at TEXT NOT NULL DEFAULT '',
                     status TEXT NOT NULL DEFAULT 'connected',
+                    scopes TEXT NOT NULL DEFAULT '',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE (user_id, provider, email)
                 )
             """)
+            # E3 rows predate the scopes column (gmail.readonly arrived in
+            # Phase E4) — plain ALTER; scopes are not secret, no rebuild.
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(email_accounts)")]
+            if "scopes" not in cols:
+                conn.execute(
+                    "ALTER TABLE email_accounts "
+                    "ADD COLUMN scopes TEXT NOT NULL DEFAULT ''"
+                )
             conn.commit()
             conn.close()
 
@@ -63,7 +72,7 @@ class EmailAccountStore:
     def connect(
         self, user_id: str, email: str, *, display_name: str = "",
         access_token: str = "", refresh_token: str = "",
-        token_expires_at: str = "",
+        token_expires_at: str = "", scopes: str = "",
     ) -> dict[str, Any]:
         """Upsert one connected account (re-connecting an existing Gmail
         refreshes its tokens — the UNIQUE (user, provider, email) row is
@@ -73,19 +82,20 @@ class EmailAccountStore:
             """
             INSERT INTO email_accounts
                 (user_id, provider, email, display_name, access_token,
-                 refresh_token, token_expires_at, status)
-            VALUES (?, 'google', ?, ?, ?, ?, ?, 'connected')
+                 refresh_token, token_expires_at, status, scopes)
+            VALUES (?, 'google', ?, ?, ?, ?, ?, 'connected', ?)
             ON CONFLICT (user_id, provider, email) DO UPDATE SET
                 display_name = excluded.display_name,
                 access_token = excluded.access_token,
                 refresh_token = excluded.refresh_token,
                 token_expires_at = excluded.token_expires_at,
                 status = 'connected',
+                scopes = excluded.scopes,
                 updated_at = CURRENT_TIMESTAMP
             """,
             (user_id, email, display_name or "",
              encrypt_text(access_token), encrypt_text(refresh_token),
-             token_expires_at),
+             token_expires_at, scopes or ""),
         )
         conn.commit()
         row = conn.execute(
@@ -96,7 +106,7 @@ class EmailAccountStore:
         return self._public_row({
             "id": row[0], "user_id": user_id, "provider": "google",
             "email": email, "display_name": display_name,
-            "status": "connected",
+            "status": "connected", "scopes": scopes or "",
         })
 
     def update_tokens(self, account_id: int, user_id: str, *,
@@ -133,7 +143,7 @@ class EmailAccountStore:
         """The user's connected accounts — NO tokens ever leave the store."""
         conn = self._conn()
         rows = conn.execute(
-            "SELECT id, provider, email, display_name, status, created_at "
+            "SELECT id, provider, email, display_name, status, scopes, created_at "
             "FROM email_accounts WHERE user_id = ? ORDER BY id ASC",
             (user_id,),
         ).fetchall()
@@ -141,7 +151,7 @@ class EmailAccountStore:
         return [
             {"id": r[0], "provider": r[1], "email": r[2],
              "display_name": r[3] or "", "status": r[4],
-             "created_at": r[5] or ""}
+             "scopes": r[5] or "", "created_at": r[6] or ""}
             for r in rows
         ]
 
@@ -150,8 +160,8 @@ class EmailAccountStore:
         time. None when the account is missing or not the caller's."""
         conn = self._conn()
         row = conn.execute(
-            "SELECT email, access_token, refresh_token, token_expires_at, status "
-            "FROM email_accounts WHERE id = ? AND user_id = ?",
+            "SELECT email, access_token, refresh_token, token_expires_at, "
+            "status, scopes FROM email_accounts WHERE id = ? AND user_id = ?",
             (account_id, user_id),
         ).fetchone()
         conn.close()
@@ -163,6 +173,7 @@ class EmailAccountStore:
             "refresh_token": decrypt_text(row[2]),
             "token_expires_at": row[3] or "",
             "status": row[4],
+            "scopes": row[5] or "",
         }
 
     def delete(self, account_id: int, user_id: str) -> bool:
@@ -183,7 +194,8 @@ class EmailAccountStore:
         return {
             "id": base["id"], "provider": base["provider"],
             "email": base["email"], "display_name": base["display_name"],
-            "status": base["status"], "created_at": "",
+            "status": base["status"], "scopes": base.get("scopes", ""),
+            "created_at": "",
         }
 
 

@@ -249,18 +249,41 @@ export interface Campaign {
   pending: number;
   sent: number;
   failed: number;
+  /** Follow-ups dropped because the lead replied (Phase E4). */
+  skipped: number;
+  /** Leads who answered this campaign (Phase E4). */
+  replied: number;
   account_email: string;
+}
+
+/** One rung of a campaign's follow-up ladder (Phase E4). */
+export interface CampaignFollowup {
+  step: number;
+  after_days: number;
+  subject: string;
+  body: string;
 }
 
 /** One row of a campaign's send queue. */
 export interface CampaignSend {
   id: number;
   email: string;
-  state: string; // pending | sent | failed
+  /** 0 = the original email; 1+ = follow-up rungs (Phase E4). */
+  step: number;
+  state: string; // pending | sent | failed | skipped
   subject: string;
   sent_at: string;
+  /** Earliest send time (follow-ups: previous send + after_days). */
+  not_before: string;
   attempts: number;
   error: string;
+}
+
+/** A follow-up rung in a POST /campaigns body (Phase E4). */
+export interface FollowupInput {
+  after_days: number;
+  subject: string;
+  body: string;
 }
 
 /** POST /campaigns body. */
@@ -275,6 +298,8 @@ export interface CampaignCreateInput {
   daily_limit?: number;
   delay_min_s?: number;
   delay_max_s?: number;
+  /** Optional follow-up emails (max 3), each cancelled if the lead replies. */
+  followups?: FollowupInput[];
 }
 
 /** A connected sending account (Phase E2) — Gmail via Google OAuth. This is
@@ -286,6 +311,10 @@ export interface EmailAccount {
   display_name: string;
   /** connected | expired | revoked (revoked = reconnect needed). */
   status: string;
+  /** Space-separated OAuth scopes this account actually granted. Accounts
+   * connected before Phase E4 lack gmail.readonly → reply detection is off
+   * for them until they reconnect. */
+  scopes: string;
   created_at: string;
 }
 

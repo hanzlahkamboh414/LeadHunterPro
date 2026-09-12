@@ -1,9 +1,16 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { Building2, Users, Target, Gauge, TrendingUp, ArrowRight } from "lucide-react";
 import { api } from "../api/client";
 import { Spinner } from "../components/StatusChip";
+import {
+  LeadsTrend,
+  RecommendationDonut,
+  ScoreHistogram,
+  TopSources,
+  chartCardClass,
+} from "../components/DashboardCharts";
 import { STATE_LABEL, scoreColor, timeAgo, elapsed } from "../lib/format";
 
 interface Stat {
@@ -14,8 +21,17 @@ interface Stat {
   to: string;
 }
 
+/** Trend window options — the range toggle above the leads-over-time chart. */
+type Range = "7d" | "30d" | "all";
+const RANGES: { id: Range; label: string; days: number }[] = [
+  { id: "7d", label: "7 days", days: 7 },
+  { id: "30d", label: "30 days", days: 30 },
+  { id: "all", label: "All", days: 0 },
+];
+
 export default function Dashboard() {
   const navigate = useNavigate();
+  const [range, setRange] = useState<Range>("30d");
 
   const leadsQ = useQuery({
     queryKey: ["dash-leads"],
@@ -120,6 +136,74 @@ export default function Dashboard() {
                 </div>
               </div>
             ))}
+          </div>
+
+          {/* Analytics row 1 — leads over time + the quality split */}
+          <div className="grid grid-cols-1 lg:grid-cols-[1fr_340px] gap-5 mt-6">
+            <section className={chartCardClass}>
+              <div className="flex items-center justify-between mb-4">
+                <div>
+                  <h2 className="text-[16px] font-semibold text-white">Leads Over Time</h2>
+                  <p className="text-[12px] text-slate-500 mt-0.5">
+                    Researched per day vs Contact Now — quality trend, not just volume.
+                  </p>
+                </div>
+                <div className="flex items-center gap-1 rounded-lg border border-white/10 bg-black/20 p-0.5">
+                  {RANGES.map((r) => (
+                    <button
+                      key={r.id}
+                      type="button"
+                      onClick={() => setRange(r.id)}
+                      className={`px-2.5 py-1 rounded-md text-[12px] transition-colors ${
+                        range === r.id
+                          ? "bg-indigo-500/20 text-indigo-300"
+                          : "text-slate-500 hover:text-slate-300"
+                      }`}
+                    >
+                      {r.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <LeadsTrend
+                leads={leads}
+                days={RANGES.find((r) => r.id === range)?.days ?? 30}
+              />
+            </section>
+
+            <section className={chartCardClass}>
+              <h2 className="text-[16px] font-semibold text-white mb-1">Lead Quality</h2>
+              <p className="text-[12px] text-slate-500 mb-2">
+                Recommendation split of every researched lead.
+              </p>
+              <RecommendationDonut leads={leads} />
+            </section>
+          </div>
+
+          {/* Analytics row 2 — score distribution + best-producing searches */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 mt-5">
+            <section className={chartCardClass}>
+              <h2 className="text-[16px] font-semibold text-white mb-1">Score Distribution</h2>
+              <p className="text-[12px] text-slate-500 mb-2">
+                0–10 potential — green buckets are your strongest leads.
+              </p>
+              <ScoreHistogram leads={leads} />
+            </section>
+
+            <section className={chartCardClass}>
+              <h2 className="text-[16px] font-semibold text-white mb-1">
+                Top Searches <span className="text-slate-500 font-normal text-[13px]">(click to open)</span>
+              </h2>
+              <p className="text-[12px] text-slate-500 mb-2">
+                Which trade · location runs produced the most leads.
+              </p>
+              <TopSources
+                leads={leads}
+                onPick={(source) =>
+                  navigate(`/leads?source=${encodeURIComponent(source)}`)
+                }
+              />
+            </section>
           </div>
 
           {/* Bottom row */}

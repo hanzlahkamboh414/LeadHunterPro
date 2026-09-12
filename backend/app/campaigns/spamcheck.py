@@ -14,6 +14,16 @@ Two layers, so the result is authentic AND always available:
    runs: its findings merge with the AI's, and it IS the whole result
    when the AI is down (best-effort by design, the Phase-E5 pattern).
 
+   The rulebook follows the cold-email standard: template filler and
+   AI-tell phrases ('hope this email finds you well', 'seamless',
+   'delve'), generic openers that name no real fact, the 120-150 word
+   target, a 'Best regards' sign-off with a real signature, and a soft
+   call to action instead of hard-sell pressure. One deliberate
+   difference from a paste-analyzer: {{variables}} are LEGITIMATE here
+   (the builder fills them at send time), so unfilled placeholders are
+   never a finding — quite the opposite, a script with no variables
+   reads as a blast.
+
 The blended score weighs the AI 60 / rules 40 — the machine judgment
 matters more, but a mechanical slam-dunk (bit.ly + ALL CAPS subject)
 can never be talked down to "safe" by a lenient model.
@@ -47,6 +57,13 @@ _PHRASES: list[tuple[str, str, str, str]] = [
     ("best price", "medium", "'Best price' claims read as marketing hype", "competitive pricing"),
     ("bargain", "medium", "'Bargain' reads as mass marketing", ""),
     ("buy now", "high", "'Buy now' is a classic spam call-to-action", ""),
+    ("act fast", "high", "Fake urgency ('act fast')", "when you are ready"),
+    ("act immediately", "high", "Fake urgency ('act immediately')", "when you are ready"),
+    ("risk-free", "high", "'Risk-free' is a top spam phrase", ""),
+    ("100% free", "high", "'100% free' is a classic scam phrase", "complimentary"),
+    ("you've been selected", "high", "'You've been selected' is a scam marker", ""),
+    ("cash bonus", "high", "'Cash bonus' is a scam marker", ""),
+    ("urgent", "low", "'Urgent' in a first cold email reads as pressure", ""),
     ("call now", "medium", "'Call now' reads as telemarketing", "give me a call"),
     ("cash", "medium", "'Cash' is a money-scam marker in cold email", ""),
     ("cheap", "medium", "'Cheap' lowers trust in a professional pitch", "affordable"),
@@ -54,6 +71,9 @@ _PHRASES: list[tuple[str, str, str, str]] = [
     ("congratulations", "high", "'Congratulations' is a lottery-scam marker", ""),
     ("discount", "medium", "'Discount' reads as mass marketing", "a better rate"),
     ("don't delay", "high", "Fake urgency ('don't delay')", ""),
+    ("don't miss", "medium", "Fake urgency ('don't miss')", "you may want to see"),
+    ("expires soon", "high", "Fake urgency ('expires soon')", ""),
+    ("no fees", "medium", "'No fees' is a spam-weighed money phrase", ""),
     ("double your", "high", "'Double your ...' is a get-rich scam marker", ""),
     ("earn cash", "high", "'Earn cash' is a scam marker", ""),
     ("exclusive deal", "high", "'Exclusive deal' is marketing hype", ""),
@@ -61,6 +81,26 @@ _PHRASES: list[tuple[str, str, str, str]] = [
     ("financial freedom", "high", "'Financial freedom' is a get-rich scam marker", ""),
     ("for a limited time", "high", "Fake urgency ('for a limited time')", "this quarter"),
     ("free", "medium", "'Free' is a heavily-weighed spam word; 'complimentary' reads professional", "complimentary"),
+    # -- Template filler / AI-tell phrases (the cold-email banned list). --
+    ("i came across", "medium", "'I came across' is template filler — say what you actually found", "I found"),
+    ("i noticed", "low", "'I noticed' is template filler — name the actual thing", "I saw"),
+    ("i hope you're doing well", "medium", "'I hope you're doing well' is the classic template opener", ""),
+    ("i hope you are doing well", "medium", "'I hope you're doing well' is the classic template opener", ""),
+    ("i hope this email finds you well", "medium", "'Hope this email finds you well' is the classic template opener", ""),
+    ("hope this email finds you well", "medium", "'Hope this email finds you well' is the classic template opener", ""),
+    ("your innovative", "low", "'Innovative' is empty praise — name the actual work", "your"),
+    ("your cutting-edge", "low", "'Cutting-edge' is empty praise — name the actual work", "your"),
+    ("revolutionizing", "medium", "'Revolutionizing' is hype language", "improving"),
+    ("transforming", "medium", "'Transforming' is hype language", "improving"),
+    ("industry-leading", "medium", "'Industry-leading' is unverifiable marketing-speak", "experienced"),
+    ("seamless", "low", "'Seamless' is marketing filler", "smooth"),
+    ("seamlessly", "low", "'Seamlessly' is marketing filler", "smoothly"),
+    ("unlocking", "low", "'Unlocking' is marketing filler", "enabling"),
+    ("delve", "low", "'Delve' is an AI-tell word nobody says in construction", "look"),
+    ("delved", "low", "'Delved' is an AI-tell word nobody says in construction", "looked"),
+    ("testament", "low", "'A testament to' is formal filler", "proof"),
+    ("dear sir/madam", "medium", "'Dear Sir/Madam' is a mass-blast greeting", "Hi {{first_name}},"),
+    ("to whom it may concern", "medium", "'To whom it may concern' is a mass-blast greeting", "Hi {{first_name}},"),
     ("guaranteed", "high", "'Guaranteed' is a top spam word — nobody can guarantee an outcome", "confident"),
     ("guarantee", "high", "'Guarantee' is a top spam word — nobody can guarantee an outcome", "stand behind our"),
     ("hurry", "medium", "Fake urgency ('hurry')", ""),
@@ -111,6 +151,59 @@ _SHORTENER = re.compile(
     re.IGNORECASE)
 _DECEPTIVE_PREFIX = re.compile(r"^\s*(?:re|fw|fwd)\s*:", re.IGNORECASE)
 
+# -- The cold-email rulebook (shape checks). ------------------------------
+#: Generic openers — if the first real line STARTS with one of these, the
+#: email was not built from a specific research fact (a specific fact
+#: first, then a reach-out phrase, is fine — so the patterns are anchored
+#: to the start of the line).
+_GENERIC_OPENER_RES = [re.compile(p, re.IGNORECASE) for p in (
+    r"^\s*i hope (?:this|you)",
+    r"^\s*i wanted to reach out",
+    r"^\s*my name is .+ and i work",
+    r"^\s*as a leader in (?:your|the) industry",
+    r"^\s*i'?m reaching out because",
+    r"^\s*hope you(?:'re| are) doing well",
+    r"^\s*i saw your (?:website|company|profile)",
+)]
+#: 'the construction landscape' is marketing-speak — but the LANDSCAPING
+#: TRADE is a real audience here, so the bare trade word is never flagged.
+_MARKETING_LANDSCAPE = re.compile(r"\bthe (?:[a-z]+ )?landscape\b",
+                                  re.IGNORECASE)
+#: Hard-sell pressure ('buy now' is already a trigger phrase above).
+_HARD_SELL_RES = [re.compile(p, re.IGNORECASE) for p in (
+    r"schedule a call (?:at|on) \d", r"sign up today", r"don'?t miss",
+    r"this offer")]
+_GREETING_ONLY = re.compile(
+    r"^\s*(?:hi|hello|hey|dear|greetings|assalam[ou]*\s*alaikum)\b[^!?.]*$",
+    re.IGNORECASE)
+_SIGNOFF_LINE = re.compile(
+    r"^\s*(?:best regards|best|thanks|regards|cheers|sincerely)[,.]?\s*$",
+    re.IGNORECASE)
+_CONTACT_INFO = re.compile(
+    r"(?:www\.|https?://|\S+@\S+\.\S+|\+?\d[\d\s().-]{7,}\d)", re.IGNORECASE)
+#: A line explaining HOW the sender found the recipient — recipients trust
+#: a named source, and it is a compliance best practice (CAN-SPAM spirit).
+_SOURCE_NOTE = re.compile(
+    r"business listing|public(?:ly)? (?:available|record|listing|directory|"
+    r"information|bid)|identified your company|"
+    r"(?:found|saw|noticed) your (?:company|website|listing|work|bid)|"
+    r"while researching|how (?:i|we) found", re.IGNORECASE)
+
+#: The sending company's name, read once from company_profile.json — the
+#: signature should carry it. '' (unreadable profile) disables the check.
+_COMPANY_NAME: str | None = None
+
+
+def _sender_company() -> str:
+    global _COMPANY_NAME
+    if _COMPANY_NAME is None:
+        try:
+            from app.company_profile import get_profile
+            _COMPANY_NAME = get_profile().company_name
+        except Exception:  # noqa: BLE001 — optional check, never fatal
+            _COMPANY_NAME = ""
+    return _COMPANY_NAME
+
 _SEVERITY_WEIGHT = {"high": 12, "medium": 7, "low": 3}
 
 
@@ -160,6 +253,10 @@ def analyze_script(subject: str, body: str) -> dict:
         findings.append(_finding(
             "subject:exclamations", "high",
             "Multiple '!!' in the subject line", len(_EXCLAM_RUN.findall(subj))))
+    elif "!" in subj:
+        findings.append(_finding(
+            "subject:exclamation", "low",
+            "An exclamation mark in the subject line looks spammy", 1))
     if len(subject) > 78:
         findings.append(_finding(
             "subject:too-long", "medium",
@@ -189,6 +286,12 @@ def analyze_script(subject: str, body: str) -> dict:
         findings.append(_finding(
             "body:exclamation-runs", "medium",
             "Exclamation runs ('!!') in the body", runs))
+    qruns = len(_QUESTION_RUN.findall(txt))
+    if qruns:
+        findings.append(_finding(
+            "body:question-runs", "low",
+            "Question runs ('??') in the body read as salesy excitement",
+            qruns))
     if total_bangs >= 3:
         findings.append(_finding(
             "body:too-many-bangs", "low",
@@ -235,6 +338,14 @@ def analyze_script(subject: str, body: str) -> dict:
             "No opt-out line — commercial email without one is a compliance "
             "problem and a spam signal",
             1, fix="End with a one-line 'reply STOP and I won't follow up'"))
+    if len(raw_words) >= 60 and not _SOURCE_NOTE.search(body or ""):
+        findings.append(_finding(
+            "body:no-source-note", "low",
+            "No line saying how you found them — recipients trust an email "
+            "that names its source",
+            1, fix="Add e.g. 'I found your company while researching "
+                   "contractors in {{location}}'",
+            category="structure"))
     for para in (body or "").split("\n\n"):
         if len(_words(para)) > 120:
             findings.append(_finding(
@@ -252,6 +363,75 @@ def analyze_script(subject: str, body: str) -> dict:
                 f"Sentences average {avg:.0f} words — long winding sentences "
                 "read as marketing copy",
                 1, fix="Short, plain sentences (under ~20 words)"))
+
+    # -- The cold-email rulebook: opener, sign-off, signature, length. ----
+    lines = (body or "").split("\n")
+    signoff_idx = next((i for i, ln in enumerate(lines)
+                        if _SIGNOFF_LINE.match(ln)), None)
+    if len(raw_words) >= 10:
+        opener = next((ln for ln in lines
+                       if ln.strip() and not _GREETING_ONLY.match(ln)), "")
+        if opener and any(p.search(opener) for p in _GENERIC_OPENER_RES):
+            findings.append(_finding(
+                "body:generic-opener", "medium",
+                f"The opening line reads as a template "
+                f"('{opener.strip()[:60]}') — not a specific research fact",
+                1, fix="Open with a specific fact about the lead: a project, "
+                       "a bid, a location detail",
+                category="personalization"))
+        if signoff_idx is None:
+            findings.append(_finding(
+                "body:no-signoff", "low",
+                "No sign-off line — the email ends abruptly",
+                1, fix="Close with 'Best regards,' + your name",
+                category="structure"))
+    n_landscape = len(_MARKETING_LANDSCAPE.findall(body or ""))
+    if n_landscape:
+        findings.append(_finding(
+            "body:marketing-landscape", "low",
+            "'The ... landscape' is marketing-speak (the landscaping trade "
+            "is fine — this means phrases like 'the industry landscape')",
+            n_landscape, fix="Say 'the market' or name the actual thing",
+            category="tone"))
+    hard_sell = [p for p in _HARD_SELL_RES if p.search(txt)]
+    if hard_sell:
+        findings.append(_finding(
+            "body:hard-sell-cta", "medium",
+            "Hard-sell call-to-action phrasing — a soft ask gets more "
+            "replies", len(hard_sell),
+            fix="Use a low-pressure ask, e.g. 'Would a short call next week "
+                "work?'", category="tone"))
+    content = "\n".join(lines[:signoff_idx if signoff_idx is not None
+                              else len(lines)])
+    wc = len(_words(content))
+    if 40 <= wc < 100 or wc > 170:
+        findings.append(_finding(
+            "body:word-count", "low",
+            f"{wc} words — cold emails land best at 120-150",
+            1, fix="Aim for 120-150 words", category="structure"))
+    if signoff_idx is not None:
+        sig = "\n".join(lines[signoff_idx + 1:]).strip()
+        if not sig:
+            findings.append(_finding(
+                "body:no-signature", "low",
+                "No signature block under the sign-off",
+                1, fix="Add your name, company, phone or website",
+                category="structure"))
+        else:
+            if not _CONTACT_INFO.search(sig):
+                findings.append(_finding(
+                    "body:no-contact-info", "low",
+                    "The signature has no phone, email or website",
+                    1, fix="Add a phone number, email or website to the "
+                           "signature", category="structure"))
+            company = _sender_company()
+            if company and company.lower() not in sig.lower():
+                findings.append(_finding(
+                    "body:no-company-name", "low",
+                    f"The signature doesn't carry the company name "
+                    f"('{company}')",
+                    1, fix="Sign with your company name — recipients check "
+                           "who is writing", category="structure"))
 
     # -- Score: severity-weighted, counts capped so one word repeated 20
     #    times can't alone max the meter. -----------------------------------
@@ -374,6 +554,11 @@ def build_improve_prompt(subject: str, body: str, findings: list[dict]) -> str:
         "6. NEVER use em-dashes (—) or en-dashes (–) — they read as "
         "machine-written. Use commas instead.",
         "7. The subject stays under 60 characters if you can.",
+        "8. If the findings mention word count, bring the body to roughly "
+        "120-150 words.",
+        "9. If the opener or the call-to-action is flagged, open with a "
+        "specific-sounding line about the lead and use a soft, low-pressure "
+        "ask.",
         "",
         f"Current subject: {subject}",
         "",
@@ -502,11 +687,19 @@ def build_analysis_prompt(subject: str, body: str,
     lines += [f"- {f['message']}" for f in rules_findings] or ["- (none)"]
     lines += [
         "",
-        "Judge what word-matching rules cannot see: exaggerated or "
-        "unverifiable claims, a subject that promises something the body "
-        "doesn't deliver, salesy hype tone, generic blast wording that "
-        "could go to anyone, pushy calls to action, trust problems, "
-        "anything a spam filter or a busy recipient would flag.",
+        "Judge what word-matching rules cannot see:",
+        "1. Does the opening line reference a specific, real, verifiable "
+        "fact about the recipient's company — or is it generic even if a "
+        "name is filled in?",
+        "2. Does it sound like a human construction professional wrote it, "
+        "or AI-generated / templated?",
+        "3. Is the call-to-action soft (a low-pressure ask) or does it "
+        "pressure the recipient?",
+        "4. Would the named recipient believe the sender actually "
+        "researched their company?",
+        "5. Any other red flags: exaggerated or unverifiable claims, a "
+        "subject that promises what the body doesn't deliver, trust "
+        "problems, anything a spam filter or a busy recipient would flag.",
         "",
         "Score each category 0-100 for spam risk (0 = clean, 100 = certain "
         "spam):",

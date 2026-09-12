@@ -3,9 +3,11 @@
 analyze_script: the honest rules heuristic — trigger phrases (word-boundary,
 subject counts double), subject shape (ALL CAPS, '!!', length, fake
 'Re:'), body shape (shouting, exclamation runs, link farms, shorteners,
-'$' density) and structure (greeting, personalization, opt-out line,
-wall of text, sentence length). Score is severity-weighted with capped
-counts.
+'$' density), structure (greeting, personalization, opt-out line,
+wall of text, sentence length) and the cold-email rulebook (template
+filler / AI-tell phrases with neutral swaps, generic openers, the
+120-150 word target, sign-off + signature with contact info, hard-sell
+CTAs). Score is severity-weighted with capped counts.
 
 The AI layer: the LLM reads the RENDERED email as a deliverability
 expert and answers a JSON verdict (score, plain-words summary, six
@@ -40,13 +42,26 @@ def _fresh_cache():
 
 
 CLEAN_SUBJECT = "Estimating for {{company_name}}"
+# A fully-compliant cold email per the rulebook: greeting + variables,
+# a how-I-found-you line, 120-150 words of content, an opt-out line, a
+# 'Best regards' sign-off and a signature with company name + contact.
+# The analyzer must find NOTHING.
 CLEAN_BODY = (
     "Hi {{first_name}},\n\n"
-    "I saw {{company_name}} in {{location}} and wanted to introduce our "
-    "estimating services for GC projects. We handle takeoffs and bids for "
-    "contractors like you.\n\n"
-    "Would a short call next week work?\n\n"
-    "Best regards,\nSam"
+    "I found your company while researching commercial contractors in "
+    "{{location}}, and I saw that {{company_name}} is bidding on fitout "
+    "work. I wanted to introduce our estimating services. We handle "
+    "takeoffs, material counts, and full bid packages for contractors "
+    "like you, and our team has been preparing GC and MEP estimates "
+    "across the United States for over ten years. Most of our clients "
+    "send us their drawings on a Monday and have a priced takeoff back "
+    "before they bid on Friday.\n\n"
+    "Would a short call next week work? I am happy to walk through a "
+    "sample takeoff so you can judge the quality yourself.\n\n"
+    "Just let me know if you'd rather not hear from me, and I will not "
+    "follow up.\n\n"
+    "Best regards,\nSam Carter\nThe Best Estimator LLC\n"
+    "sam@thebestestimator.com | +1 555 014 2211"
 )
 
 SPAM_SUBJECT = "RE: ACT NOW!!! FREE GUARANTEED CASH OFFER winner"
@@ -133,6 +148,99 @@ def test_long_subject_flagged():
 def test_score_capped_at_100():
     r = spamcheck.analyze_script(SPAM_SUBJECT, SPAM_BODY * 5)
     assert r["score"] == 100
+
+
+# ---------------------------------------------------------------------------
+# The cold-email rulebook (template filler, opener, shape)
+# ---------------------------------------------------------------------------
+
+def test_template_phrases_and_ai_tells_flagged_and_swapped():
+    body = ("I hope this email finds you well. We are revolutionizing the "
+            "takeoff process with seamless technology and industry-leading "
+            "accuracy.")
+    r = spamcheck.analyze_script("Quote", body)
+    rules = {f["rule"] for f in r["findings"]}
+    assert "phrase:i hope this email finds you well" in rules
+    assert "phrase:revolutionizing" in rules
+    assert "phrase:seamless" in rules
+    assert "phrase:industry-leading" in rules
+    # The one-click rewrite swaps them out.
+    _, txt, _ = spamcheck._rules_fix("Quote", body)
+    low = txt.lower()
+    for gone in ("finds you well", "revolutionizing", "seamless",
+                 "industry-leading"):
+        assert gone not in low, f"'{gone}' survived: {low}"
+
+
+def test_generic_opener_flagged():
+    """The first real line after the greeting is the opener — 'I wanted
+    to reach out' there means no specific research fact."""
+    body = ("Hi {{first_name}},\n\n"
+            "I wanted to reach out because I saw your website and think we "
+            "could help your team with takeoffs.")
+    r = spamcheck.analyze_script("Quote", body)
+    assert "body:generic-opener" in {f["rule"] for f in r["findings"]}
+    # The same wording mid-email is not the opener — not flagged as one.
+    body2 = ("Hi {{first_name}},\n\nYour team bids on fitouts. I wanted to "
+             "reach out because we do the takeoffs behind bids like those.")
+    r2 = spamcheck.analyze_script("Quote", body2)
+    assert "body:generic-opener" not in {f["rule"] for f in r2["findings"]}
+
+
+def test_word_count_target():
+    """Too short or too long is flagged; the 120-150 range is not."""
+    short = ("Hi {{first_name}},\n\nWe prepare cost estimates for GC "
+             "projects. Our team handles takeoffs, material counts, and "
+             "bid packages for contractors. We have been doing this work "
+             "for many years across several states. Our clients send us "
+             "drawings and we return a full priced takeoff within two "
+             "business days every single week without any delays at all.")
+    assert "body:word-count" in {
+        f["rule"] for f in spamcheck.analyze_script("Quote", short)["findings"]}
+    long_ = "filler sentence here. " * 60
+    assert "body:word-count" in {
+        f["rule"] for f in spamcheck.analyze_script("Quote", long_)["findings"]}
+    # CLEAN_BODY sits inside the range (covered by the clean test too).
+    assert "body:word-count" not in {
+        f["rule"] for f in spamcheck.analyze_script(
+            CLEAN_SUBJECT, CLEAN_BODY)["findings"]}
+
+
+def test_signoff_and_signature_checks():
+    no_signoff = ("Hi {{first_name}}, we do estimating work for GC "
+                  "projects every day.")
+    assert "body:no-signoff" in {
+        f["rule"] for f in spamcheck.analyze_script("Quote", no_signoff)["findings"]}
+    bare = "Hi {{first_name}},\n\nWe do estimating.\n\nBest regards,\nSam"
+    rules = {f["rule"] for f in spamcheck.analyze_script("Quote", bare)["findings"]}
+    assert "body:no-signoff" not in rules
+    assert "body:no-contact-info" in rules
+    full = ("Hi {{first_name}},\n\nWe do estimating.\n\n"
+            "Best regards,\nSam Carter\n+1 555 014 2211")
+    rules2 = {f["rule"] for f in spamcheck.analyze_script("Quote", full)["findings"]}
+    assert "body:no-signoff" not in rules2
+    assert "body:no-contact-info" not in rules2
+
+
+def test_hard_sell_cta_flagged():
+    body = ("Hi {{first_name}},\n\nDon't miss this offer, and sign up "
+            "today for our service package.")
+    r = spamcheck.analyze_script("Quote", body)
+    hits = [f for f in r["findings"] if f["rule"] == "body:hard-sell-cta"]
+    assert hits and hits[0]["count"] == 3
+
+
+def test_landscape_trade_word_not_flagged():
+    """Landscaping is a real trade we email — only the marketing-speak
+    'the X landscape' is flagged, never 'landscape projects'."""
+    trade = ("Hi {{first_name}},\n\nWe support landscaping crews and "
+             "landscape projects across your region.")
+    assert "body:marketing-landscape" not in {
+        f["rule"] for f in spamcheck.analyze_script("Quote", trade)["findings"]}
+    marketing = ("Hi {{first_name}},\n\nWe are leaders in the construction "
+                 "landscape of today.")
+    assert "body:marketing-landscape" in {
+        f["rule"] for f in spamcheck.analyze_script("Quote", marketing)["findings"]}
 
 
 # ---------------------------------------------------------------------------

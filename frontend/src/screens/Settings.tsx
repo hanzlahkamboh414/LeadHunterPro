@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { KeyRound, ShieldCheck, Info } from "lucide-react";
 import { getStoredApiKey, setStoredApiKey } from "../api/client";
+import { PageHeader } from "../components/PageHeader";
 
 export default function Settings() {
   const [apiKey, setApiKey] = useState(getStoredApiKey());
@@ -15,10 +16,11 @@ export default function Settings() {
 
   return (
     <div className="px-8 py-7 max-w-2xl">
-      <h1 className="text-[26px] font-semibold text-white">Settings</h1>
-      <p className="text-slate-500 text-[13.5px] mt-1">
-        API access and connection details.
-      </p>
+      <PageHeader
+        eyebrow="LeadHunter Pro"
+        title="Settings"
+        subtitle="API access and connection details."
+      />
 
       {/* API key */}
       <div className="mt-6 rounded-xl border border-white/5 bg-white/[0.02] p-5">

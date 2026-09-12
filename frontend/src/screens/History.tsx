@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api/client";
+import { PageHeader } from "../components/PageHeader";
 import type { JobSummary } from "../types";
 import StatusChip, { Spinner } from "../components/StatusChip";
 import { elapsed, formatTime, recommendationBadge, recommendationLabel, timeAgo } from "../lib/format";
@@ -17,10 +18,11 @@ export default function History() {
   return (
     <div className="px-8 py-7 max-w-4xl">
       <div className="flex items-center justify-between flex-wrap gap-3">
-        <div>
-          <h1 className="text-[26px] font-semibold text-white">Run History</h1>
-          <p className="text-slate-500 text-[13.5px] mt-1">Past discovery + research runs.</p>
-        </div>
+        <PageHeader
+          eyebrow="LeadHunter Pro"
+          title="Run History"
+          subtitle="Past discovery + research runs."
+        />
         <button
           onClick={() => refetch()}
           className="rounded-lg border border-white/5 px-3 py-2 text-[13px] text-slate-300 hover:bg-white/[0.04] inline-flex items-center gap-1"

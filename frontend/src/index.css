@@ -17,8 +17,10 @@ body {
   margin: 0;
   background-color: #0b0e14;
   color: #e2e8f0;
-  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
-    Helvetica, Arial, sans-serif;
+  /* Inter Variable (self-hosted via @fontsource, main.tsx imports the
+     faces) with the system stack as honest fallback. */
+  font-family: "Inter Variable", ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 }
 
 /* Thin, unobtrusive scrollbars for log panels */

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Mail, Globe, Phone, Trash2 } from "lucide-react";
 import { api } from "../api/client";
+import { PageHeader } from "../components/PageHeader";
 import { Spinner } from "../components/StatusChip";
 import DeleteReasonDialog, { type DeleteReason } from "../components/DeleteReasonDialog";
 
@@ -52,12 +53,11 @@ export default function Contacts() {
   return (
     <div className="px-8 py-7 max-w-6xl">
       <div className="flex items-center justify-between flex-wrap gap-3">
-        <div>
-          <h1 className="text-[26px] font-semibold text-white">Contacts</h1>
-          <p className="text-slate-500 text-[13.5px] mt-1">
-            Sirf outreach fields — name, email, phone, LinkedIn. Baqi detail Companies me dekhein.
-          </p>
-        </div>
+        <PageHeader
+          eyebrow="LeadHunter Pro"
+          title="Contacts"
+          subtitle="Sirf outreach fields — name, email, phone, LinkedIn. Baqi detail Companies me dekhein."
+        />
       </div>
 
       {isError && (

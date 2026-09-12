@@ -4,6 +4,7 @@ import { useNavigate } from "react-router-dom";
 import { Building2, Users, Target, Gauge, TrendingUp, ArrowRight } from "lucide-react";
 import { api } from "../api/client";
 import { Spinner } from "../components/StatusChip";
+import { PageHeader } from "../components/PageHeader";
 import {
   LeadsTrend,
   RecommendationDonut,
@@ -106,8 +107,12 @@ export default function Dashboard() {
 
   return (
     <div className="px-8 py-7 max-w-6xl">
-      <h1 className="text-[26px] font-semibold text-white">Dashboard</h1>
-      <p className="text-slate-500 text-[13.5px] mt-1">Welcome to LeadHunter Pro AI</p>
+      <PageHeader
+        eyebrow="The Best Estimator LLC"
+        title="Dashboard"
+        subtitle="Welcome to LeadHunter Pro AI"
+        large
+      />
 
       {loading ? (
         <div className="flex items-center gap-2 text-slate-500 text-sm py-16 justify-center">

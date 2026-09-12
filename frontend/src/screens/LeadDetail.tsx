@@ -86,11 +86,14 @@ export default function LeadDetail() {
         </a>
       )}
 
-      {/* Fit summary */}
+      {/* Fit summary — left-accent callout (the frontend1 design pattern):
+          the AI's verdict reads as a quote, visually distinct from data. */}
       {data.fit && (
-        <div className="mt-5 rounded-xl border border-white/5 bg-white/[0.02] p-5">
-          <h2 className="text-[14px] font-semibold text-white mb-1">Fit summary</h2>
-          <p className="text-[13.5px] text-slate-200">{data.fit}</p>
+        <div className="mt-5 rounded-r-lg border-l-[3px] border-indigo-400/70 bg-indigo-500/[0.05] px-5 py-4">
+          <h2 className="text-[11.5px] font-bold uppercase tracking-[0.14em] text-indigo-300/90 mb-1.5">
+            Fit summary
+          </h2>
+          <p className="text-[13.5px] text-slate-100 leading-relaxed">{data.fit}</p>
         </div>
       )}
 
@@ -174,7 +177,11 @@ function ReasonProof({
       <div className="flex gap-2">
         <span className="text-slate-500 w-28 shrink-0">{label}</span>
         <div className="flex-1 min-w-0">
-          <p className="text-slate-100">{reason}</p>
+          {/* Left-accent callout — the reason is the "why" of this section,
+              not just another data row. */}
+          <p className="text-slate-100 border-l-2 border-indigo-400/40 pl-3">
+            {reason}
+          </p>
           {links.length > 0 && (
             <button
               onClick={() => setOpen((v) => !v)}

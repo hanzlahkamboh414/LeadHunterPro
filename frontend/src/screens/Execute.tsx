@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { Rocket, KeyRound } from "lucide-react";
 import { api, ApiError, getStoredApiKey, setStoredApiKey } from "../api/client";
+import { PageHeader } from "../components/PageHeader";
 import type { Job } from "../types";
 import StatusChip, { Spinner } from "../components/StatusChip";
 import { elapsed, recommendationBadge, recommendationLabel } from "../lib/format";
@@ -142,10 +143,11 @@ export default function Execute() {
 
   return (
     <div className="px-8 py-7 max-w-4xl">
-      <h1 className="text-[26px] font-semibold text-white">Research</h1>
-      <p className="text-slate-500 text-[13.5px] mt-1">
-        Discovery → AI research → qualified leads, run as a background job you can watch live.
-      </p>
+      <PageHeader
+        eyebrow="LeadHunter Pro"
+        title="Research"
+        subtitle="Discovery → AI research → qualified leads, run as a background job you can watch live."
+      />
 
       {/* API key (M12 baseline) */}
       <div className="mt-6 rounded-xl border border-white/5 bg-white/[0.02] p-5">

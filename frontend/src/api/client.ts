@@ -208,6 +208,11 @@ export const api = {
     });
   },
 
+  /** Liveness probe — the Topbar connection dot. No auth required. */
+  health(): Promise<{ status: string; version?: string }> {
+    return request("/health");
+  },
+
   /** Admin — which emails were deleted + when + why. */
   adminDeleted(limit = 200): Promise<AdminDeleted> {
     return request<AdminDeleted>(`/admin/deleted?limit=${limit}`);

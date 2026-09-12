@@ -1,6 +1,8 @@
 import { FormEvent, useState } from "react";
+import { useIsFetching, useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { Search, Bell, ChevronDown } from "lucide-react";
+import { api } from "../api/client";
 import { useAuth } from "../contexts/AuthContext";
 
 /** "Skye Schooly" -> "SS", "king" -> "KI" — the avatar badge initials. */
@@ -8,6 +10,56 @@ function initials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);
   if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
   return name.trim().slice(0, 2).toUpperCase() || "U";
+}
+
+/** "just now" / "2m ago" for a millisecond epoch (react-query dataUpdatedAt). */
+function msAgo(ms: number): string {
+  const mins = Math.floor((Date.now() - ms) / 60_000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  return `${Math.floor(mins / 60)}h ago`;
+}
+
+/** Live backend connection (the frontend1 design idea): an honest green/red
+ *  dot + last-check time, polled every 30s — the user always knows whether
+ *  the data on screen is live or the backend has gone away. */
+function ConnectionStatus() {
+  const health = useQuery({
+    queryKey: ["health"],
+    queryFn: () => api.health(),
+    refetchInterval: 30_000,
+    staleTime: 25_000,
+    retry: 1,
+  });
+  const fetching = useIsFetching({ queryKey: ["health"] }) > 0;
+  const online = !health.isError;
+
+  return (
+    <div
+      className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-white/[0.03] border border-white/5"
+      title={online ? "Backend connection healthy" : "Backend unreachable — retrying every 30s"}
+    >
+      <span
+        className={`w-2 h-2 rounded-full ${
+          online
+            ? "bg-emerald-400 animate-pulse"
+            : "bg-rose-400 animate-pulse"
+        } ${fetching ? "opacity-100" : "opacity-80"}`}
+      />
+      <span
+        className={`text-[12px] font-medium hidden md:block ${
+          online ? "text-slate-400" : "text-rose-300"
+        }`}
+      >
+        {online ? "Live" : "Offline"}
+      </span>
+      {online && health.dataUpdatedAt > 0 && (
+        <span className="text-[11px] text-slate-600 hidden lg:block">
+          {msAgo(health.dataUpdatedAt)}
+        </span>
+      )}
+    </div>
+  );
 }
 
 export default function Topbar() {
@@ -40,6 +92,8 @@ export default function Topbar() {
           className="w-full bg-white/[0.04] border border-white/5 rounded-lg pl-10 pr-4 py-2.5 text-[13px] text-slate-300 placeholder:text-slate-500 outline-none focus:ring-2 focus:ring-indigo-500/40"
         />
       </form>
+
+      <ConnectionStatus />
 
       <button
         type="button"

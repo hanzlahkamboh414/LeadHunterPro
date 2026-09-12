@@ -3,6 +3,7 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tansta
 import { useNavigate, useLocation, useSearchParams } from "react-router-dom";
 import { Download, CheckSquare, Inbox, Layers, Square, Tag, Trash2, X } from "lucide-react";
 import { api } from "../api/client";
+import { PageHeader } from "../components/PageHeader";
 import { Spinner } from "../components/StatusChip";
 import ManageMenu from "../components/ManageMenu";
 import DeleteReasonDialog, { type DeleteReason } from "../components/DeleteReasonDialog";
@@ -496,14 +497,11 @@ export default function Leads() {
   return (
     <div className="px-8 py-7 max-w-7xl">
       <div className="flex items-center justify-between flex-wrap gap-3">
-        <div>
-          <h1 className="text-[26px] font-semibold text-white">
-            {q ? `Results for "${params.get("q")}"` : "Companies"}
-          </h1>
-          <p className="text-slate-500 text-[13.5px] mt-1">
-            Researched companies with a bound decision-maker and a buying-window score.
-          </p>
-        </div>
+        <PageHeader
+          eyebrow="LeadHunter Pro"
+          title={q ? `Results for "${params.get("q")}"` : "Companies"}
+          subtitle="Researched companies with a bound decision-maker and a buying-window score."
+        />
         <div className="flex items-center gap-2">
           {selected.size > 0 && (
             <button

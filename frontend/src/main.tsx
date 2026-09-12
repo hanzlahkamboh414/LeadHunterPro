@@ -4,6 +4,8 @@ import { BrowserRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import App from "./App";
 import { AuthProvider } from "./contexts/AuthContext";
+// Self-hosted variable font (no external CDN dependency — free, offline-safe).
+import "@fontsource-variable/inter";
 import "./index.css";
 
 const queryClient = new QueryClient({

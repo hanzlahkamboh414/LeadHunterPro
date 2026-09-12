@@ -184,6 +184,20 @@ export const api = {
     return request("/auth/me");
   },
 
+  /** PUBLIC boot check — is the login page on or off? (Admin panel toggle.) */
+  authMode(): Promise<{ auth_enabled: boolean }> {
+    return request("/auth/mode");
+  },
+
+  /** Admin toggle: turn the login page on/off (open-site mode). */
+  adminSetAuthMode(enabled: boolean): Promise<{ auth_enabled: boolean }> {
+    return request("/admin/auth-mode", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    });
+  },
+
   /** Record the logout in the admin activity log (fire-and-forget; the client
    * discards the token right after — the JWT itself is stateless). */
   logout(): Promise<{ success: boolean }> {

@@ -74,9 +74,14 @@ export default function Topbar() {
   }
 
   // Who is signed in — the account's display name (falls back to the
-  // username), never a hardcoded one.
-  const displayName = user?.name || user?.username || "";
-  const subtitle = user?.is_admin ? "Administrator" : "Business Development";
+  // username), never a hardcoded one. In OPEN MODE (login auth off) there is
+  // no session: the chip says so honestly instead of showing a blank user.
+  const displayName = user?.name || user?.username || "Open access";
+  const subtitle = !user
+    ? "no login required"
+    : user.is_admin
+      ? "Administrator"
+      : "Business Development";
 
   return (
     // shrink-0: the shell is a fixed height now, so the bar must keep its own

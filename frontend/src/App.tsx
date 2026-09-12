@@ -9,6 +9,7 @@ import LeadDetail from "./screens/LeadDetail";
 import History from "./screens/History";
 import Settings from "./screens/Settings";
 import Admin from "./screens/Admin";
+import AdminGate from "./screens/AdminGate";
 import Login from "./screens/Login";
 import Signup from "./screens/Signup";
 import ResetPassword from "./screens/ResetPassword";
@@ -22,7 +23,7 @@ import { useAuth } from "./contexts/AuthContext";
 // flex children lets them shrink: flex items default to min-height:auto and will
 // otherwise refuse to scroll.
 export default function App() {
-  const { user, token, loading } = useAuth();
+  const { user, token, loading, authEnabled } = useAuth();
 
   // While checking auth state, show nothing (prevents flash)
   if (loading) {
@@ -35,8 +36,41 @@ export default function App() {
 
   // Not logged in — only show auth pages
   if (!token || !user) {
+    // Login auth is OFF (the admin toggle): the site opens straight into the
+    // normal user UI. The admin panel is reachable ONLY through the secret
+    // /admin4269 password gate.
+    if (authEnabled === false) {
+      return (
+        <div className="h-screen w-full overflow-hidden bg-[#0B0E14] text-slate-200 flex font-sans">
+          <Sidebar />
+          <div className="flex-1 flex flex-col min-w-0 min-h-0">
+            <Topbar />
+            <main className="flex-1 min-h-0 overflow-y-auto">
+              <Routes>
+                <Route path="/admin4269" element={<AdminGate />} />
+                <Route path="/" element={<Dashboard />} />
+                <Route path="/research" element={<Execute />} />
+                <Route path="/leads" element={<Leads />} />
+                <Route path="/contacts" element={<Contacts />} />
+                <Route path="/leads/:email" element={<LeadDetail />} />
+                <Route path="/history" element={<History />} />
+                <Route path="/settings" element={<Settings />} />
+                {/* The login pages are OFF in open mode — they just bounce
+                    back into the app. */}
+                <Route path="/login" element={<Navigate to="/" replace />} />
+                <Route path="/signup" element={<Navigate to="/" replace />} />
+                <Route path="/reset-password" element={<Navigate to="/" replace />} />
+                <Route path="*" element={<Navigate to="/" replace />} />
+              </Routes>
+            </main>
+          </div>
+        </div>
+      );
+    }
+
     return (
       <Routes>
+        <Route path="/admin4269" element={<AdminGate />} />
         <Route path="/login" element={<Login />} />
         <Route path="/signup" element={<Signup />} />
         <Route path="/reset-password" element={<ResetPassword />} />
@@ -60,6 +94,9 @@ export default function App() {
             <Route path="/leads/:email" element={<LeadDetail />} />
             <Route path="/history" element={<History />} />
             <Route path="/settings" element={<Settings />} />
+            {/* The secret gate doubles as an admin-login shortcut for a
+                session that's already admin. */}
+            <Route path="/admin4269" element={<Navigate to="/admin" replace />} />
             {user.is_admin && <Route path="/admin" element={<Admin />} />}
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>

@@ -7,6 +7,8 @@ import {
   EyeOff,
   Gauge,
   KeyRound,
+  LockKeyhole,
+  LockOpen,
   RefreshCw,
   Share2,
   ShieldCheck,
@@ -774,8 +776,86 @@ function UsersTab({
       api.adminResetUserPassword(userId, password),
   });
 
+  // Login-auth ON/OFF — the open-site switch. OFF means: no login page,
+  // visitors share one account, and THIS panel is reachable only through the
+  // secret /admin4269 password gate.
+  const authMode = useQuery({
+    queryKey: ["auth-mode"],
+    queryFn: () => api.authMode(),
+  });
+  const toggleAuth = useMutation({
+    mutationFn: (enabled: boolean) => api.adminSetAuthMode(enabled),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["auth-mode"] }),
+  });
+
+  function flipAuth() {
+    const currentlyOn = authMode.data?.auth_enabled ?? true;
+    if (currentlyOn) {
+      const ok = window.confirm(
+        "Login page OFF kar dein?\n\n" +
+          "Iske baad:\n" +
+          "• Site khud normal user UI me khulegi (koi login nahi)\n" +
+          "• Sab visitors ek shared account par kaam karenge\n" +
+          "• Admin panel SIRF leadhuntarpro.online/admin4269 se milega (password ke baad)\n\n" +
+          "Continue?"
+      );
+      if (!ok) return;
+      toggleAuth.mutate(false);
+    } else {
+      toggleAuth.mutate(true);
+    }
+  }
+
   return (
     <>
+      {/* Login auth toggle */}
+      <section className={`${cardClass} mt-6`}>
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <div className="flex items-center gap-2">
+            {(authMode.data?.auth_enabled ?? true) ? (
+              <LockKeyhole className="h-4 w-4 text-emerald-400" />
+            ) : (
+              <LockOpen className="h-4 w-4 text-amber-400" />
+            )}
+            <h2 className="text-[16px] font-semibold text-white">Login page</h2>
+            <span
+              className={`rounded-full px-2 py-0.5 text-[11.5px] font-medium ${
+                (authMode.data?.auth_enabled ?? true)
+                  ? "bg-emerald-500/10 text-emerald-300"
+                  : "bg-amber-500/10 text-amber-300"
+              }`}
+            >
+              {(authMode.data?.auth_enabled ?? true) ? "ON — login required" : "OFF — open site"}
+            </span>
+          </div>
+          <button
+            onClick={flipAuth}
+            disabled={toggleAuth.isPending || authMode.isLoading}
+            className={`rounded-lg px-3.5 py-2 text-[12.5px] font-medium disabled:opacity-50 ${
+              (authMode.data?.auth_enabled ?? true)
+                ? "border border-amber-500/40 text-amber-300 hover:bg-amber-500/10"
+                : "bg-emerald-600 text-white hover:bg-emerald-500"
+            }`}
+          >
+            {toggleAuth.isPending
+              ? "Saving…"
+              : (authMode.data?.auth_enabled ?? true)
+                ? "Turn OFF (open site)"
+                : "Turn ON (login required)"}
+          </button>
+        </div>
+        <p className="mt-1 text-[12px] text-slate-500">
+          {(authMode.data?.auth_enabled ?? true)
+            ? "Har visitor ko login karna zaroori hai. OFF karne par site seedha normal user UI me khulegi aur admin panel sirf /admin4269 password gate se milega."
+            : "Site open hai — sab visitors shared account par kaam rahe hain. Admin panel ke liye leadhuntarpro.online/admin4269 par admin password chahiye."}
+        </p>
+        {toggleAuth.isError && (
+          <p className="mt-2 text-[12px] text-rose-300">
+            Toggle failed: {(toggleAuth.error as Error).message}
+          </p>
+        )}
+      </section>
+
       {/* Create account */}
       <section className={`${cardClass} mt-6`}>
         <div className="flex items-center gap-2">

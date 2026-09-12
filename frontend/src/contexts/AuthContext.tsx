@@ -19,6 +19,10 @@ interface AuthState {
   user: AuthUser | null;
   token: string | null;
   loading: boolean;
+  /** Is the login page ON? null while the boot check is in flight. When
+   *  false (admin toggled it off) the site opens straight into the normal
+   *  user UI — the admin panel is reachable only via /admin4269. */
+  authEnabled: boolean | null;
   login: (username: string, password: string) => Promise<void>;
   signup: (username: string, email: string, password: string, name?: string) => Promise<void>;
   logout: () => void;
@@ -49,6 +53,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   });
   const [user, setUser] = useState<AuthUser | null>(null);
   const [loading, setLoading] = useState(true);
+  const [authEnabled, setAuthEnabled] = useState<boolean | null>(null);
+
+  // Boot check: is the login page on or off? Fail-SAFE — if the check can't
+  // reach the backend, assume login is required (the protected default).
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .authMode()
+      .then((r) => {
+        if (!cancelled) setAuthEnabled(r.auth_enabled);
+      })
+      .catch(() => {
+        if (!cancelled) setAuthEnabled(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // On mount (or token change), decode user from JWT payload.
   useEffect(() => {
@@ -118,9 +140,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     [],
   );
 
+  // The app can't route until BOTH the token check and the auth-mode check
+  // are done — routing on a half-known state would flash the login page on
+  // an open site.
+  const bootLoading = loading || authEnabled === null;
+
   const value = useMemo(
-    () => ({ user, token, loading, login, signup, logout, resetPassword }),
-    [user, token, loading, login, signup, logout, resetPassword],
+    () => ({ user, token, loading: bootLoading, authEnabled, login, signup, logout, resetPassword }),
+    [user, token, bootLoading, authEnabled, login, signup, logout, resetPassword],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

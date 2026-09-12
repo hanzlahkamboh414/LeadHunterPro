@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fastapi import Depends, HTTPException, Request
 
+from app.auth import settings as auth_settings
 from app.auth.jwt import decode_access_token
 from app.auth.models import User, UserStore
 
@@ -18,25 +19,30 @@ def _user_store() -> UserStore:
 def get_current_user(request: Request) -> User:
     """Extract and validate JWT from Authorization header.
 
-    Returns the User if valid. Raises 401 if missing/invalid/expired.
+    Returns the User if valid. Raises 401 if missing/invalid/expired —
+    UNLESS login auth is OFF (the admin toggle): then token-less visitors run
+    as the shared account, so the site opens straight into the normal user
+    UI. A valid token always wins, so an admin session keeps working while
+    the site is open.
     """
     auth_header = request.headers.get("Authorization", "")
-    if not auth_header.startswith("Bearer "):
-        raise HTTPException(
-            status_code=401,
-            detail="Not authenticated — provide Authorization: Bearer <token>",
-        )
-    token = auth_header[7:]  # strip "Bearer "
-    payload = decode_access_token(token)
-    if payload is None:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:]  # strip "Bearer "
+        payload = decode_access_token(token)
+        if payload is not None:
+            user_id = payload.get("sub", "")
+            user = _user_store().get_by_id(user_id)
+            if user is not None:
+                return user
 
-    user_id = payload.get("sub", "")
-    store = _user_store()
-    user = store.get_by_id(user_id)
-    if user is None:
-        raise HTTPException(status_code=401, detail="User not found")
-    return user
+    # No valid token. Open site? → shared account. Otherwise → 401.
+    if not auth_settings.get_settings().auth_enabled():
+        return _user_store().ensure_shared()
+
+    raise HTTPException(
+        status_code=401,
+        detail="Not authenticated — provide Authorization: Bearer <token>",
+    )
 
 
 def require_admin(user: User = Depends(get_current_user)) -> User:

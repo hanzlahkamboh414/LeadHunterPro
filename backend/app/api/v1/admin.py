@@ -29,6 +29,7 @@ from app.schemas.admin import (
     AdminActivityOut,
     AdminActivityRow,
     AdminAssignIn,
+    AdminAuthModeIn,
     AdminCachePendingOut,
     AdminDashboardOut,
     AdminDecisionOut,
@@ -384,9 +385,32 @@ def delete_user(user_id: str, admin: User = Depends(require_admin)) -> dict:
     target = _user_store().get_by_id(user_id)
     if target is None:
         raise HTTPException(status_code=404, detail=f"user {user_id} not found")
+    if target.username == "shared":
+        raise HTTPException(
+            status_code=422,
+            detail="The shared account is the anonymous identity while login auth is "
+                   "off — it cannot be deleted",
+        )
     _user_store().delete(user_id)
     logger.info("DELETE /admin/users/%s -> deleted %s", user_id, target.username)
     return {"success": True, "username": target.username}
+
+
+@router.post("/auth-mode")
+def set_auth_mode(body: AdminAuthModeIn, admin: User = Depends(require_admin)) -> dict:
+    """Turn the login page ON/OFF.
+
+    OFF = open site: visitors land straight in the normal user UI (token-less
+    requests run as the shared account) and the admin panel is reachable only
+    through the secret URL + password gate. ON = the classic login wall.
+    """
+    from app.auth.settings import get_settings
+
+    get_settings().set_auth_enabled(body.enabled)
+    detail = "login auth ON" if body.enabled else "login auth OFF (open site)"
+    get_activity().record(admin.id, admin.username, "auth", detail=detail)
+    logger.info("POST /admin/auth-mode -> %s (by %s)", detail, admin.username)
+    return {"auth_enabled": body.enabled}
 
 
 @router.get("/activity", response_model=AdminActivityOut)

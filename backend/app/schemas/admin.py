@@ -186,6 +186,11 @@ class AdminPasswordIn(BaseModel):
     new_password: str = Field(..., min_length=4, max_length=100)
 
 
+class AdminAuthModeIn(BaseModel):
+    """Toggle the login page on/off (the open-site mode switch)."""
+    enabled: bool
+
+
 class AdminActivityRow(BaseModel):
     id: int
     user_id: str

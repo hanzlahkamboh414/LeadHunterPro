@@ -223,3 +223,21 @@ class UserStore:
         conn.commit()
         conn.close()
         return self.get_by_username(username) or user
+
+    def ensure_shared(self) -> User:
+        """The account token-less visitors run as when login auth is OFF.
+
+        Idempotent. NEVER admin — anonymous access must never carry admin
+        powers. The password is a random secret nobody is told, so "shared"
+        cannot be logged into directly; it exists only as the identity the
+        API assigns to unauthenticated requests while the site is open.
+        """
+        existing = self.get_by_username("shared")
+        if existing:
+            return existing
+        return self.create(
+            username="shared",
+            email="shared@leadhunter.local",
+            password=uuid.uuid4().hex + uuid.uuid4().hex,
+            name="Shared Workspace",
+        )

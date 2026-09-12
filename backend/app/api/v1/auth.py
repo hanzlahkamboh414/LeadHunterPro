@@ -131,6 +131,18 @@ def reset_password(body: ResetPasswordRequest) -> dict:
     return {"success": True, "message": "Password updated"}
 
 
+@router.get("/mode")
+def auth_mode() -> dict:
+    """PUBLIC — the frontend boot check: is the login page on or off?
+
+    The admin can turn login auth off from the admin panel; the site then
+    opens straight into the normal user UI.
+    """
+    from app.auth.settings import get_settings
+
+    return {"auth_enabled": get_settings().auth_enabled()}
+
+
 @router.get("/me", response_model=MeOut)
 def me(user: User = Depends(get_current_user)) -> MeOut:
     """Return the current authenticated user's info."""

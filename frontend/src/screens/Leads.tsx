@@ -4,6 +4,7 @@ import { useNavigate, useLocation, useSearchParams } from "react-router-dom";
 import { Download, CheckSquare, Inbox, Layers, Square, Tag, Trash2, X } from "lucide-react";
 import { api } from "../api/client";
 import { PageHeader } from "../components/PageHeader";
+import { Combobox, Select } from "../components/Select";
 import { Spinner } from "../components/StatusChip";
 import ManageMenu from "../components/ManageMenu";
 import DeleteReasonDialog, { type DeleteReason } from "../components/DeleteReasonDialog";
@@ -604,17 +605,16 @@ export default function Leads() {
           <span className="text-[12.5px] font-medium text-indigo-200">
             Bulk organize ({selected.size} selected)
           </span>
-          <input
+          <Combobox
+            className="w-40"
             value={bulkFolder}
-            onChange={(e) => setBulkFolder(e.target.value)}
-            list="folder-options"
+            onChange={setBulkFolder}
+            options={folderList.map((f) => f.name)}
             placeholder="Set folder…"
-            className={`${selectCls} w-40`}
           />
           <input
             value={bulkTagsIn}
             onChange={(e) => setBulkTagsIn(e.target.value)}
-            list="tag-options"
             placeholder="Add tags (comma)…"
             className={`${selectCls} w-48`}
           />
@@ -654,19 +654,29 @@ export default function Leads() {
       <div className="mt-4 mb-4 flex flex-wrap items-end gap-3">
         <Filter>
           <span className={labelCls}>Recommendation</span>
-          <select value={rec} onChange={(e) => setRec(e.target.value as RecFilter)} className={selectCls}>
-            <option value="">Actionable</option>
-            <option value="contact_now">Contact Now</option>
-            <option value="nurture">Nurture</option>
-          </select>
+          <Select
+            className="w-36"
+            value={rec}
+            onChange={(v) => setRec(v as RecFilter)}
+            options={[
+              { value: "", label: "Actionable" },
+              { value: "contact_now", label: "Contact Now" },
+              { value: "nurture", label: "Nurture" },
+            ]}
+          />
         </Filter>
         <Filter>
           <span className={labelCls}>Decision-maker</span>
-          <select value={bound} onChange={(e) => setBound(e.target.value as BoundFilter)} className={selectCls}>
-            <option value="">All</option>
-            <option value="true">Bound</option>
-            <option value="false">Unbound</option>
-          </select>
+          <Select
+            className="w-32"
+            value={bound}
+            onChange={(v) => setBound(v as BoundFilter)}
+            options={[
+              { value: "", label: "All" },
+              { value: "true", label: "Bound" },
+              { value: "false", label: "Unbound" },
+            ]}
+          />
         </Filter>
         <Filter>
           <span className={labelCls}>Min score</span>
@@ -682,36 +692,36 @@ export default function Leads() {
         </Filter>
         <Filter>
           <span className={labelCls}>Run / source</span>
-          <select value={src} onChange={(e) => setSource(e.target.value)} className={selectCls}>
-            <option value="">All runs</option>
-            {sourceOptions.map((s) => (
-              <option key={s} value={s}>
-                {s}
-              </option>
-            ))}
-          </select>
+          <Select
+            className="w-52"
+            value={src}
+            onChange={setSource}
+            placeholder="All runs"
+            options={sourceOptions.map((s) => ({ value: s, label: s }))}
+          />
         </Filter>
         <Filter>
           <span className={labelCls}>Tag</span>
-          <select value={tag} onChange={(e) => setTag(e.target.value)} className={selectCls}>
-            <option value="">All</option>
-            {uniqueTags.map((t) => (
-              <option key={t} value={t}>
-                {t} ({tagCounts.get(t)})
-              </option>
-            ))}
-          </select>
+          <Select
+            className="w-44"
+            value={tag}
+            onChange={setTag}
+            placeholder="All"
+            options={uniqueTags.map((t) => ({
+              value: t,
+              label: `${t} (${tagCounts.get(t)})`,
+            }))}
+          />
         </Filter>
         <Filter>
           <span className={labelCls}>Extracted</span>
-          <select value={date} onChange={(e) => setDate(e.target.value)} className={selectCls}>
-            <option value="">All dates</option>
-            {uniqueDates.map((d) => (
-              <option key={d} value={d}>
-                {fmtDate(d)}
-              </option>
-            ))}
-          </select>
+          <Select
+            className="w-40"
+            value={date}
+            onChange={setDate}
+            placeholder="All dates"
+            options={uniqueDates.map((d) => ({ value: d, label: fmtDate(d) }))}
+          />
         </Filter>
         <button
           onClick={() => refetch()}
@@ -734,18 +744,6 @@ export default function Leads() {
           </button>
         )}
       </div>
-
-      {/* Auto-complete sources for folder/tag inputs */}
-      <datalist id="folder-options">
-        {folderList.map((f) => (
-          <option key={f.name} value={f.name} />
-        ))}
-      </datalist>
-      <datalist id="tag-options">
-        {uniqueTags.map((t) => (
-          <option key={t} value={t} />
-        ))}
-      </datalist>
 
       {isError && (
         <p className="text-[13px] text-rose-300 bg-rose-500/10 rounded-lg px-3 py-2">
@@ -1086,18 +1084,16 @@ export default function Leads() {
             </div>
             <p className="mt-1 text-[12.5px] text-slate-500 break-all">{editEmail}</p>
             <label className={`${labelCls} block mt-4 mb-1`}>Folder</label>
-            <input
+            <Combobox
               value={editFolder}
-              onChange={(e) => setEditFolder(e.target.value)}
-              list="folder-options"
+              onChange={setEditFolder}
+              options={folderList.map((f) => f.name)}
               placeholder="e.g. Hot, Texas, No folder…"
-              className={selectCls}
             />
             <label className={`${labelCls} block mt-3 mb-1`}>Tags (comma separated)</label>
             <input
               value={editTags}
               onChange={(e) => setEditTags(e.target.value)}
-              list="tag-options"
               placeholder="Hot, Texas, Follow-up"
               className={selectCls}
             />

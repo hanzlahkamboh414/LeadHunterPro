@@ -18,6 +18,7 @@ import { useState } from "react";
 import type { ReactNode } from "react";
 import { api } from "../api/client";
 import { DELETE_REASONS } from "../components/DeleteReasonDialog";
+import { Select } from "../components/Select";
 import { Spinner } from "../components/StatusChip";
 import type {
   AdminDeletedRow,
@@ -350,15 +351,16 @@ export default function Admin() {
             <div className="mt-5 border-t border-white/5 pt-4">
               <h3 className="text-[13px] font-medium text-slate-300">Act on a search, folder or one lead</h3>
               <div className="mt-2 flex flex-wrap items-center gap-2">
-                <select
+                <Select
+                  className="w-56"
                   value={otherScope}
-                  onChange={(e) => setOtherScope(e.target.value as AdminLeadScopeKind)}
-                  className={inputClass + " w-auto"}
-                >
-                  <option value="source">By search (trade · location)</option>
-                  <option value="folder">By folder</option>
-                  <option value="email">By email</option>
-                </select>
+                  onChange={(v) => setOtherScope(v as AdminLeadScopeKind)}
+                  options={[
+                    { value: "source", label: "By search (trade · location)" },
+                    { value: "folder", label: "By folder" },
+                    { value: "email", label: "By email" },
+                  ]}
+                />
                 <input
                   value={otherValue}
                   onChange={(e) => setOtherValue(e.target.value)}
@@ -868,18 +870,13 @@ function UsersTab({
             <ActivityIcon className="h-4 w-4 text-sky-400" />
             <h2 className="text-[16px] font-semibold text-white">Activity log</h2>
           </div>
-          <select
+          <Select
+            className="w-44"
             value={activityFilter}
-            onChange={(e) => setActivityFilter(e.target.value)}
-            className={inputClass + " w-auto"}
-          >
-            <option value="">All users</option>
-            {users.map((u) => (
-              <option key={u.id} value={u.id}>
-                {u.username}
-              </option>
-            ))}
-          </select>
+            onChange={setActivityFilter}
+            placeholder="All users"
+            options={users.map((u) => ({ value: u.id, label: u.username }))}
+          />
         </div>
         <p className="mt-1 text-[12px] text-slate-500">
           Logins, logouts, signups and searches — who did what, newest first.
@@ -1126,36 +1123,30 @@ function AssignCard({ users }: { users: AdminUser[] }) {
         removes it from their dashboard again; the admin panel always sees everything.
       </p>
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        <select
+        <Select
+          className="w-52"
           value={scope}
-          onChange={(e) => setScope(e.target.value as AdminLeadScopeKind)}
-          className={inputClass + " w-auto"}
-        >
-          <option value="folder">By folder</option>
-          <option value="date">By date</option>
-          <option value="source">By search (trade · location)</option>
-          <option value="email">By email</option>
-        </select>
+          onChange={(v) => setScope(v as AdminLeadScopeKind)}
+          options={[
+            { value: "folder", label: "By folder" },
+            { value: "date", label: "By date" },
+            { value: "source", label: "By search (trade · location)" },
+            { value: "email", label: "By email" },
+          ]}
+        />
         <input
           value={value}
           onChange={(e) => setValue(e.target.value)}
           placeholder={scope === "email" ? "owner@company.com" : scope === "folder" ? 'e.g. Q3 Outreach' : scope === "date" ? "YYYY-MM-DD" : 'e.g. GC · Houston, TX'}
           className={inputClass + " w-64"}
         />
-        <select
+        <Select
+          className="w-40"
           value={userId}
-          onChange={(e) => setUserId(e.target.value)}
-          className={inputClass + " w-auto"}
-        >
-          <option value="" disabled>
-            Select user…
-          </option>
-          {nonAdminUsers.map((u) => (
-            <option key={u.id} value={u.id}>
-              {u.username}
-            </option>
-          ))}
-        </select>
+          onChange={setUserId}
+          placeholder="Select user…"
+          options={nonAdminUsers.map((u) => ({ value: u.id, label: u.username }))}
+        />
         <button
           onClick={() => assign.mutate({ scope, value: value.trim(), user_id: userId })}
           disabled={!ready || assign.isPending}

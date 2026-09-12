@@ -13,6 +13,12 @@ body,
   height: 100%;
 }
 
+/* Dark-native widgets: scrollbars, number spinners, any remaining native
+   form controls render dark instead of the OS white default. */
+html {
+  color-scheme: dark;
+}
+
 body {
   margin: 0;
   background-color: #0b0e14;

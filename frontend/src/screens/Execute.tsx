@@ -9,6 +9,7 @@ import StatusChip, { Spinner } from "../components/StatusChip";
 import { elapsed, recommendationBadge, recommendationLabel } from "../lib/format";
 import { useAuth } from "../contexts/AuthContext";
 import { CITIES_BY_STATE, TRADES, US_STATES } from "../data/locations";
+import { Combobox, Select } from "../components/Select";
 
 /** "Custom…" sentinel in the dropdowns — admin-only free-text escape hatch. */
 const CUSTOM = "__custom__";
@@ -34,6 +35,7 @@ export default function Execute() {
   const [apiKey, setApiKey] = useState(getStoredApiKey());
   const [showKey, setShowKey] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
+  const [formError, setFormError] = useState("");
 
   // Restore the active job after a refresh / dashboard round-trip: the jobId is
   // persisted per user, so the live activity view comes right back.
@@ -134,6 +136,12 @@ export default function Execute() {
   function onSubmit(e: FormEvent) {
     e.preventDefault();
     if (create.isPending) return;
+    // Custom dropdowns can't use the native required attribute — validate here.
+    if (!trade.trim() || !location.trim()) {
+      setFormError("Pick a trade and a location before executing.");
+      return;
+    }
+    setFormError("");
     create.mutate();
   }
 
@@ -191,26 +199,19 @@ export default function Execute() {
         <form onSubmit={onSubmit} className="space-y-4">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <Field label="Trade (WHAT)">
-              <select
-                required
+              <Select
                 value={tradeChoice}
-                onChange={(e) => {
-                  setTradeChoice(e.target.value);
-                  if (e.target.value !== CUSTOM) setTrade(e.target.value);
+                onChange={(v) => {
+                  setTradeChoice(v);
+                  if (v !== CUSTOM) setTrade(v);
                   else setTrade("");
                 }}
-                className={inputCls}
-              >
-                <option value="" disabled>
-                  Select a trade…
-                </option>
-                {TRADES.map((t) => (
-                  <option key={t} value={t}>
-                    {t}
-                  </option>
-                ))}
-                {isAdmin && <option value={CUSTOM}>Custom…</option>}
-              </select>
+                placeholder="Select a trade…"
+                options={[
+                  ...TRADES.map((t) => ({ value: t, label: t })),
+                  ...(isAdmin ? [{ value: CUSTOM, label: "Custom…" }] : []),
+                ]}
+              />
               {tradeChoice === CUSTOM && isAdmin && (
                 <input
                   required
@@ -223,42 +224,31 @@ export default function Execute() {
               )}
             </Field>
             <Field label="Location (WHERE)">
-              <select
-                required
+              <Select
                 value={stateChoice}
-                onChange={(e) => {
-                  setStateChoice(e.target.value);
+                onChange={(v) => {
+                  setStateChoice(v);
                   setCityChoice("");
-                  if (e.target.value === CUSTOM) setCustomLocation("");
+                  if (v === CUSTOM) setCustomLocation("");
                 }}
-                className={inputCls}
-              >
-                <option value="" disabled>
-                  Select a state…
-                </option>
-                {US_STATES.map((s) => (
-                  <option key={s} value={s}>
-                    {s}
-                  </option>
-                ))}
-                {isAdmin && <option value={CUSTOM}>Custom…</option>}
-              </select>
+                placeholder="Select a state…"
+                options={[
+                  ...US_STATES.map((s) => ({ value: s, label: s })),
+                  ...(isAdmin ? [{ value: CUSTOM, label: "Custom…" }] : []),
+                ]}
+              />
               {stateChoice && stateChoice !== CUSTOM && (
-                <select
-                  required
-                  value={cityChoice}
-                  onChange={(e) => setCityChoice(e.target.value)}
-                  className={`${inputCls} mt-2`}
-                >
-                  <option value="" disabled>
-                    Select a city in {stateChoice}…
-                  </option>
-                  {(CITIES_BY_STATE[stateChoice] ?? []).map((c) => (
-                    <option key={c} value={c}>
-                      {c}
-                    </option>
-                  ))}
-                </select>
+                <div className="mt-2">
+                  <Select
+                    value={cityChoice}
+                    onChange={setCityChoice}
+                    placeholder={`Select a city in ${stateChoice}…`}
+                    options={(CITIES_BY_STATE[stateChoice] ?? []).map((c) => ({
+                      value: c,
+                      label: c,
+                    }))}
+                  />
+                </div>
               )}
               {stateChoice === CUSTOM && isAdmin && (
                 <input
@@ -306,24 +296,21 @@ export default function Execute() {
               </p>
             </Field>
             <Field label="Save to folder (optional)">
-              <input
+              <Combobox
                 value={saveFolder}
-                onChange={(e) => setSaveFolder(e.target.value)}
+                onChange={setSaveFolder}
+                options={folderOptions}
                 placeholder='e.g. "Q3 Outreach" or pick existing'
-                list="execute-folder-options"
-                className={inputCls}
               />
-              <datalist id="execute-folder-options">
-                {folderOptions.map((f) => (
-                  <option key={f} value={f} />
-                ))}
-              </datalist>
               <p className="text-[11.5px] text-slate-600 mt-1.5">
                 Every result is auto-filed here as it's found — stays out of the inbox.
               </p>
             </Field>
           </div>
 
+          {formError && (
+            <p className="text-[13px] text-rose-300">{formError}</p>
+          )}
           {create.isError && (
             <p className="text-[13px] text-rose-300">
               Failed to start job: {(create.error as ApiError).message}

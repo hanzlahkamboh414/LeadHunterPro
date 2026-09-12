@@ -1,27 +1,34 @@
 """Spam-risk analysis + one-click fix for campaign scripts (Phase E7).
 
-Before a user schedules a campaign, the builder shows an honest estimate
-of how spammy the script looks, a plain-words list of WHAT in the text is
-risky, and a one-click "fix" that rewrites the pitch without those
-triggers.
+Two layers, so the result is authentic AND always available:
 
-Everything here is self-hosted rules (FREE rule, provider-agnostic): the
-classic content signals mailbox providers weigh — hype words, fake
-urgency, ALL CAPS, exclamation runs, deceptive "Re:" subjects, link
-farms. The score is a heuristic, NOT a Gmail oracle: it is a guide that
-makes the usual mistakes visible, and the UI says so.
+1. The AI layer — the configured LLM reads the RENDERED email (variables
+   filled with a sample lead) as an email-deliverability expert and
+   judges what rules cannot see: exaggerated claims, a subject that
+   promises what the body doesn't deliver, salesy tone, generic blast
+   wording, pushy CTAs, trust problems. It answers with a JSON verdict
+   (score, plain-words summary, findings with concrete fixes).
 
-The one-click fix is AI-best-effort with a deterministic fallback (the
-Phase-E5 pattern): the configured LLM rewrites the script keeping its
-meaning, tone and {{variables}}; if the AI is down or mangles the
-variables, a pure-rules rewrite (word swaps + punctuation + caps
-normalization) produces a guaranteed-usable script. Either way the
-result lands back in the editor for the user to review — nothing is sent
-anywhere until they schedule it.
+2. The rules layer — the deterministic engine (trigger phrases, ALL
+   CAPS, '!!', link farms, shorteners, structure checks). It always
+   runs: its findings merge with the AI's, and it IS the whole result
+   when the AI is down (best-effort by design, the Phase-E5 pattern).
+
+The blended score weighs the AI 60 / rules 40 — the machine judgment
+matters more, but a mechanical slam-dunk (bit.ly + ALL CAPS subject)
+can never be talked down to "safe" by a lenient model.
+
+Results are cached per script (hash of the raw text) so the builder's
+debounced re-checks never burn AI calls on the same draft.
+
+The one-click fix is unchanged in spirit: AI rewrite best-effort with
+the deterministic rules rewrite as the guaranteed fallback.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 
 from app.campaigns.personalize import Ask, default_ask
@@ -118,9 +125,14 @@ _PHRASE_RES = [
 ]
 
 
-def _finding(rule: str, severity: str, message: str, count: int) -> dict:
+def _finding(rule: str, severity: str, message: str, count: int,
+             fix: str = "", category: str = "") -> dict:
     return {"rule": rule, "severity": severity, "message": message,
-            "count": count}
+            "count": count, "fix": fix, "category": category}
+
+
+def _words(s: str) -> list[str]:
+    return re.findall(r"[A-Za-z0-9''\-]+", s or "")
 
 
 def analyze_script(subject: str, body: str) -> dict:
@@ -198,6 +210,48 @@ def analyze_script(subject: str, body: str) -> dict:
             "body:dollars", "low",
             "Several '$' amounts — money-dense cold email is weighed as spam",
             txt.count("$")))
+
+    # -- Structure (the "reads like a blast" signals) -----------------------
+    raw_words = _words(body or "")
+    if len(raw_words) >= 10 and not re.match(
+            r"^\s*(?:hi|hello|hey|dear|greetings|assalam[ou]*\s*alaikum)\b",
+            body or "", re.IGNORECASE):
+        findings.append(_finding(
+            "body:no-greeting", "low",
+            "The email doesn't open with a greeting — nameless cold email "
+            "reads like a mass blast",
+            1, fix="Open with 'Hi {{first_name}},' or similar"))
+    if len(raw_words) >= 10 and "{{" not in (body or ""):
+        findings.append(_finding(
+            "body:no-personalization", "medium",
+            "No {{variables}} anywhere — the same text would go to every "
+            "lead, which is the definition of a blast",
+            1, fix="Reference {{first_name}} / {{company_name}} somewhere"))
+    if len(raw_words) >= 60 and not re.search(
+            r"unsubscribe|opt[\s-]?out|let me know if you'?d rather not",
+            body or "", re.IGNORECASE):
+        findings.append(_finding(
+            "body:no-opt-out", "low",
+            "No opt-out line — commercial email without one is a compliance "
+            "problem and a spam signal",
+            1, fix="End with a one-line 'reply STOP and I won't follow up'"))
+    for para in (body or "").split("\n\n"):
+        if len(_words(para)) > 120:
+            findings.append(_finding(
+                "body:wall-of-text", "low",
+                "A paragraph runs past ~120 words — a wall of text reads as "
+                "marketing, not a person",
+                1, fix="Break it into 2-3 short paragraphs"))
+            break
+    sentences = [s for s in re.split(r"[.!?]+", body or "") if s.strip()]
+    if sentences:
+        avg = sum(len(_words(s)) for s in sentences) / len(sentences)
+        if avg > 32:
+            findings.append(_finding(
+                "body:long-sentences", "low",
+                f"Sentences average {avg:.0f} words — long winding sentences "
+                "read as marketing copy",
+                1, fix="Short, plain sentences (under ~20 words)"))
 
     # -- Score: severity-weighted, counts capped so one word repeated 20
     #    times can't alone max the meter. -----------------------------------
@@ -394,3 +448,189 @@ def improve_endpoint(subject: str, body: str) -> dict:
     if _module_ask is None:
         _module_ask = default_ask()
     return improve_script(_module_ask, subject, body)
+
+
+# ---------------------------------------------------------------------------
+# The AI analysis layer (authentic judgment, rules as the safety net)
+# ---------------------------------------------------------------------------
+
+#: Per-script cache of the merged verdict — the builder re-checks on every
+#: debounce; the same draft must not burn a second AI call. Process-lifetime.
+_AI_CACHE: dict[str, dict] = {}
+_AI_CACHE_MAX = 300
+
+
+def _extract_json(reply: str) -> dict | None:
+    """The model's JSON verdict, or None (markdown fences, chatter, bad
+    shape — anything unusable)."""
+    if not reply:
+        return None
+    text = reply.strip()
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.DOTALL)
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        data = json.loads(text[start:end + 1])
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
+def build_analysis_prompt(subject: str, body: str,
+                          rules_findings: list[dict]) -> str:
+    """The deliverability-expert prompt. ``subject``/``body`` arrive
+    RENDERED (variables filled with the sample lead) so the model judges
+    the real email; the rules findings are listed so it does not waste
+    its findings repeating mechanical issues."""
+    lines = [
+        "You are an email deliverability expert. Judge this cold-outreach "
+        "email draft (from a construction estimating-services company to a "
+        "contractor): how likely are Gmail and Outlook to flag it as spam, "
+        "and what exactly in THIS text causes that?",
+        "",
+        f"Subject: {subject}",
+        "",
+        "Body:",
+        body,
+        "",
+        "A rules engine already found these mechanical issues — do NOT "
+        "repeat them, look past them:",
+    ]
+    lines += [f"- {f['message']}" for f in rules_findings] or ["- (none)"]
+    lines += [
+        "",
+        "Judge what word-matching rules cannot see: exaggerated or "
+        "unverifiable claims, a subject that promises something the body "
+        "doesn't deliver, salesy hype tone, generic blast wording that "
+        "could go to anyone, pushy calls to action, trust problems, "
+        "anything a spam filter or a busy recipient would flag.",
+        "",
+        "Score each category 0-100 for spam risk (0 = clean, 100 = certain "
+        "spam):",
+        "- content: hype words, exaggeration, too-good-to-be-true claims",
+        "- urgency: fake deadlines, pressure tactics, 'act now' energy",
+        "- tone: salesy/marketing voice vs a professional person writing",
+        "- structure: formatting, length, walls of text, greeting/signoff",
+        "- personalization: does it speak to THIS recipient or could it go "
+        "to anyone",
+        "- links: number, placement, and trustworthiness of URLs",
+        "",
+        "Reply with ONLY this JSON object, no markdown, no extra text:",
+        '{"score": <integer 0-100 overall spam risk>, '
+        '"summary": "<one short sentence in plain words>", '
+        '"categories": {"content": <0-100>, "urgency": <0-100>, '
+        '"tone": <0-100>, "structure": <0-100>, '
+        '"personalization": <0-100>, "links": <0-100>}, '
+        '"findings": [{"severity": "high|medium|low", '
+        '"message": "<the specific problem, quoting the risky words from '
+        'the text>", "fix": "<concrete rewrite advice>", '
+        '"category": "<one of the six categories>"}]}',
+        "",
+        "If the email is genuinely clean, use a low score, low categories, "
+        "and an empty findings list.",
+    ]
+    return "\n".join(lines)
+
+
+def _level(score: int) -> str:
+    return "high" if score >= 50 else ("medium" if score >= 25 else "low")
+
+
+#: The six AI judgment categories (UI shows them as mini-meters).
+CATEGORIES = ("content", "urgency", "tone", "structure",
+              "personalization", "links")
+
+
+def analyze_with_ai(ask: Ask, raw_subject: str, raw_body: str,
+                    rendered_subject: str, rendered_body: str) -> dict | None:
+    """The merged verdict: rules findings (on the RAW editor text — the
+    personalization/structure checks need the variables) + the AI's
+    judgment (on the RENDERED email), blended score (AI 60 / rules 40).
+    None when the AI is unusable — the caller falls back to the
+    rules-only report."""
+    rules = analyze_script(raw_subject, raw_body)
+    try:
+        reply = ask(build_analysis_prompt(
+            rendered_subject, rendered_body, rules["findings"]))
+    except Exception:  # noqa: BLE001 — best-effort by design
+        return None
+    data = _extract_json(reply)
+    if data is None:
+        return None
+
+    try:
+        ai_score = max(0, min(100, int(data.get("score", 0))))
+    except (TypeError, ValueError):
+        return None
+    summary = str(data.get("summary") or "").strip()[:300]
+
+    categories: dict[str, int] = {}
+    raw_cats = data.get("categories")
+    if isinstance(raw_cats, dict):
+        for name in CATEGORIES:
+            if name in raw_cats:
+                try:
+                    categories[name] = max(
+                        0, min(100, int(raw_cats[name])))
+                except (TypeError, ValueError):
+                    pass
+
+    ai_findings: list[dict] = []
+    raw = data.get("findings")
+    if isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            severity = str(item.get("severity") or "").lower().strip()
+            message = str(item.get("message") or "").strip()
+            if severity not in ("high", "medium", "low") or not message:
+                continue
+            category = str(item.get("category") or "").lower().strip()
+            ai_findings.append(_finding(
+                f"ai:{len(ai_findings) + 1}", severity, message[:400], 1,
+                fix=str(item.get("fix") or "").strip()[:400],
+                category=category if category in CATEGORIES else ""))
+    if not summary and not ai_findings and ai_score >= 25:
+        return None  # a risky score with nothing behind it — unusable
+
+    findings = rules["findings"] + ai_findings
+    score = round(0.6 * ai_score + 0.4 * rules["score"])
+    order = {"high": 0, "medium": 1, "low": 2}
+    findings.sort(key=lambda f: (order[f["severity"]], -f["count"]))
+    return {"score": score, "level": _level(score), "findings": findings,
+            "summary": summary, "method": "ai",
+            "categories": categories}
+
+
+def check_endpoint(subject: str, body: str) -> dict:
+    """The /spam-check path: cached merged verdict, rules-only when the AI
+    is unavailable. ``subject``/``body`` are the user's RAW editor text —
+    the rules run on it as-is (variables are field references), the AI
+    sees it rendered with the sample lead."""
+    from app.campaigns.templates import render, sample_context
+
+    key = hashlib.sha256(
+        (subject + "\x00" + body).encode("utf-8", "replace")).hexdigest()
+    hit = _AI_CACHE.get(key)
+    if hit is not None:
+        return hit
+
+    global _module_ask
+    if _module_ask is None:
+        _module_ask = default_ask()
+    verdict = analyze_with_ai(
+        _module_ask, subject, body,
+        render(subject, sample_context()),
+        render(body, sample_context()),
+    )
+    if verdict is None:
+        verdict = dict(analyze_script(subject, body),
+                       summary="", method="rules")
+
+    if len(_AI_CACHE) >= _AI_CACHE_MAX:
+        _AI_CACHE.pop(next(iter(_AI_CACHE)))  # FIFO eviction
+    _AI_CACHE[key] = verdict
+    return verdict

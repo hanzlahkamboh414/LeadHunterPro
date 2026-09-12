@@ -627,8 +627,25 @@ function SpamPanel({
       </div>
 
       {check.isLoading && (
-        <p className="mt-2 text-[11.5px] text-slate-500">Analyzing the script…</p>
+        <p className="mt-2 text-[11.5px] text-slate-500">
+          Analyzing the script… (AI reads it like a deliverability expert,
+          this can take a few seconds)
+        </p>
       )}
+
+      {check.isError && (
+        <p className="mt-2 text-[11.5px] text-rose-400">
+          Could not analyze — try again in a moment.
+        </p>
+      )}
+
+      {!check.isLoading && !check.data &&
+        (subject.trim() === "" || body.trim() === "") && (
+          <p className="mt-2 text-[11.5px] text-slate-500">
+            Type a subject and a script — the spam risk appears here as you
+            write.
+          </p>
+        )}
 
       {r && style && (
         <>
@@ -638,6 +655,40 @@ function SpamPanel({
               style={{ width: `${r.score}%` }}
             />
           </div>
+
+          {r.summary && (
+            <p className="mt-2.5 text-[12px] italic text-slate-400">
+              “{r.summary}”
+            </p>
+          )}
+
+          {Object.keys(r.categories || {}).length > 0 && (
+            <div className="mt-3 grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-2">
+              {Object.entries(r.categories).map(([name, val]) => {
+                const v = Math.max(0, Math.min(100, val));
+                const cls =
+                  v >= 50
+                    ? "bg-rose-500"
+                    : v >= 25
+                      ? "bg-amber-500"
+                      : "bg-emerald-500";
+                return (
+                  <div key={name}>
+                    <div className="flex items-center justify-between text-[11px] text-slate-500">
+                      <span className="capitalize">{name}</span>
+                      <span>{v}</span>
+                    </div>
+                    <div className="mt-1 h-1 rounded-full bg-white/5 overflow-hidden">
+                      <div
+                        className={`h-full rounded-full ${cls} transition-all`}
+                        style={{ width: `${v}%` }}
+                      />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
 
           {r.findings.length === 0 ? (
             <p className="mt-2.5 text-[12px] text-emerald-300">
@@ -651,16 +702,28 @@ function SpamPanel({
               </p>
               <ul className="mt-1.5 space-y-1.5">
                 {r.findings.map((f: SpamFinding) => (
-                  <li key={f.rule} className="flex items-start gap-2 text-[12px] text-slate-300">
-                    <span
-                      className={`mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full ${SPAM_SEVERITY_DOT[f.severity] || SPAM_SEVERITY_DOT.low}`}
-                    />
-                    <span>
-                      {f.message}
-                      {f.count > 1 && (
-                        <span className="text-slate-500"> ({f.count}x)</span>
-                      )}
-                    </span>
+                  <li key={f.rule} className="text-[12px] text-slate-300">
+                    <div className="flex items-start gap-2">
+                      <span
+                        className={`mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full ${SPAM_SEVERITY_DOT[f.severity] || SPAM_SEVERITY_DOT.low}`}
+                      />
+                      <span>
+                        {f.message}
+                        {f.count > 1 && (
+                          <span className="text-slate-500"> ({f.count}x)</span>
+                        )}
+                        {f.category && (
+                          <span className="ml-1.5 rounded bg-white/[0.06] px-1.5 py-0.5 text-[10px] text-slate-500 capitalize">
+                            {f.category}
+                          </span>
+                        )}
+                      </span>
+                    </div>
+                    {f.fix && (
+                      <p className="ml-3.5 mt-0.5 pl-1 text-[11.5px] text-slate-500">
+                        Fix: {f.fix}
+                      </p>
+                    )}
                   </li>
                 ))}
               </ul>
@@ -686,8 +749,11 @@ function SpamPanel({
           )}
 
           <p className="mt-2 text-[11px] text-slate-600">
-            Estimated by our own content rules, not Gmail's real filter — a
-            guide, not a guarantee.
+            {r.method === "ai"
+              ? "AI deliverability analysis + our content rules."
+              : "Rules-only analysis (AI unavailable right now)."}{" "}
+            Estimated by us, not Gmail's real filter — a guide, not a
+            guarantee.
           </p>
         </>
       )}

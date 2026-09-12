@@ -125,14 +125,25 @@ class SpamFinding(BaseModel):
     severity: str  # high | medium | low
     message: str
     count: int
+    """Concrete rewrite advice (AI findings carry this)."""
+    fix: str = ""
+    """Which judgment category this belongs to (AI findings)."""
+    category: str = ""
 
 
 class SpamCheckOut(BaseModel):
-    """The spam-risk report: an estimated 0-100 score (our own rules, not
-    Gmail's real filter — a guide, not a guarantee)."""
+    """The spam-risk report: a blended AI + rules score (or rules-only
+    when the AI is unavailable), the findings behind it, a one-line
+    plain-words summary, and the AI's per-category risk breakdown
+    (content / urgency / tone / structure / personalization / links).
+    Estimated by us, not Gmail's real filter — a guide, not a
+    guarantee."""
     score: int
     level: str  # low | medium | high
     findings: list[SpamFinding] = []
+    summary: str = ""
+    method: str = "rules"  # ai | rules
+    categories: dict[str, int] = {}
 
 
 class SpamImproveIn(BaseModel):

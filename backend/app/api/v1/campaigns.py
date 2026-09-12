@@ -184,10 +184,12 @@ def campaign_test_send(
 @router.post("/spam-check", response_model=SpamCheckOut)
 def spam_check(body: SpamCheckIn,
                user: User = Depends(get_current_user)) -> dict:
-    """How spammy does this pitch look? An estimated 0-100 risk score plus
-    the findings behind it, in plain words — our own content rules, not
-    Gmail's real filter (a guide, not a guarantee). Creates nothing."""
-    return spamcheck.analyze_script(body.subject, body.body)
+    """How spammy does this pitch look? The AI reads the rendered email as
+    a deliverability expert (score, plain-words summary, findings with
+    fixes) and the rules engine always runs underneath — a blended
+    verdict, rules-only when the AI is down. Cached per script; creates
+    nothing."""
+    return spamcheck.check_endpoint(body.subject, body.body)
 
 
 @router.post("/spam-improve", response_model=SpamImproveOut)

@@ -306,13 +306,22 @@ export interface SpamFinding {
   severity: string; // high | medium | low
   message: string;
   count: number;
+  /** Concrete rewrite advice (AI findings carry this). */
+  fix: string;
+  /** Which judgment category this belongs to (AI findings). */
+  category: string;
 }
 
-/** POST /campaigns/spam-check result — estimated spam risk of a pitch. */
+/** POST /campaigns/spam-check result — blended AI + rules spam risk. */
 export interface SpamCheckResult {
   score: number; // 0-100
   level: string; // low | medium | high
   findings: SpamFinding[];
+  /** One short plain-words sentence from the AI (empty when rules-only). */
+  summary: string;
+  method: string; // ai | rules
+  /** AI's per-category risk breakdown (0-100 each; empty when rules-only). */
+  categories: Record<string, number>;
 }
 
 /** POST /campaigns/spam-improve result — the one-click fixed pitch. */

@@ -1,12 +1,17 @@
-"""Cross-user lead sharing (Phase 2 demand fix) — store-level tests.
+"""Cross-user lead sharing (Phase 2) + lead exclusivity (2026-09-12).
 
-10 simultaneous users will run overlapping searches (Monday load test).
-The credit-side sharing already existed (store.get is email-keyed, so a
-cache hit never re-researches); this phase adds the VISIBILITY side: a
-user whose own search surfaced an already-researched lead must still see
-it on their dashboard. The dossiers.user_id column keeps the FIRST
-researcher; the dossier_owners junction records every user whose search
-surfured the lead.
+Two layers, deliberately kept side by side:
+
+* STORE-level sharing mechanics — dossier_owners junction rows make a lead
+  visible to a user's dashboard. These still exist because the ADMIN assign
+  path (push folder to user X) and the LEGACY shared leads (researched while
+  sharing was the rule) must keep working.
+
+* PIPELINE-level exclusivity (new) — "ak lead ya email sirf ak user ko show
+  honi chahye": a NEW lead owned by another user is SKIPPED at every intake
+  gate of this run (pending-cache serve, fresh discovery, research time, and
+  the live race guard). The pipeline never stamps a new owner on another
+  user's lead; only the admin (assign) or a legacy junction row shares.
 """
 
 from __future__ import annotations
@@ -121,23 +126,79 @@ def test_hidden_still_applies_to_shared_leads(tmp_path):
     assert store.query_leads(user_id="alice", recommendation="*")[1] == 0
 
 
-def test_pipeline_cache_hit_stamps_owner(tmp_path, monkeypatch):
-    """run_research cache-hit path: a lead researched under user A, then
-    surfaced by user B's run, gets B stamped as owner — B reuses the
-    research (no agent call) AND sees the lead."""
+def test_pipeline_skips_another_users_lead(tmp_path, monkeypatch):
+    """run_research exclusivity: a lead owned by alice is NOT bob's lead —
+    bob's run skips it entirely (no re-research, no owner stamp, nothing on
+    bob's dashboard). The old behavior stamped bob as owner on the cache hit."""
     from app.leads.pipeline import run_research
 
     store = LeadResearchStore(str(tmp_path / "t.db"))
     store.save(_mk("a@x.com"), user_id="alice")
 
     class _BoomAgent:
-        """Any research attempt is a failure — the cache hit must be the
-        ONLY path (proves no re-research)."""
+        """Any research attempt is a failure — exclusivity must SKIP, not
+        re-research."""
         def __init__(self, *a, **k):
             pass
 
         def research(self, *a, **k):
-            raise AssertionError("cache hit must not re-research")
+            raise AssertionError("another user's lead must be skipped, not re-researched")
+
+    monkeypatch.setattr("app.lead_research.agent.AILeadResearchAgent", _BoomAgent)
+    results = run_research(
+        [{"email": "a@x.com", "domain": "x.com"}],
+        store=store, trade="gc", location="Dallas TX", user_id="bob",
+    )
+    # Skipped: no result entry, no owner stamp, bob's dashboard stays clean.
+    assert results == []
+    assert store.list_all(user_id="bob") == []
+    # Alice's ownership is untouched.
+    assert [d.email for d in store.list_all(user_id="alice")] == ["a@x.com"]
+
+
+def test_pipeline_race_guard_caches_stale_snapshot(tmp_path, monkeypatch):
+    """The live race guard: bob's run started BEFORE alice saved (so the
+    taken-pool snapshot is stale/empty) — the cache-hit moment re-checks
+    ownership and still skips the email."""
+    from app.leads.pipeline import run_research
+
+    store = LeadResearchStore(str(tmp_path / "t.db"))
+    store.save(_mk("a@x.com"), user_id="alice")
+    # Simulate the stale snapshot: the pool was computed before alice saved.
+    monkeypatch.setattr(store, "taken_by_others", lambda user_id: set())
+
+    class _BoomAgent:
+        def __init__(self, *a, **k):
+            pass
+
+        def research(self, *a, **k):
+            raise AssertionError("race guard must skip, not re-research")
+
+    monkeypatch.setattr("app.lead_research.agent.AILeadResearchAgent", _BoomAgent)
+    results = run_research(
+        [{"email": "a@x.com", "domain": "x.com"}],
+        store=store, trade="gc", location="Dallas TX", user_id="bob",
+    )
+    assert results == []
+    assert store.list_all(user_id="bob") == []
+
+
+def test_pipeline_legacy_shared_lead_still_cache_hits(tmp_path, monkeypatch):
+    """Legacy shared leads keep working: bob already owns a junction row
+    (shared while sharing was the rule / admin-assigned) — bob's run reuses
+    the research (cache hit, no re-research) and still sees the lead."""
+    from app.leads.pipeline import run_research
+
+    store = LeadResearchStore(str(tmp_path / "t.db"))
+    store.save(_mk("a@x.com"), user_id="alice")
+    store.add_owner("a@x.com", "bob")  # the legacy sharing row
+
+    class _BoomAgent:
+        def __init__(self, *a, **k):
+            pass
+
+        def research(self, *a, **k):
+            raise AssertionError("an owned lead must be a cache hit, not re-researched")
 
     monkeypatch.setattr("app.lead_research.agent.AILeadResearchAgent", _BoomAgent)
     results = run_research(
@@ -146,3 +207,113 @@ def test_pipeline_cache_hit_stamps_owner(tmp_path, monkeypatch):
     )
     assert results and results[0].get("cached") is True
     assert [d.email for d in store.list_all(user_id="bob")] == ["a@x.com"]
+
+
+def test_pipeline_suppresses_user_deleted_lead(tmp_path, monkeypatch):
+    """Delete-suppression at research time: a lead deleted (any reason) is
+    never re-entered by ANY user's run — bob gets nothing, no research."""
+    from app.leads.pipeline import run_research
+
+    store = LeadResearchStore(str(tmp_path / "t.db"))
+    store.save(_mk("a@x.com"), user_id="bob")
+    store.delete("a@x.com", reason="bad_data", user_id="bob", username="bob")
+
+    class _BoomAgent:
+        def __init__(self, *a, **k):
+            pass
+
+        def research(self, *a, **k):
+            raise AssertionError("a user-deleted lead must never be re-researched")
+
+    monkeypatch.setattr("app.lead_research.agent.AILeadResearchAgent", _BoomAgent)
+    results = run_research(
+        [{"email": "a@x.com", "domain": "x.com"}],
+        store=store, trade="gc", location="Dallas TX", user_id="bob",
+    )
+    assert results == []
+    assert store.list_all(user_id="bob") == []
+
+
+# ---------------------------------------------------------------------------
+# discover_until_target intake gates — the cache-serve and fresh lanes
+# ---------------------------------------------------------------------------
+
+def _record(name: str, email: str, domain: str) -> dict:
+    return {
+        "company_name": name,
+        "source_url": f"https://{domain}",
+        "plan_holder": {"domain": domain,
+                        "emails": [{"email": email}],
+                        "person": {"name": ""}},
+    }
+
+
+def test_discovery_never_serves_deleted_or_taken_from_cache(
+        tmp_path, monkeypatch):
+    """Pending-cache serve: a deleted email and another user's email are
+    dropped (purged) from the served window — only genuinely-fresh rows
+    reach the run."""
+    from app.discovery.sources.status import SourceStatus
+    from app.lead_research.service import PendingLeadsStore
+    from app.leads.pipeline import ResearchQuery, discover_until_target
+
+    db = str(tmp_path / "leads.db")
+    pending = PendingLeadsStore(db_path=db)
+    store = LeadResearchStore(db_path=db)
+    # deleted@x.com: a real dossier the user then deleted.
+    store.save(_mk("deleted@x.com"), user_id="bob")
+    store.delete("deleted@x.com", reason="duplicate", user_id="bob")
+    # theirs@y.com: alice's lead (exclusivity blocks it for bob).
+    store.save(_mk("theirs@y.com"), user_id="alice")
+    pending.add([
+        {"email": "deleted@x.com", "domain": "x.com", "location": "Texas"},
+        {"email": "theirs@y.com", "domain": "y.com", "location": "Texas"},
+        {"email": "fresh@z.com", "domain": "z.com", "location": "Texas"},
+    ])
+
+    def _should_not_run(trade, location, limit, skip_pdfs=None,
+                        yield_store=None, candidate_store=None):
+        raise AssertionError("cache has a servable lead — no live discovery needed")
+
+    monkeypatch.setattr("app.leads.pipeline.run_discovery", _should_not_run)
+    query = ResearchQuery(trade="gc", location="Texas", target_emails=1)
+    leads, _ = discover_until_target(
+        query, pending_store=pending, dossier_store=store, max_passes=1,
+        user_id="bob",
+    )
+    assert [l["email"] for l in leads] == ["fresh@z.com"]
+    # The suppressed rows were PURGED — they stop shadowing future windows.
+    assert pending.count() == 1
+
+
+def test_discovery_fresh_gate_drops_deleted_and_taken(
+        tmp_path, monkeypatch):
+    """Fresh-discovery lane: live sources re-surface a deleted email and
+    another user's email — both are dropped before they are ever buffered."""
+    from app.discovery.sources.status import SourceStatus
+    from app.lead_research.service import PendingLeadsStore
+    from app.leads.pipeline import ResearchQuery, discover_until_target
+
+    db = str(tmp_path / "leads.db")
+    pending = PendingLeadsStore(db_path=db)
+    store = LeadResearchStore(db_path=db)
+    store.save(_mk("deleted@x.com"), user_id="bob")
+    store.delete("deleted@x.com", reason="low_quality", user_id="bob")
+    store.save(_mk("theirs@y.com"), user_id="alice")
+
+    def _discover(trade, location, limit, skip_pdfs=None,
+                  yield_store=None, candidate_store=None):
+        records = [
+            _record("D", "deleted@x.com", "x.com"),
+            _record("T", "theirs@y.com", "y.com"),
+            _record("F", "fresh@z.com", "z.com"),
+        ]
+        return SourceStatus.SUCCESS, records, {"pdf_urls": []}
+
+    monkeypatch.setattr("app.leads.pipeline.run_discovery", _discover)
+    query = ResearchQuery(trade="gc", location="Texas", target_emails=5)
+    leads, _ = discover_until_target(
+        query, pending_store=pending, dossier_store=store, max_passes=1,
+        user_id="bob",
+    )
+    assert {l["email"] for l in leads} == {"fresh@z.com"}

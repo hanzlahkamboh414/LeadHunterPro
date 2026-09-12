@@ -229,6 +229,16 @@ class LeadResearchStore:
                 reason TEXT NOT NULL DEFAULT 'manual'
             )
         """)
+        # Delete-feedback loop (2026-09-12): WHO deleted (user_id/username —
+        # the admin feed names the rejector), the full dossier snapshot
+        # (dossier_json — powers admin Restore), and the admin's answer
+        # (admin_decision: '' pending / 'confirmed' purge-corroborated /
+        # 'restored' back with the user). Legacy rows default to anonymous
+        # pending — the historical log stays honest without inventing users.
+        _add_column(conn, "deleted_leads", "user_id", "TEXT NOT NULL DEFAULT ''")
+        _add_column(conn, "deleted_leads", "username", "TEXT NOT NULL DEFAULT ''")
+        _add_column(conn, "deleted_leads", "dossier_json", "TEXT NOT NULL DEFAULT ''")
+        _add_column(conn, "deleted_leads", "admin_decision", "TEXT NOT NULL DEFAULT ''")
         # Cross-user lead sharing (Phase 2 demand fix). The dossiers.user_id
         # column keeps the FIRST owner (the run that researched the lead);
         # this junction records EVERY user whose own search surfaced the
@@ -419,13 +429,16 @@ class LeadResearchStore:
         return n
 
     def delete(self, email: str, *, reason: str = "manual", user_id: str = "",
-               is_admin: bool = False) -> bool:
+               username: str = "", is_admin: bool = False) -> bool:
         """Delete one dossier by email; return True if it existed.
 
         ``reason`` records WHY into the ``deleted_leads`` audit trail the admin
         screen reads ("kon kon c email delete ki") — the user-facing delete
         dialog sends a structured slug (``not_our_client`` / ``bad_data`` /
         ``duplicate`` / ``already_contacted`` / ``low_quality`` / ``other``).
+        ``user_id``/``username`` name WHO deleted (the admin feed shows
+        "fulane user ne ye lead fulani reason se delete ki"), and the full
+        dossier JSON is STASHED so the admin can Restore the lead later.
         Same transaction, so the log can never show a deletion the dossier
         survived (or vice versa).
 
@@ -446,11 +459,21 @@ class LeadResearchStore:
         ).fetchone()
         cur = conn.execute("DELETE FROM dossiers WHERE email_hash = ?", (eh,))
         if cur.rowcount > 0:
+            # Purge the sharing junction too — a deleted lead has no owners.
             conn.execute(
-                "INSERT INTO deleted_leads (email, deleted_at, reason) "
-                "VALUES (?, CURRENT_TIMESTAMP, ?) "
-                "ON CONFLICT(email) DO UPDATE SET deleted_at = CURRENT_TIMESTAMP, reason = excluded.reason",
-                (email, reason or "manual"),
+                f"DELETE FROM dossier_owners WHERE email_hash = ?", (eh,)
+            )
+            conn.execute(
+                "INSERT INTO deleted_leads "
+                "(email, deleted_at, reason, user_id, username, dossier_json, "
+                " admin_decision) "
+                "VALUES (?, CURRENT_TIMESTAMP, ?, ?, ?, ?, '') "
+                "ON CONFLICT(email) DO UPDATE SET "
+                "deleted_at = CURRENT_TIMESTAMP, reason = excluded.reason, "
+                "user_id = excluded.user_id, username = excluded.username, "
+                "dossier_json = excluded.dossier_json, admin_decision = ''",
+                (email, reason or "manual", user_id, username,
+                 row[0] if row is not None else ""),
             )
             conn.commit()
             if row is not None and _is_rejection_reason(reason):
@@ -492,18 +515,184 @@ class LeadResearchStore:
             learning.reject_domain(domain, user_id=user_id,
                                    corroborated=corroborated)
 
-    def deleted_log(self, limit: int = 100) -> list[dict[str, str]]:
-        """The admin audit trail: emails deleted, when, and why (newest first)."""
+    def deleted_log(self, limit: int = 100) -> dict[str, object]:
+        """The admin audit feed: who deleted which email, when, why, and the
+        admin's answer so far (pending / confirmed / restored). Newest first."""
         conn = self._conn()
         rows = conn.execute(
-            "SELECT email, deleted_at, reason FROM deleted_leads "
-            "ORDER BY deleted_at DESC LIMIT ?",
+            "SELECT email, deleted_at, reason, user_id, username, admin_decision "
+            "FROM deleted_leads ORDER BY deleted_at DESC LIMIT ?",
             (int(limit),),
         ).fetchall()
+        total = conn.execute("SELECT COUNT(*) FROM deleted_leads").fetchone()[0]
         conn.close()
-        return [
-            {"email": r[0], "deleted_at": r[1], "reason": r[2]} for r in rows
-        ]
+        return {
+            "total": total,
+            "deleted": [
+                {
+                    "email": r[0], "deleted_at": r[1], "reason": r[2],
+                    "user_id": r[3], "username": r[4] or r[3] or "unknown",
+                    "admin_decision": r[5],
+                }
+                for r in rows
+            ],
+        }
+
+    def deleted_emails(self) -> set[str]:
+        """The delete-suppression pool: every email deleted and NOT restored.
+
+        Requirement: "jo b data ay wo cache ma store hota rahe taay feature ma
+        wo data dobara na dikhy" — a deleted lead (any reason) must never
+        resurface to ANY user. Intake gates drop these emails before they are
+        served or researched; an admin Restore is the only way out.
+        """
+        conn = self._conn()
+        rows = conn.execute(
+            "SELECT email FROM deleted_leads WHERE admin_decision <> 'restored'"
+        ).fetchall()
+        conn.close()
+        return {r[0] for r in rows}
+
+    def taken_by_others(self, user_id: str) -> set[str]:
+        """Lead exclusivity (2026-09-12): emails already owned by ANOTHER user.
+
+        "ak lead ya email sirf ak user ko show honi chahye" — an email is
+        blocked for ``user_id`` when it has at least one owner (the dossiers
+        user_id column or a dossier_owners row) and ``user_id`` is NOT among
+        them. Legacy un-owned rows (user_id='') never block anyone. Runs once
+        per job and the set is checked in-memory at the intake gates.
+        """
+        if not user_id:
+            return set()
+        conn = self._conn()
+        rows = conn.execute(
+            """
+            SELECT d.email FROM dossiers d
+            WHERE d.email <> ''
+              AND (
+                    (d.user_id <> '' AND d.user_id <> ?)
+                    OR EXISTS (SELECT 1 FROM dossier_owners o
+                               WHERE o.email_hash = d.email_hash AND o.user_id <> ?)
+              )
+              AND NOT EXISTS (SELECT 1 FROM dossier_owners m
+                              WHERE m.email_hash = d.email_hash AND m.user_id = ?)
+            """,
+            (user_id, user_id, user_id),
+        ).fetchall()
+        conn.close()
+        return {r[0] for r in rows}
+
+    def owned_by_another(self, email: str, user_id: str) -> bool:
+        """Live per-email exclusivity check (the research-time race guard).
+
+        ``taken_by_others`` is a snapshot computed at run start; two users'
+        runs racing the same email can BOTH pass the intake gates before
+        either saves. This check re-reads ownership at the cache-hit moment:
+        True when the email has an owner and ``user_id`` is not among them.
+        """
+        if not user_id:
+            return False
+        eh = _email_hash(email)
+        conn = self._conn()
+        row = conn.execute(
+            """
+            SELECT d.user_id,
+                   EXISTS (SELECT 1 FROM dossier_owners m
+                           WHERE m.email_hash = d.email_hash AND m.user_id = ?),
+                   EXISTS (SELECT 1 FROM dossier_owners o
+                           WHERE o.email_hash = d.email_hash AND o.user_id <> ?)
+            FROM dossiers d WHERE d.email_hash = ?
+            """,
+            (user_id, user_id, eh),
+        ).fetchone()
+        conn.close()
+        if row is None:
+            return False
+        first_owner, mine, other_owner = row
+        if mine:
+            return False  # the caller is an owner — their lead
+        if first_owner:
+            return first_owner != user_id
+        return bool(other_owner)
+
+    def confirm_deleted(self, email: str) -> dict[str, str] | None:
+        """The admin's CONFIRM answer on a user delete (the delete-feed loop).
+
+        Marks the row ``confirmed`` and — when the delete carried a rejection
+        verdict — re-feeds it as an ADMIN rejection, which is corroborated and
+        therefore decisive (the operator backed the user's "not our client").
+        Returns the updated row summary, or None when the email was never
+        deleted.
+        """
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT reason, dossier_json FROM deleted_leads WHERE email = ?",
+            (email,),
+        ).fetchone()
+        if row is None:
+            conn.close()
+            return None
+        conn.execute(
+            "UPDATE deleted_leads SET admin_decision = 'confirmed' WHERE email = ?",
+            (email,),
+        )
+        conn.commit()
+        conn.close()
+
+        reason, payload = row
+        if _is_rejection_reason(reason) and payload:
+            self._feed_user_rejection(
+                LeadDossier.from_dict(json.loads(payload)),
+                user_id="admin", is_admin=True,
+            )
+        return {"email": email, "admin_decision": "confirmed"}
+
+    def restore_deleted(self, email: str) -> dict[str, str] | None:
+        """The admin's RESTORE answer: bring a wrongly-deleted lead back.
+
+        Re-saves the stashed dossier (assigned back to the user who deleted
+        it), marks the row ``restored`` (which lifts the suppression — the
+        email may resurface again), and CLEARS the identity-learning rows the
+        delete had fed: the admin's word that the verdict was wrong reopens
+        the company/domain for everyone. Returns the restored summary, or
+        None when there is nothing to restore (never deleted / no snapshot).
+        """
+        from app.lead_research.fit_learning import FitLearningStore
+
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT reason, dossier_json, user_id FROM deleted_leads "
+            "WHERE email = ?",
+            (email,),
+        ).fetchone()
+        if row is None:
+            conn.close()
+            return None
+        reason, payload, owner_id = row
+        conn.execute(
+            "UPDATE deleted_leads SET admin_decision = 'restored' WHERE email = ?",
+            (email,),
+        )
+        conn.commit()
+        conn.close()
+        if not payload:
+            # Pre-snapshot delete (no dossier stash): restore only lifts the
+            # suppression — the lead can be re-discovered fresh.
+            return {"email": email, "admin_decision": "restored", "restored_dossier": "no"}
+
+        dossier = LeadDossier.from_dict(json.loads(payload))
+        self.save(dossier, user_id=owner_id)
+        # The delete fed a rejection verdict the admin now says was wrong —
+        # clear the identity rows so the company/domain reopens for everyone.
+        if _is_rejection_reason(reason):
+            learning = FitLearningStore(self._db_path)
+            company = dossier.refined_company or dossier.company.name
+            if company:
+                learning.clear_rejection_company(company)
+            domain = dossier.refined_domain or dossier.domain
+            if domain:
+                learning.clear_rejection_domain(domain)
+        return {"email": email, "admin_decision": "restored", "restored_dossier": "yes"}
 
     # ------------------------------------------------------------------
     # User organization metadata (folders + tags) — Phase B.

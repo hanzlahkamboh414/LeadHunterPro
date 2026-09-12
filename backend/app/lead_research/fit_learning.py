@@ -352,6 +352,29 @@ class FitLearningStore:
             finally:
                 conn.close()
 
+    def clear_rejection(self, kind: str, key: str) -> bool:
+        """Remove a user-verdict row entirely — the admin Restore path.
+
+        When the admin says a "not our client" delete was WRONG, the verdict
+        it taught must not survive: the identity reopens for everyone. Only
+        the user-verdict namespaces (company/domain) are clearable — research
+        namespaces (industry/source) carry their own evidence and are never
+        touched by an identity restore. Returns True when a row was removed.
+        """
+        if kind not in (KIND_COMPANY, KIND_DOMAIN) or not key:
+            return False
+        with _write_lock:
+            conn = self._conn()
+            try:
+                cur = conn.execute(
+                    "DELETE FROM fit_learning WHERE kind = ? AND key = ?",
+                    (kind, key),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        return cur.rowcount > 0
+
     def reset(self) -> None:
         """Test helper — clear all learning rows."""
         with _write_lock:
@@ -391,3 +414,9 @@ class FitLearningStore:
 
     def should_skip_domain(self, domain: str) -> bool:
         return self.should_skip(KIND_DOMAIN, mail_domain(domain))
+
+    def clear_rejection_company(self, company_name: str) -> bool:
+        return self.clear_rejection(KIND_COMPANY, normalize_company(company_name))
+
+    def clear_rejection_domain(self, domain: str) -> bool:
+        return self.clear_rejection(KIND_DOMAIN, mail_domain(domain))

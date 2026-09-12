@@ -31,6 +31,7 @@ from app.schemas.admin import (
     AdminAssignIn,
     AdminCachePendingOut,
     AdminDashboardOut,
+    AdminDecisionOut,
     AdminDeletedOut,
     AdminKeysOut,
     AdminLeadActionOut,
@@ -118,8 +119,45 @@ def keys() -> AdminKeysOut:
 
 @router.get("/deleted", response_model=AdminDeletedOut)
 def deleted(limit: int = 100) -> AdminDeletedOut:
-    """Emails the user deleted, when, and why (manual vs Junk sweep)."""
+    """The user delete-feed: who deleted which email, when, why, and the
+    admin's answer so far (pending / confirmed / restored)."""
     return AdminDeletedOut(**_reader.deleted_log(limit=limit))
+
+
+@router.post("/deleted/{email}/confirm", response_model=AdminDecisionOut)
+def deleted_confirm(email: str) -> AdminDecisionOut:
+    """The admin's CONFIRM answer on a user delete.
+
+    When the user said "not our client", the admin's confirm backs the verdict
+    — the company+domain rejection becomes corroborated (an admin verdict is
+    decisive: the identity is purged for everyone). The decision is recorded
+    on the delete-feed row so the answer is visible.
+    """
+    result = _store.confirm_deleted(email)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"no deleted lead for {email}")
+    _log("delete-confirm", "email", email, 1)
+    return AdminDecisionOut(**result)
+
+
+@router.post("/deleted/{email}/restore", response_model=AdminDecisionOut)
+def deleted_restore(email: str) -> AdminDecisionOut:
+    """The admin's RESTORE answer: bring a wrongly-deleted lead back.
+
+    Re-saves the stashed dossier (assigned back to the user who deleted it),
+    lifts the delete-suppression (the email may resurface in future runs),
+    and CLEARS the identity learning the delete had fed — the admin's word
+    that the verdict was wrong reopens the company/domain for everyone.
+    """
+    result = _store.restore_deleted(email)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"no deleted lead for {email}")
+    if result.get("restored_dossier") == "yes":
+        from app.lead_research.service import PendingLeadsStore
+
+        PendingLeadsStore(db_path=_store._db_path).remove([email])
+    _log("delete-restore", "email", email, 1)
+    return AdminDecisionOut(**result)
 
 
 @router.get("/cache/pending", response_model=AdminCachePendingOut)

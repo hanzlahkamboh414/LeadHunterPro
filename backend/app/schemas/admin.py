@@ -62,11 +62,24 @@ class AdminDeletedRow(BaseModel):
     email: str
     deleted_at: str
     reason: str
+    user_id: str = ""
+    username: str = ""
+    # The admin's answer so far: '' pending / 'confirmed' / 'restored'.
+    admin_decision: str = ""
 
 
 class AdminDeletedOut(BaseModel):
     total: int
     deleted: list[AdminDeletedRow] = Field(default_factory=list)
+
+
+class AdminDecisionOut(BaseModel):
+    """The admin's confirm/restore answer on one deleted lead."""
+    email: str
+    admin_decision: str
+    # 'yes' when a stashed dossier was re-saved (restore), 'no' when only the
+    # suppression was lifted (pre-snapshot delete), '' for confirm.
+    restored_dossier: str = ""
 
 
 class AdminPendingRow(BaseModel):

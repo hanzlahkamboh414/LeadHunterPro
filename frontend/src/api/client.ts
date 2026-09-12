@@ -9,6 +9,7 @@ import type {
   AdminCachePending,
   AdminDashboard,
   AdminDeleted,
+  AdminDecision,
   AdminKeys,
   AdminLeadAction,
   AdminLeadScope,
@@ -210,6 +211,22 @@ export const api = {
   /** Admin — which emails were deleted + when + why. */
   adminDeleted(limit = 200): Promise<AdminDeleted> {
     return request<AdminDeleted>(`/admin/deleted?limit=${limit}`);
+  },
+
+  /** Admin — CONFIRM a user delete (backs the "not our client" verdict). */
+  adminConfirmDelete(email: string): Promise<AdminDecision> {
+    return request<AdminDecision>(
+      `/admin/deleted/${encodeURIComponent(email)}/confirm`,
+      { method: "POST" },
+    );
+  },
+
+  /** Admin — RESTORE a wrongly-deleted lead (dossier back + learning cleared). */
+  adminRestoreDelete(email: string): Promise<AdminDecision> {
+    return request<AdminDecision>(
+      `/admin/deleted/${encodeURIComponent(email)}/restore`,
+      { method: "POST" },
+    );
   },
 
   /** Admin — the discovery cache (pending_leads) viewer. */

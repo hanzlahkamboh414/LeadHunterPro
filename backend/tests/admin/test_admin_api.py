@@ -42,7 +42,11 @@ def _make_db(path: str) -> None:
         CREATE TABLE deleted_leads (
             email TEXT PRIMARY KEY,
             deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            reason TEXT NOT NULL DEFAULT 'manual'
+            reason TEXT NOT NULL DEFAULT 'manual',
+            user_id TEXT NOT NULL DEFAULT '',
+            username TEXT NOT NULL DEFAULT '',
+            dossier_json TEXT NOT NULL DEFAULT '',
+            admin_decision TEXT NOT NULL DEFAULT ''
         );
         CREATE TABLE jobs (
             id TEXT PRIMARY KEY,
@@ -232,6 +236,106 @@ def test_admin_deleted_endpoint_returns_log(tmp_path, monkeypatch):
     assert "total" in data
     assert "deleted" in data
     assert isinstance(data["deleted"], list)
+
+
+# ---------------------------------------------------------------------------
+# The delete-feed answers: admin Confirm / Restore on a user delete.
+# ---------------------------------------------------------------------------
+
+def _feed_store(tmp_path, monkeypatch):
+    """A REAL LeadResearchStore (full migrated schema) patched into the admin
+    router — the confirm/restore endpoints act through ``_store``."""
+    from app.lead_research.service import LeadResearchStore
+
+    store = LeadResearchStore(db_path=str(tmp_path / "lead_research.db"))
+    monkeypatch.setattr(admin_module, "_store", store)
+    monkeypatch.setattr(leads_module, "_store", store)
+    monkeypatch.setattr(
+        admin_module, "_reader",
+        AdminReadRepository(str(tmp_path / "lead_research.db")),
+    )
+    monkeypatch.setattr(
+        leads_module, "_manager", JobManager(db_path=str(tmp_path / "jobs.db"))
+    )
+    return store
+
+
+def _feed_dossier(email: str) -> LeadDossier:
+    return LeadDossier(
+        email=email,
+        domain=email.split("@", 1)[1],
+        company=CompanyProfile(
+            name="Feed Co", industry="general contractor", location="Texas"
+        ),
+        person=PersonFindings(name="Owner", role="Owner", bound=True,
+                              role_relevance=True),
+        recommendation="contact_now",
+        potential_score=8.0,
+    )
+
+
+def test_admin_confirm_delete_backs_rejection(tmp_path, monkeypatch):
+    """POST /admin/deleted/{email}/confirm marks the row AND corroborates the
+    user's 'not our client' verdict (decisive identity purge)."""
+    from app.lead_research.fit_learning import FitLearningStore
+
+    store = _feed_store(tmp_path, monkeypatch)
+    store.save(_feed_dossier("gone@feed.test"), user_id="u1")
+    store.delete("gone@feed.test", reason="not_our_client",
+                 user_id="u1", username="shakir")
+
+    response = _admin_client(tmp_path, monkeypatch).post(
+        "/api/v1/admin/deleted/gone@feed.test/confirm")
+    assert response.status_code == 200
+    assert response.json() == {"email": "gone@feed.test",
+                               "admin_decision": "confirmed",
+                               "restored_dossier": ""}
+
+    # The feed row now carries the admin's answer.
+    feed = _admin_client(tmp_path, monkeypatch).get(
+        "/api/v1/admin/deleted").json()
+    assert feed["deleted"][0]["admin_decision"] == "confirmed"
+    assert feed["deleted"][0]["username"] == "shakir"
+
+    # The backed verdict is decisive for everyone.
+    learning = FitLearningStore(str(tmp_path / "lead_research.db"))
+    assert learning.should_skip_domain("feed.test") is True
+
+
+def test_admin_confirm_delete_unknown_email_404(tmp_path, monkeypatch):
+    _feed_store(tmp_path, monkeypatch)
+    response = _admin_client(tmp_path, monkeypatch).post(
+        "/api/v1/admin/deleted/nobody@x.test/confirm")
+    assert response.status_code == 404
+
+
+def test_admin_restore_delete_brings_lead_back(tmp_path, monkeypatch):
+    """POST /admin/deleted/{email}/restore re-saves the stashed dossier and
+    lifts the suppression — the lead is servable again."""
+    store = _feed_store(tmp_path, monkeypatch)
+    store.save(_feed_dossier("back@feed.test"), user_id="u1")
+    store.delete("back@feed.test", reason="bad_data", user_id="u1")
+
+    response = _admin_client(tmp_path, monkeypatch).post(
+        "/api/v1/admin/deleted/back@feed.test/restore")
+    assert response.status_code == 200
+    assert response.json() == {"email": "back@feed.test",
+                               "admin_decision": "restored",
+                               "restored_dossier": "yes"}
+
+    # The dossier is back and the email left the suppression pool.
+    assert store.get("back@feed.test") is not None
+    assert "back@feed.test" not in store.deleted_emails()
+    feed = _admin_client(tmp_path, monkeypatch).get(
+        "/api/v1/admin/deleted").json()
+    assert feed["deleted"][0]["admin_decision"] == "restored"
+
+
+def test_admin_restore_delete_unknown_email_404(tmp_path, monkeypatch):
+    _feed_store(tmp_path, monkeypatch)
+    response = _admin_client(tmp_path, monkeypatch).post(
+        "/api/v1/admin/deleted/nobody@x.test/restore")
+    assert response.status_code == 404
 
 
 def test_admin_cache_pending_endpoint(tmp_path, monkeypatch):

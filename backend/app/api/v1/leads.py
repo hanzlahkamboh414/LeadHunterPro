@@ -716,7 +716,7 @@ def delete_lead(email: str, reason: str = "manual",
     if not _user_owns_dossier(email, user):
         raise HTTPException(status_code=404, detail=f"no dossier for {email}")
     if not _store.delete(email, reason=reason, user_id=user.id,
-                         is_admin=user.is_admin):
+                         username=user.username, is_admin=user.is_admin):
         raise HTTPException(status_code=404, detail=f"no dossier for {email}")
     # Also drop it from the discovery cache so a future run does not re-discover
     # it and re-burn credits on an address the user chose to dismiss.

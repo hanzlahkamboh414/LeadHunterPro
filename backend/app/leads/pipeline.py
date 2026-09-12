@@ -579,6 +579,43 @@ def extract_email_leads(records: list[dict]) -> list[dict]:
     return leads
 
 
+def _intake_pools(
+    store: Any | None, user_id: str = ""
+) -> tuple[set[str] | None, set[str] | None]:
+    """The delete-suppression + lead-exclusivity pools for one run.
+
+    ``deleted`` — every email a user deleted (any reason) that the admin has
+    not Restored: a deleted lead must never resurface to ANY user ("jo b data
+    ay wo cache ma store hota rahe taay wo data dobara na dikhy").
+
+    ``taken`` — lead exclusivity: emails owned by ANOTHER user ("ak lead ya
+    email sirf ak user ko show honi chahye"). Empty user_id (CLI / legacy)
+    disables only this half — suppression applies regardless of who runs.
+
+    Both are computed ONCE per run and checked in-memory at the intake gates
+    (the same cost discipline as the dead/cooling pools). Fake stores in
+    tests that lack the methods get honest Nones (feature is additive).
+    """
+    if store is None:
+        return None, None
+    deleted: set[str] | None = None
+    taken: set[str] | None = None
+    _deleted_emails = getattr(store, "deleted_emails", None)
+    if callable(_deleted_emails):
+        try:
+            deleted = _deleted_emails()
+        except Exception:  # noqa: BLE001 — a broken pool must not kill a run
+            logger.warning("deleted_emails() unavailable", exc_info=True)
+    if user_id:
+        _taken = getattr(store, "taken_by_others", None)
+        if callable(_taken):
+            try:
+                taken = _taken(user_id)
+            except Exception:  # noqa: BLE001
+                logger.warning("taken_by_others() unavailable", exc_info=True)
+    return deleted, taken
+
+
 def discover_until_target(
     query: ResearchQuery,
     max_passes: int = 3,
@@ -593,6 +630,7 @@ def discover_until_target(
     seen_pdf_urls: set[str] | None = None,
     seen_domains: set[str] | None = None,
     cooldown_seconds: int = 0,
+    user_id: str = "",
 ) -> tuple[list[dict], list[dict]]:
     """Run discovery passes until a target of emails is gathered.
 
@@ -670,6 +708,12 @@ def discover_until_target(
             logger.debug("fit-learning source prune unavailable", exc_info=True)
             _fit_learning = None
 
+    # Delete-suppression + lead-exclusivity pools (2026-09-12): a deleted lead
+    # never resurfaces for anyone; a lead owned by ANOTHER user never lands on
+    # this run ("ak lead sirf ak user ko"). Computed once, checked at every
+    # intake gate below.
+    deleted_pool, taken_pool = _intake_pools(dossier_store, user_id)
+
     # Layer-1 dork-yield store (Phase G): same db as the research verdicts, so
     # the dispatch recorded here and the working-lead credit committed at
     # research time read one consistent record. Unavailable (stub store, no db
@@ -715,6 +759,17 @@ def discover_until_target(
             if dossier_store is not None and dossier_store.get(l["email"]) is not None:
                 pending_store.remove([l["email"]])
                 stale_purged += 1
+                continue
+            # DELETE-SUPPRESSION: a deleted lead (any reason, any user) never
+            # resurfaces — purge the stale cache row so it stops shadowing.
+            if deleted_pool is not None and l["email"] in deleted_pool:
+                pending_store.remove([l["email"]])
+                stale_purged += 1
+                continue
+            # LEAD EXCLUSIVITY: another user owns this email — it is not this
+            # run's lead ("ak lead sirf ak user ko"). Drop the stale row.
+            if taken_pool is not None and l["email"] in taken_pool:
+                pending_store.remove([l["email"]])
                 continue
             key = (l["email"], l["domain"])
             if key in seen:
@@ -816,6 +871,13 @@ def discover_until_target(
             and (dossier_store is None or dossier_store.get(l["email"]) is None)
             and (dead_pool is None or l["email"] not in dead_pool)
             and l["email"] not in cooling_pool
+            # DELETE-SUPPRESSION: a user-deleted email never re-enters the
+            # funnel, whatever the source surfaces again.
+            and (deleted_pool is None or l["email"] not in deleted_pool)
+            # LEAD EXCLUSIVITY: an email another user already owns is not
+            # this run's lead (fresh discovery normally never sees these —
+            # the dossier exists — this closes the delete/restore races).
+            and (taken_pool is None or l["email"] not in taken_pool)
         ]
 
         # INGESTION GATE (root cause of the "data jo services se match nahi
@@ -1022,6 +1084,10 @@ def run_research(
         agent.enable_query_yield(_yield_db)
     if _yield_db is not None and hasattr(agent, "enable_fit_learning"):
         agent.enable_fit_learning(_yield_db)
+    # Delete-suppression + lead-exclusivity pools (2026-09-12) — enforced again
+    # at research time because a lead can be deleted (or taken by another
+    # user's run) AFTER discovery buffered it.
+    deleted_pool, taken_pool = _intake_pools(store, user_id)
     # Layer-1 dork-yield store (Phase G): same db as the query/fit learning.
     _discovery_yield = None
     if _yield_db is not None:
@@ -1058,14 +1124,47 @@ def run_research(
         email, domain = lead["email"], lead["domain"]
         t0 = time.monotonic()
 
+        # DELETE-SUPPRESSION (research-time): a lead deleted mid-run (buffered
+        # before the delete) never re-enters the store for ANY user — the
+        # admin's Restore is the only way back.
+        if deleted_pool and email in deleted_pool:
+            with write_lock:
+                if pending_store is not None:
+                    pending_store.remove([email])
+            logger.info("Research skip (user-deleted): %s", email)
+            return None
+        # LEAD EXCLUSIVITY (research-time): an email another user already owns
+        # is not this run's lead — no owner stamp, no dashboard entry, no
+        # re-research ("ak lead ya email sirf ak user ko show honi chahye").
+        if taken_pool and email in taken_pool:
+            with write_lock:
+                if pending_store is not None:
+                    pending_store.remove([email])
+            logger.info("Research skip (owned by another user): %s", email)
+            return None
+
         # Cross-run dedup: if this email was already researched, reuse it.
         if store is not None:
             existing = store.get(email)
             if existing is not None:
+                # EXCLUSIVITY RACE GUARD: another user's run may have saved
+                # this email AFTER our intake snapshot was taken — a live
+                # ownership check, not the stale pool ("ak lead sirf ak user
+                # ko"). Not ours -> skip silently, no owner stamp.
+                _owned_by_another = getattr(store, "owned_by_another", None)
+                if (user_id and callable(_owned_by_another)
+                        and _owned_by_another(email, user_id)):
+                    with write_lock:
+                        if pending_store is not None:
+                            pending_store.remove([email])
+                    logger.info(
+                        "Research skip (raced to another user): %s", email)
+                    return None
                 with write_lock:
-                    # Cross-user sharing (Phase 2): another user's dossier,
-                    # reused without re-research — stamp THIS user as an owner
-                    # so the lead still lands on their dashboard.
+                    # Cross-user claim (Phase 2, exclusivity-gated): a dossier
+                    # with NO other owner — the caller's search surfaced it,
+                    # so the lead lands on their dashboard without a
+                    # re-research.
                     if user_id:
                         store.add_owner(email, user_id)
                     if pending_store is not None:
@@ -1283,6 +1382,7 @@ def run_full(
             target_override=remaining, attempted=attempted,
             seen_pdf_urls=seen_pdf_urls, seen_domains=seen_domains,
             cooldown_seconds=cooldown_seconds,
+            user_id=user_id,  # lead exclusivity + delete-suppression pools
         )
 
     def base_passes() -> int:
@@ -1496,6 +1596,10 @@ def _run_full_streaming(
             pending_store.cooling_emails(cooldown_seconds)
             if cooldown_seconds else set()
         )
+    # Delete-suppression + lead-exclusivity pools (2026-09-12) — the streaming
+    # intake gates below drop deleted emails and emails owned by another user
+    # ("ak lead sirf ak user ko"; a deleted lead never resurfaces for anyone).
+    deleted_pool, taken_pool = _intake_pools(store, user_id)
 
     def _claim_next(batch: int) -> dict | None:
         """Return one NOT-already-claimed pending lead (peek-not-pop guarded).
@@ -1512,6 +1616,19 @@ def _run_full_streaming(
                 cooldown_seconds=cooldown_seconds,
             )
         for r in rows:
+            # DELETE-SUPPRESSION: a deleted lead is never claimed, and its
+            # stale buffer row is purged so it stops shadowing the window.
+            if deleted_pool is not None and r["email"] in deleted_pool:
+                with write_lock:
+                    pending_store.remove([r["email"]])
+                continue
+            # LEAD EXCLUSIVITY: another user owns this email — not this run's
+            # lead; purge the stale row (its owner's research removed it from
+            # their own buffer, so it is dead weight for everyone).
+            if taken_pool is not None and r["email"] in taken_pool:
+                with write_lock:
+                    pending_store.remove([r["email"]])
+                continue
             if r["email"] not in claimed:
                 claimed.add(r["email"])
                 return r
@@ -1703,6 +1820,13 @@ def _run_full_streaming(
                         continue
                     if cooling_pool and l["email"] in cooling_pool:
                         continue
+                    # DELETE-SUPPRESSION + LEAD EXCLUSIVITY (2026-09-12): a
+                    # user-deleted email never re-enters the buffer; an email
+                    # owned by another user is not this run's lead.
+                    if deleted_pool is not None and l["email"] in deleted_pool:
+                        continue
+                    if taken_pool is not None and l["email"] in taken_pool:
+                        continue
                     # Learned skip (Phase E) — mirrors the serial intake gate:
                     # a source that never produced a lead (MIN_TRIALS) or a
                     # company/domain the USER rejected stays out of the buffer.
@@ -1830,10 +1954,22 @@ def _run_full_streaming(
         if store is not None:
             existing = store.get(email)
             if existing is not None:
+                # EXCLUSIVITY RACE GUARD: the dossier may have been saved by
+                # another user's run AFTER our intake snapshot — a live
+                # ownership check, not the stale pool. Not ours -> skip, no
+                # owner stamp ("ak lead ya email sirf ak user ko").
+                _owned_by_another = getattr(store, "owned_by_another", None)
+                if (user_id and callable(_owned_by_another)
+                        and _owned_by_another(email, user_id)):
+                    with write_lock:
+                        pending_store.remove([email])
+                    logger.info(
+                        "Research skip (raced to another user): %s", email)
+                    return None
                 with write_lock:
-                    # Cross-user sharing (Phase 2): the cache hit reused
-                    # another user's research — stamp THIS user as an owner
-                    # so the lead shows on their dashboard too.
+                    # Cross-user claim (Phase 2, exclusivity-gated): a dossier
+                    # with NO other owner — the caller's search surfaced it, so
+                    # the lead shows on their dashboard without a re-research.
                     if user_id:
                         store.add_owner(email, user_id)
                     pending_store.remove([email])

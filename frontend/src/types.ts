@@ -224,11 +224,23 @@ export interface AdminDeletedRow {
   email: string;
   deleted_at: string;
   reason: string;
+  user_id: string;
+  username: string;
+  /** '' pending the admin's answer / 'confirmed' / 'restored'. */
+  admin_decision: string;
 }
 
 export interface AdminDeleted {
   total: number;
   deleted: AdminDeletedRow[];
+}
+
+/** Admin's Confirm/Restore answer on one deleted lead. */
+export interface AdminDecision {
+  email: string;
+  admin_decision: string;
+  /** 'yes' when a stashed dossier was re-saved (restore), else 'no'/''. */
+  restored_dossier: string;
 }
 
 /** Admin — the discovery cache (pending_leads) viewer. */

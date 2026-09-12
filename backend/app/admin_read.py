@@ -113,15 +113,18 @@ class AdminReadRepository:
 
 
     def deleted_log(self, limit: int = 100) -> dict[str, Any]:
-        """Which emails the user deleted, when, and why (the admin audit trail).
+        """The admin delete-feed: WHO deleted WHICH email, WHEN, WHY, and the
+        admin's answer so far (pending / confirmed / restored).
 
         Read from the ``deleted_leads`` table the store writes on every Delete /
-        Junk sweep — the admin screen's "kon kon c email delete ki".
+        Junk sweep — the admin screen's "fulane user ne ye lead fulani reason
+        se delete ki" + the Confirm/Restore decision state.
         """
         conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
         try:
             rows = conn.execute(
-                "SELECT email, deleted_at, reason FROM deleted_leads "
+                "SELECT email, deleted_at, reason, user_id, username, "
+                "admin_decision FROM deleted_leads "
                 "ORDER BY deleted_at DESC LIMIT ?",
                 (int(limit),),
             ).fetchall()
@@ -130,7 +133,14 @@ class AdminReadRepository:
             conn.close()
         return {
             "total": int(total),
-            "deleted": [{"email": r[0], "deleted_at": r[1], "reason": r[2]} for r in rows],
+            "deleted": [
+                {
+                    "email": r[0], "deleted_at": r[1], "reason": r[2],
+                    "user_id": r[3], "username": r[4] or r[3] or "unknown",
+                    "admin_decision": r[5],
+                }
+                for r in rows
+            ],
         }
 
     def pending_emails(self, limit: int = 100) -> dict[str, Any]:

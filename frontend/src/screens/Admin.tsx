@@ -17,8 +17,10 @@ import {
 import { useState } from "react";
 import type { ReactNode } from "react";
 import { api } from "../api/client";
+import { DELETE_REASONS } from "../components/DeleteReasonDialog";
 import { Spinner } from "../components/StatusChip";
 import type {
+  AdminDeletedRow,
   AdminLeadScope,
   AdminLeadScopeKind,
   AdminUser,
@@ -583,49 +585,142 @@ export default function Admin() {
       )}
 
       {/* -------------------------------------------------------------- */}
-      {/* AUDIT LOG */}
+      {/* AUDIT LOG — the user delete-feed + the admin's answers */}
       {/* -------------------------------------------------------------- */}
       {tab === "audit" && (
-        <section className={`${cardClass} mt-6`}>
-          <h2 className="text-[16px] font-semibold text-white">Deleted leads — audit log</h2>
-          <p className="mt-1 text-[12px] text-slate-500">
-            Which emails were deleted, when, and why (manual Delete vs Junk sweep).
-          </p>
-          <div className="mt-4 overflow-x-auto">
-            <table className="w-full text-left text-[13px]">
-              <thead className="text-slate-500">
-                <tr>
-                  <th className="pb-2 pr-4 font-medium">Email</th>
-                  <th className="pb-2 pr-4 font-medium">Deleted at</th>
-                  <th className="pb-2 font-medium">Reason</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(deleted.data?.deleted ?? []).map((row) => (
-                  <tr key={row.email} className="border-t border-white/5">
-                    <td className="py-2 pr-4 text-slate-300">{row.email}</td>
-                    <td className="py-2 pr-4 text-slate-400">{row.deleted_at}</td>
-                    <td className="py-2">
-                      <span className={`rounded-full px-2 py-0.5 text-[11.5px] ${
-                        row.reason === "junk" ? "bg-slate-500/10 text-slate-400" : "bg-rose-500/10 text-rose-300"
-                      }`}>
-                        {row.reason}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-                {(deleted.data?.deleted ?? []).length === 0 && !deleted.isLoading && (
-                  <tr><td colSpan={3} className="py-4 text-slate-500">Nothing deleted yet.</td></tr>
-                )}
-              </tbody>
-            </table>
-            {deleted.data && (
-              <p className="mt-3 text-[11px] text-slate-600">{deleted.data.total} total deleted</p>
-            )}
-          </div>
-        </section>
+        <AuditTab
+          rows={deleted.data?.deleted ?? []}
+          total={deleted.data?.total ?? 0}
+          loading={deleted.isLoading}
+        />
       )}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Audit Log tab — the user delete-feed + the admin's Confirm / Restore answer
+// ---------------------------------------------------------------------------
+
+function AuditTab({
+  rows,
+  total,
+  loading,
+}: {
+  rows: AdminDeletedRow[];
+  total: number;
+  loading: boolean;
+}) {
+  const qc = useQueryClient();
+
+  // Confirm: the admin backs the delete — a "not our client" verdict becomes
+  // corroborated (decisive identity purge for everyone).
+  const confirm = useMutation({
+    mutationFn: (email: string) => api.adminConfirmDelete(email),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["admin-deleted"] }),
+  });
+  // Restore: the admin says the delete was wrong — the lead comes back and
+  // the identity learning the delete fed is cleared.
+  const restore = useMutation({
+    mutationFn: (email: string) => api.adminRestoreDelete(email),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["admin-deleted"] }),
+  });
+
+  const reasonLabel = (slug: string): string =>
+    DELETE_REASONS.find((r) => r.slug === slug)?.label ?? slug;
+
+  const decisionBadge = (row: AdminDeletedRow): ReactNode => {
+    if (row.admin_decision === "confirmed")
+      return (
+        <span className="rounded-full bg-rose-500/10 px-2 py-0.5 text-[11.5px] text-rose-300">
+          Confirmed
+        </span>
+      );
+    if (row.admin_decision === "restored")
+      return (
+        <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[11.5px] text-emerald-300">
+          Restored
+        </span>
+      );
+    return (
+      <span className="rounded-full bg-amber-500/10 px-2 py-0.5 text-[11.5px] text-amber-300">
+        Pending
+      </span>
+    );
+  };
+
+  return (
+    <section className={`${cardClass} mt-6`}>
+      <h2 className="text-[16px] font-semibold text-white">Deleted leads — user feed</h2>
+      <p className="mt-1 text-[12px] text-slate-500">
+        Kis user ne kaunsi email kis wajah se delete ki — aur us par aap ka jawab
+        (Confirm = delete sahi tha; Restore = lead wapis lao).
+      </p>
+      <div className="mt-4 overflow-x-auto">
+        <table className="w-full text-left text-[13px]">
+          <thead className="text-slate-500">
+            <tr>
+              <th className="pb-2 pr-4 font-medium">Email</th>
+              <th className="pb-2 pr-4 font-medium">User</th>
+              <th className="pb-2 pr-4 font-medium">Reason</th>
+              <th className="pb-2 pr-4 font-medium">Deleted at</th>
+              <th className="pb-2 pr-4 font-medium">Answer</th>
+              <th className="pb-2 font-medium">Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.email} className="border-t border-white/5">
+                <td className="py-2 pr-4 text-slate-300">{row.email}</td>
+                <td className="py-2 pr-4 text-slate-300">{row.username}</td>
+                <td className="py-2 pr-4">
+                  <span className={`rounded-full px-2 py-0.5 text-[11.5px] ${
+                    row.reason === "not_our_client"
+                      ? "bg-rose-500/10 text-rose-300"
+                      : "bg-slate-500/10 text-slate-400"
+                  }`}>
+                    {reasonLabel(row.reason)}
+                  </span>
+                </td>
+                <td className="py-2 pr-4 text-slate-400">{row.deleted_at}</td>
+                <td className="py-2 pr-4">{decisionBadge(row)}</td>
+                <td className="py-2">
+                  <div className="flex items-center gap-2">
+                    {row.admin_decision === "" && (
+                      <button
+                        type="button"
+                        disabled={confirm.isPending}
+                        onClick={() => confirm.mutate(row.email)}
+                        className="rounded-md border border-rose-400/30 bg-rose-500/10 px-2.5 py-1 text-[12px] text-rose-300 hover:bg-rose-500/20 disabled:opacity-50"
+                      >
+                        {confirm.isPending ? <Spinner /> : "Confirm"}
+                      </button>
+                    )}
+                    {row.admin_decision !== "restored" && (
+                      <button
+                        type="button"
+                        disabled={restore.isPending}
+                        onClick={() => restore.mutate(row.email)}
+                        className="rounded-md border border-emerald-400/30 bg-emerald-500/10 px-2.5 py-1 text-[12px] text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-50"
+                      >
+                        {restore.isPending ? <Spinner /> : "Restore"}
+                      </button>
+                    )}
+                  </div>
+                </td>
+              </tr>
+            ))}
+            {rows.length === 0 && !loading && (
+              <tr><td colSpan={6} className="py-4 text-slate-500">Nothing deleted yet.</td></tr>
+            )}
+          </tbody>
+        </table>
+        {loading && (
+          <p className="mt-3 text-[12px] text-slate-500"><Spinner /> Loading…</p>
+        )}
+        <p className="mt-3 text-[11px] text-slate-600">{total} total deleted</p>
+      </div>
+    </section>
   );
 }
 

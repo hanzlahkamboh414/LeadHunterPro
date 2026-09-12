@@ -15,7 +15,7 @@ import threading
 from typing import Any
 
 from app.lead_research.agent import AILeadResearchAgent, DEAD_DOMAIN_MARKER
-from app.lead_research.models import LeadDossier, LeadMeta
+from app.lead_research.models import CRM_STATUSES, LeadDossier, LeadMeta
 
 logger = logging.getLogger(__name__)
 
@@ -261,6 +261,34 @@ class LeadResearchStore:
             INSERT OR IGNORE INTO dossier_owners (email_hash, user_id)
             SELECT email_hash, user_id FROM dossiers WHERE user_id <> ''
         """)
+        # CRM pipeline (Phase E1). The lead's pipeline STAGE and next action
+        # live in their own columns (same survival rule as folder/tags — the
+        # research payload is never touched, so a re-research can't wipe the
+        # user's CRM state). Default 'researched' is honest: a stored dossier
+        # has BY DEFINITION been through research; 'new' exists for the user
+        # to set deliberately (a fresh un-worked lead they're re-tracking).
+        _add_column(conn, "dossiers", "crm_status", "TEXT NOT NULL DEFAULT 'researched'")
+        _add_column(conn, "dossiers", "next_action", "TEXT NOT NULL DEFAULT ''")
+        # The immutable timeline — every stage change, next-action update and
+        # note is APPENDED here (never updated, never deleted), so a lead's
+        # story is reconstructable and future phases (emails, replies) append
+        # the same way. `kind` names the event type; `detail` is human text.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS crm_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email_hash TEXT NOT NULL,
+                email TEXT NOT NULL,
+                user_id TEXT NOT NULL DEFAULT '',
+                username TEXT NOT NULL DEFAULT '',
+                kind TEXT NOT NULL,
+                detail TEXT NOT NULL DEFAULT '',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_crm_events_email "
+            "ON crm_events (email_hash, id)"
+        )
         self._backfill_filter_columns(conn)
         conn.commit()
         conn.close()
@@ -463,6 +491,10 @@ class LeadResearchStore:
             conn.execute(
                 f"DELETE FROM dossier_owners WHERE email_hash = ?", (eh,)
             )
+            # CRM timeline goes WITH the row (no orphan events). A restored
+            # lead honestly restarts at 'researched' — the old stage died
+            # with the delete decision.
+            conn.execute("DELETE FROM crm_events WHERE email_hash = ?", (eh,))
             conn.execute(
                 "INSERT INTO deleted_leads "
                 "(email, deleted_at, reason, user_id, username, dossier_json, "
@@ -768,6 +800,98 @@ class LeadResearchStore:
         conn.close()
         return {r[0]: LeadMeta.from_db(r[1], r[2]) for r in rows}
 
+    # ------------------------------------------------------------------
+    # CRM pipeline (Phase E1): stage + next action on the dossier row, and
+    # an append-only timeline in crm_events. Same survival rule as folder/
+    # tags — dossier_json is never written here.
+    # ------------------------------------------------------------------
+
+    def set_crm(self, email: str, *, status: str | None = None,
+                next_action: str | None = None, note: str = "",
+                user_id: str = "", username: str = "") -> dict[str, Any] | None:
+        """Update one lead's CRM state — pipeline stage, next action, and/or
+        an appended note (all optional; only what is provided is touched).
+
+        Returns ``{"crm_status", "next_action"}`` after the update, or None
+        when no such dossier exists. Every ACTUAL change appends one
+        ``crm_events`` row (kind = status / next_action / note), so the
+        timeline only ever records real transitions — a no-op call (same
+        stage, same note text) writes nothing, never a fake event.
+        """
+        eh = _email_hash(email)
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT crm_status, next_action FROM dossiers WHERE email_hash = ?",
+                (eh,),
+            ).fetchone()
+            if row is None:
+                return None
+            old_status, old_action = row[0] or "", row[1] or ""
+
+            def _event(kind: str, detail: str) -> None:
+                conn.execute(
+                    "INSERT INTO crm_events "
+                    "(email_hash, email, user_id, username, kind, detail) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (eh, email, user_id, username, kind, detail),
+                )
+
+            if status is not None and status != old_status:
+                conn.execute(
+                    "UPDATE dossiers SET crm_status = ?, "
+                    "updated_at = CURRENT_TIMESTAMP WHERE email_hash = ?",
+                    (status, eh),
+                )
+                _event("status", f"{old_status or 'researched'} → {status}")
+            if next_action is not None and next_action.strip() != old_action:
+                na = next_action.strip()
+                conn.execute(
+                    "UPDATE dossiers SET next_action = ?, "
+                    "updated_at = CURRENT_TIMESTAMP WHERE email_hash = ?",
+                    (na, eh),
+                )
+                _event("next_action", na if na else "(cleared)")
+            if note.strip():
+                _event("note", note.strip())
+            conn.commit()
+            final = conn.execute(
+                "SELECT crm_status, next_action FROM dossiers WHERE email_hash = ?",
+                (eh,),
+            ).fetchone()
+            return {"crm_status": final[0] or "", "next_action": final[1] or ""}
+        finally:
+            conn.close()
+
+    def get_crm(self, email: str) -> dict[str, Any] | None:
+        """One lead's CRM state: stage + next action + the timeline (newest
+        last, chronological). None when no such dossier exists."""
+        eh = _email_hash(email)
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT crm_status, next_action FROM dossiers WHERE email_hash = ?",
+            (eh,),
+        ).fetchone()
+        if row is None:
+            conn.close()
+            return None
+        events = conn.execute(
+            "SELECT id, kind, detail, user_id, username, created_at "
+            "FROM crm_events WHERE email_hash = ? ORDER BY id ASC LIMIT 200",
+            (eh,),
+        ).fetchall()
+        conn.close()
+        return {
+            "crm_status": row[0] or "",
+            "next_action": row[1] or "",
+            "events": [
+                {"id": r[0], "kind": r[1], "detail": r[2],
+                 "user_id": r[3] or "", "username": r[4] or "",
+                 "created_at": r[5] or ""}
+                for r in events
+            ],
+        }
+
     # -- Admin visibility flag (Dashboard data control) ---------------------
 
     def set_hidden(self, email: str, hidden: bool) -> bool:
@@ -918,6 +1042,7 @@ class LeadResearchStore:
                       q: str | None = None, global_scope: bool = False,
                       user_id: str | None = None, is_admin: bool = False,
                       include_legacy: bool = False,
+                      crm_status: str | None = None,
                       ) -> tuple[str, list[Any]]:
         """Shared WHERE clause for the user-facing lead views.
 
@@ -964,6 +1089,14 @@ class LeadResearchStore:
         if bound is not None:
             conds.append("d.bound = ?")
             args.append(1 if bound else 0)
+        if crm_status:
+            # CRM pipeline stage (Phase E1) — '' (pre-migration rows) reads as
+            # 'researched', so filtering by researched matches them too.
+            if crm_status == "researched":
+                conds.append("d.crm_status IN ('researched', '')")
+            else:
+                conds.append("d.crm_status = ?")
+                args.append(crm_status)
         if min_score is not None:
             conds.append("d.potential_score >= ?")
             args.append(float(min_score))
@@ -1002,7 +1135,8 @@ class LeadResearchStore:
         "d.email_hash, d.email, d.domain, "
         "json_extract(d.dossier_json, '$.company.name') AS _cn, d.dossier_json, "
         "d.folder, d.tags, date(d.created_at), "
-        "d.recommendation, d.potential_score, d.bound"
+        "d.recommendation, d.potential_score, d.bound, "
+        "d.crm_status, d.next_action"
     )
 
     @staticmethod
@@ -1014,6 +1148,9 @@ class LeadResearchStore:
             "folder": r[5] or "", "tags": LeadMeta.from_db(r[5], r[6]).tags,
             "created_at": r[7] or "",
             "recommendation": r[8], "potential_score": r[9], "bound": r[10],
+            # CRM pipeline state (Phase E1); '' = the pre-migration default,
+            # read honestly as 'researched'.
+            "crm_status": r[11] or "researched", "next_action": r[12] or "",
         }
 
     def query_leads(self, *, limit: int = 100, offset: int = 0, **filters) -> tuple[list[dict[str, Any]], int]:

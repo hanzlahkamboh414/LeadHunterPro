@@ -30,12 +30,15 @@ from app.auth.activity import get_activity
 from app.auth.dependencies import get_current_user
 from app.auth.models import User
 from app.core.config import settings
+from app.lead_research.models import CRM_STATUSES
 from app.lead_research.service import LeadResearchStore, _email_hash
 from app.leads.export import export_csv
 from app.leads.jobs import JobManager
 from app.leads.models import Job, JobState
 from app.leads.pipeline import ResearchQuery
 from app.schemas.leads import (
+    CrmIn,
+    CrmOut,
     FolderCreate,
     FoldersOut,
     FolderOut,
@@ -153,6 +156,8 @@ def _lead_summary(
     folder: str = "",
     tags: list[str] | None = None,
     created_at: str = "",
+    crm_status: str = "researched",
+    next_action: str = "",
 ) -> LeadSummary:
     """One lead row.
 
@@ -182,6 +187,8 @@ def _lead_summary(
         folder=folder,
         tags=tags or [],
         created_at=created_at,
+        crm_status=crm_status or "researched",
+        next_action=next_action,
     )
 
 
@@ -335,6 +342,7 @@ def list_leads(
     folder: str | None = Query(default=None, description="only leads in this folder"),
     tag: str | None = Query(default=None, description="only leads carrying this tag"),
     date: str | None = Query(default=None, description="only leads extracted on this date (YYYY-MM-DD)"),
+    crm_status: str | None = Query(default=None, description="only leads at this CRM stage (new/researched/qualified/contacted/opened/replied/interested/meeting/won/lost)"),
     q: str | None = Query(default=None, description="identity text search (company/email/person/role)"),
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
@@ -399,6 +407,7 @@ def list_leads(
         date=date,
         source_emails=source_emails,
         q=q,
+        crm_status=crm_status,
         global_scope=(date is not None or tag is not None),
         limit=limit,
         offset=offset,
@@ -425,6 +434,8 @@ def list_leads(
             folder=item["folder"],
             tags=item["tags"],
             created_at=item["created_at"],
+            crm_status=item.get("crm_status", "researched"),
+            next_action=item.get("next_action", ""),
         ))
     response.headers["X-Total-Count"] = str(total)
     return out
@@ -556,6 +567,7 @@ def organize_lead(email: str, body: OrganizeIn,
     rec = regate_recommendation(dossier) if dossier else "skip"
     logger.info("PUT /leads/%s/organize -> folder=%r tags=%r", email, body.folder, body.tags)
     meta = _store.get_meta(email)
+    crm = _store.get_crm(email)
     scope = _view_scope(user)
     return _lead_summary(
         dossier,
@@ -567,6 +579,8 @@ def organize_lead(email: str, body: OrganizeIn,
         folder=meta.folder if meta else "",
         tags=meta.tags if meta else [],
         created_at=_store.research_dates().get(_email_hash(email), ""),
+        crm_status=crm["crm_status"] if crm else "researched",
+        next_action=crm["next_action"] if crm else "",
     )
 
 
@@ -727,6 +741,61 @@ def delete_lead(email: str, reason: str = "manual",
     return {"email": email, "deleted": True}
 
 
+@router.put("/{email}/crm", response_model=CrmOut, dependencies=[Depends(require_api_key)])
+def update_crm(email: str, body: CrmIn,
+               user: User = Depends(get_current_user)) -> dict[str, Any]:
+    """Update one lead's CRM state — pipeline stage, next action, and/or an
+    appended note (Phase E1). Only the provided fields are touched; every
+    real change lands in the immutable ``crm_events`` timeline.
+
+    Per-user isolation: a non-admin can only update their OWN dossier.
+    """
+    if not _user_owns_dossier(email, user):
+        raise HTTPException(status_code=404, detail=f"no dossier for {email}")
+    if body.status is not None and body.status not in CRM_STATUSES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"status must be one of {', '.join(CRM_STATUSES)}",
+        )
+    result = _store.set_crm(
+        email,
+        status=body.status,
+        next_action=body.next_action,
+        note=body.note,
+        user_id=user.id, username=user.username,
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"no dossier for {email}")
+    # Activity feed: what changed, in one honest line (no empty no-ops).
+    changes: list[str] = []
+    if body.status is not None:
+        changes.append(f"stage → {body.status}")
+    if body.next_action is not None:
+        changes.append("next action" + (f" → {body.next_action.strip()}" if body.next_action.strip() else " cleared"))
+    if body.note.strip():
+        changes.append("note added")
+    if changes:
+        get_activity().record(
+            user.id, user.username, "crm",
+            detail=f"{email}: " + "; ".join(changes),
+        )
+    logger.info("PUT /leads/%s/crm -> %s", email, "; ".join(changes) or "no-op")
+    crm = _store.get_crm(email)
+    return crm or {"crm_status": result["crm_status"], "next_action": result["next_action"], "events": []}
+
+
+@router.get("/{email}/crm", response_model=CrmOut, dependencies=[Depends(require_api_key)])
+def get_crm(email: str, user: User = Depends(get_current_user)) -> dict[str, Any]:
+    """One lead's CRM state: current stage, next action, and the full
+    timeline (stage changes / next actions / notes — newest last)."""
+    if not _user_owns_dossier(email, user):
+        raise HTTPException(status_code=404, detail=f"no dossier for {email}")
+    crm = _store.get_crm(email)
+    if crm is None:
+        raise HTTPException(status_code=404, detail=f"no dossier for {email}")
+    return crm
+
+
 @router.get("/{email}", response_model=LeadDetail, dependencies=[Depends(require_api_key)])
 def get_lead(email: str, user: User = Depends(get_current_user)) -> dict[str, Any]:
     """Full researched dossier for one lead (evidence + user metadata).
@@ -747,4 +816,10 @@ def get_lead(email: str, user: User = Depends(get_current_user)) -> dict[str, An
     else:
         out["folder"] = ""
         out["tags"] = []
+    # CRM pipeline state (Phase E1) — stage + next action (the full timeline
+    # has its own GET /{email}/crm; the detail view only needs the current
+    # state for the header).
+    crm = _store.get_crm(email)
+    out["crm_status"] = crm["crm_status"] if crm else "researched"
+    out["next_action"] = crm["next_action"] if crm else ""
     return out

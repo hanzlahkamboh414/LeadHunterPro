@@ -184,6 +184,23 @@ class TimingAssessment:
         )
 
 
+#: The CRM pipeline stages a lead moves through (Phase E1), in journey order.
+#: Stored verbatim in ``dossiers.crm_status``; anything outside this tuple is
+#: rejected by the API (422) so the column never fills with free text.
+CRM_STATUSES = (
+    "new",
+    "researched",
+    "qualified",
+    "contacted",
+    "opened",
+    "replied",
+    "interested",
+    "meeting",
+    "won",
+    "lost",
+)
+
+
 @dataclass
 class LeadMeta:
     """User organization metadata for one dossier — deliberately SEPARATE from

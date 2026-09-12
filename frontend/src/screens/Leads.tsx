@@ -9,7 +9,8 @@ import { Spinner } from "../components/StatusChip";
 import ManageMenu from "../components/ManageMenu";
 import DeleteReasonDialog, { type DeleteReason } from "../components/DeleteReasonDialog";
 import type { EvidenceFact } from "../types";
-import { recommendationBadge, recommendationLabel, scoreColor } from "../lib/format";
+import { CRM_STAGES } from "../types";
+import { crmStageBadge, crmStageLabel, recommendationBadge, recommendationLabel, scoreColor } from "../lib/format";
 
 // Working-only (CLAUDE.md §1 honest leads): skip/junk dossiers are NOT leads —
 // the user asked "frontend pr sirf working emails hi show ho". The backend
@@ -95,6 +96,7 @@ export default function Leads() {
   const folder = (params.get("folder") ?? "").trim();
   const tag = (params.get("tag") ?? "").trim();
   const date = (params.get("date") ?? "").trim();
+  const stage = (params.get("crm_status") ?? "").trim();
   // A date/tag search is GLOBAL (har folder me dhundhta hai) — no single place
   // is active in the rail while it runs, so the view honestly shows the cross-
   // place recall, not the Unfiled inbox.
@@ -142,6 +144,12 @@ export default function Leads() {
     else p.delete("date");
     setParams(p, { replace: true });
   }
+  function setStage(v: string) {
+    const p = new URLSearchParams(params);
+    if (v) p.set("crm_status", v);
+    else p.delete("crm_status");
+    setParams(p, { replace: true });
+  }
 
   // Set a PLACE (folder) + optional tag ATOMICALLY in one URL write — chip
   // clicks must never leave a stale folder while a tag is applied (two separate
@@ -164,7 +172,7 @@ export default function Leads() {
   // carries it and the old client-side filter memo is gone.
   const PAGE = 100;
   const pageQ = useInfiniteQuery({
-    queryKey: ["leads", rec, bound, minScore, src, folder, tag, date, q],
+    queryKey: ["leads", rec, bound, minScore, src, folder, tag, date, stage, q],
     queryFn: ({ pageParam = 0 }) =>
       api.pageLeads({
         recommendation: rec || undefined,
@@ -174,6 +182,7 @@ export default function Leads() {
         folder: folder || undefined,
         tag: tag || undefined,
         date: date || undefined,
+        crm_status: stage || undefined,
         q: q || undefined,
         limit: PAGE,
         offset: pageParam,
@@ -203,12 +212,12 @@ export default function Leads() {
 
   // Any list-level filter on? Drives the "In this view" card's active state —
   // it is the one-click "reset everything" escape hatch.
-  const anyFilterOn = !!(rec || bound || minScore || src || tag || date);
+  const anyFilterOn = !!(rec || bound || minScore || src || tag || date || stage);
   function clearFilters() {
     const p = new URLSearchParams(params);
     // The PLACE (folder) survives — it's where the user is browsing, not a
     // filter; only the row-level constraints reset.
-    ["recommendation", "bound", "min_score", "source", "tag", "date"].forEach((k) => p.delete(k));
+    ["recommendation", "bound", "min_score", "source", "tag", "date", "crm_status"].forEach((k) => p.delete(k));
     setParams(p, { replace: true });
   }
 
@@ -787,6 +796,16 @@ export default function Leads() {
             options={uniqueDates.map((d) => ({ value: d, label: fmtDate(d) }))}
           />
         </Filter>
+        <Filter>
+          <span className={labelCls}>Stage</span>
+          <Select
+            className="w-40"
+            value={stage}
+            onChange={setStage}
+            placeholder="All stages"
+            options={CRM_STAGES.map((s) => ({ value: s, label: crmStageLabel(s) }))}
+          />
+        </Filter>
         <button
           onClick={() => refetch()}
           className="rounded-lg border border-white/5 px-3 py-2 text-[13px] text-slate-300 hover:bg-white/[0.04] inline-flex items-center gap-1"
@@ -884,6 +903,7 @@ export default function Leads() {
                 <th className="px-4 py-3 font-medium">Person</th>
                 <th className="px-4 py-3 font-medium">LinkedIn</th>
                 <th className="px-4 py-3 font-medium">Labels</th>
+                <th className="px-4 py-3 font-medium">Stage</th>
                 <th className="px-4 py-3 font-medium">Extracted</th>
                 <th className="px-4 py-3 font-medium">Score</th>
                 <th className="px-4 py-3 font-medium">Recommendation</th>
@@ -1022,6 +1042,27 @@ export default function Leads() {
                           <span className="text-[12px] text-slate-600">—</span>
                         )}
                       </div>
+                    </td>
+                    <td className="px-4 py-3">
+                      {/* The lead's CRM stage — clicking the chip filters the
+                          list to that stage (second click clears it). */}
+                      <button
+                        onClick={(ev) => {
+                          ev.stopPropagation();
+                          setStage(stage === l.crm_status ? "" : l.crm_status);
+                        }}
+                        title={`Stage: ${crmStageLabel(l.crm_status)} — click to filter`}
+                        className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10.5px] font-medium ${crmStageBadge(l.crm_status)} ${
+                          stage === l.crm_status ? "ring-1 ring-white/40" : ""
+                        }`}
+                      >
+                        {crmStageLabel(l.crm_status)}
+                      </button>
+                      {l.next_action && (
+                        <div className="mt-1 max-w-[130px] truncate text-[11px] text-slate-500" title={l.next_action}>
+                          → {l.next_action}
+                        </div>
+                      )}
                     </td>
                     <td className="px-4 py-3">
                       {l.created_at ? (

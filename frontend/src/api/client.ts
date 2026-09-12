@@ -17,6 +17,8 @@ import type {
   AdminUserLeadSummary,
   AdminUsers,
   AdminVisibility,
+  CrmInput,
+  CrmState,
   FolderCreateOut,
   FoldersOut,
   Job,
@@ -85,6 +87,7 @@ function leadsParams(filter: LeadsFilter): string {
   if (filter.folder) q.set("folder", filter.folder);
   if (filter.tag) q.set("tag", filter.tag);
   if (filter.date) q.set("date", filter.date);
+  if (filter.crm_status) q.set("crm_status", filter.crm_status);
   if (filter.q) q.set("q", filter.q);
   if (filter.limit !== undefined) q.set("limit", String(filter.limit));
   if (filter.offset !== undefined) q.set("offset", String(filter.offset));
@@ -130,6 +133,8 @@ export interface LeadsFilter {
   folder?: string;
   tag?: string;
   date?: string;
+  /** CRM pipeline stage (Phase E1) — only leads at this stage. */
+  crm_status?: string;
   /** Identity text search (company / email / person / role) — matched server-side. */
   q?: string;
   limit?: number;
@@ -473,6 +478,21 @@ export const api = {
 
   getLead(email: string): Promise<LeadDetail> {
     return request<LeadDetail>(`/leads/${encodeURIComponent(email)}`);
+  },
+
+  // CRM pipeline (Phase E1): stage + next action + the immutable timeline.
+  /** Update a lead's CRM state — only the fields you send are touched. */
+  updateCrm(email: string, input: CrmInput): Promise<CrmState> {
+    return request<CrmState>(`/leads/${encodeURIComponent(email)}/crm`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+  },
+
+  /** A lead's full CRM state: stage, next action, timeline (newest last). */
+  getCrm(email: string): Promise<CrmState> {
+    return request<CrmState>(`/leads/${encodeURIComponent(email)}/crm`);
   },
 
   // Data management (user-controlled): a lead the user dismisses is gone.

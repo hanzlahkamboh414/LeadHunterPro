@@ -102,3 +102,40 @@ export function scoreColor(score: number): string {
   if (score >= 4) return "text-amber-300";
   return "text-slate-400";
 }
+
+// CRM pipeline stages (Phase E1) — the lead's journey chip. Labels are the
+// user's own vocabulary; colours are LITERAL class strings (Tailwind JIT only
+// generates classes it sees in source — never build them at runtime).
+export const CRM_STAGE_LABEL: Record<string, string> = {
+  new: "New",
+  researched: "Researched",
+  qualified: "Qualified",
+  contacted: "Contacted",
+  opened: "Opened",
+  replied: "Replied",
+  interested: "Interested",
+  meeting: "Meeting",
+  won: "Won",
+  lost: "Lost",
+};
+
+const CRM_STAGE_BADGE: Record<string, string> = {
+  new: "bg-slate-500/15 text-slate-300",
+  researched: "bg-sky-500/15 text-sky-300",
+  qualified: "bg-indigo-500/15 text-indigo-300",
+  contacted: "bg-violet-500/15 text-violet-300",
+  opened: "bg-cyan-500/15 text-cyan-300",
+  replied: "bg-teal-500/15 text-teal-300",
+  interested: "bg-emerald-500/15 text-emerald-300",
+  meeting: "bg-amber-500/15 text-amber-300",
+  won: "bg-emerald-500/25 text-emerald-200 border border-emerald-400/40",
+  lost: "bg-rose-500/15 text-rose-300",
+};
+
+export function crmStageLabel(v: string): string {
+  return CRM_STAGE_LABEL[v] ?? v;
+}
+
+export function crmStageBadge(v: string): string {
+  return CRM_STAGE_BADGE[v] ?? CRM_STAGE_BADGE.researched;
+}

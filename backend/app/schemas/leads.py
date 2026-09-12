@@ -89,6 +89,11 @@ class LeadSummary(BaseModel):
     #: multi-tags. Stored in their own columns, independent of the research data.
     folder: str = ""
     tags: list[str] = Field(default_factory=list)
+    #: CRM pipeline (Phase E1): the lead's stage (new…won/lost) and the
+    #: user's next action. Default 'researched' — a stored dossier has by
+    #: definition been through research.
+    crm_status: str = "researched"
+    next_action: str = ""
 
 
 class FolderItem(BaseModel):
@@ -150,6 +155,38 @@ class OrganizeClearIn(BaseModel):
     value: str = Field("", description="folder/tag value to remove from every lead")
 
 
+class CrmIn(BaseModel):
+    """Body for ``PUT /api/v1/leads/{email}/crm`` — update a lead's CRM state.
+
+    Only the fields you send are touched (status / next_action / note).
+    ``status`` must be one of ``CRM_STATUSES``; ``next_action`` empty string
+    CLEARS it; ``note`` is appended to the immutable timeline.
+    """
+
+    status: str | None = Field(None, description="new pipeline stage (CRM_STATUSES)")
+    next_action: str | None = Field(None, description="the next step (empty clears)")
+    note: str = Field("", description="timeline note (appended, immutable)")
+
+
+class CrmEventOut(BaseModel):
+    """One timeline event (stage change / next-action / note — later: emails)."""
+
+    id: int
+    kind: str
+    detail: str
+    user_id: str = ""
+    username: str = ""
+    created_at: str = ""
+
+
+class CrmOut(BaseModel):
+    """GET /api/v1/leads/{email}/crm — the lead's full CRM state."""
+
+    crm_status: str = "researched"
+    next_action: str = ""
+    events: list[CrmEventOut] = Field(default_factory=list)
+
+
 class LeadDetail(BaseModel):
     """Full researched dossier for one lead (detail view)."""
 
@@ -170,3 +207,6 @@ class LeadDetail(BaseModel):
     created_at: str = ""
     folder: str = ""
     tags: list[str] = Field(default_factory=list)
+    #: CRM pipeline state (Phase E1) — stage + next action.
+    crm_status: str = "researched"
+    next_action: str = ""

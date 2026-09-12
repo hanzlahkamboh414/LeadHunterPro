@@ -101,6 +101,11 @@ export interface LeadSummary {
    * by a pipeline re-research. */
   folder: string;
   tags: string[];
+  /** CRM pipeline stage (Phase E1) — "researched" is the honest default: a
+   * stored dossier has by definition been through research. */
+  crm_status: string;
+  /** The user's next step on this lead (free text, empty = none). */
+  next_action: string;
 }
 
 /** One catalog folder — a persisted, clickable group (empty allowed). */
@@ -178,6 +183,51 @@ export interface LeadDetail {
   created_at: string;
   folder: string;
   tags: string[];
+  /** CRM pipeline state (Phase E1). */
+  crm_status: string;
+  next_action: string;
+}
+
+/** The CRM pipeline stages, in journey order (Phase E1). Must match
+ * backend `app.lead_research.models.CRM_STATUSES` exactly. */
+export const CRM_STAGES = [
+  "new",
+  "researched",
+  "qualified",
+  "contacted",
+  "opened",
+  "replied",
+  "interested",
+  "meeting",
+  "won",
+  "lost",
+] as const;
+
+export type CrmStage = (typeof CRM_STAGES)[number];
+
+/** One immutable timeline event on a lead (stage change / next action /
+ * note — email sends append here in Phase E3+). */
+export interface CrmEvent {
+  id: number;
+  kind: string;
+  detail: string;
+  user_id: string;
+  username: string;
+  created_at: string;
+}
+
+/** A lead's full CRM state (GET /leads/{email}/crm). */
+export interface CrmState {
+  crm_status: string;
+  next_action: string;
+  events: CrmEvent[];
+}
+
+/** PUT /leads/{email}/crm body — only the fields you send are touched. */
+export interface CrmInput {
+  status?: string;
+  next_action?: string;
+  note?: string;
 }
 
 export interface AdminJobSummary {

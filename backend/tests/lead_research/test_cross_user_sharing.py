@@ -242,6 +242,9 @@ def _record(name: str, email: str, domain: str) -> dict:
     return {
         "company_name": name,
         "source_url": f"https://{domain}",
+        # P2 trade gate: the gc-query tests below need records that fold to
+        # 'gc' — unlabeled records no longer serve to a trade-filtered run.
+        "trade_category": "general_contractor",
         "plan_holder": {"domain": domain,
                         "emails": [{"email": email}],
                         "person": {"name": ""}},
@@ -266,9 +269,12 @@ def test_discovery_never_serves_deleted_or_taken_from_cache(
     # theirs@y.com: alice's lead (exclusivity blocks it for bob).
     store.save(_mk("theirs@y.com"), user_id="alice")
     pending.add([
-        {"email": "deleted@x.com", "domain": "x.com", "location": "Texas"},
-        {"email": "theirs@y.com", "domain": "y.com", "location": "Texas"},
-        {"email": "fresh@z.com", "domain": "z.com", "location": "Texas"},
+        {"email": "deleted@x.com", "domain": "x.com", "location": "Texas",
+         "trade": "gc"},
+        {"email": "theirs@y.com", "domain": "y.com", "location": "Texas",
+         "trade": "gc"},
+        {"email": "fresh@z.com", "domain": "z.com", "location": "Texas",
+         "trade": "gc"},
     ])
 
     def _should_not_run(trade, location, limit, skip_pdfs=None,

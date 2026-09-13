@@ -29,6 +29,10 @@ def _record(company: str, email: str, domain: str) -> dict:
     return {
         "company_name": company,
         "source_url": "https://x.example",
+        # P2 trade gate: these runs query trade="gc" — records must carry gc
+        # evidence to be served (unlabeled records no longer serve to a
+        # trade-filtered run).
+        "trade_category": "general_contractor",
         "plan_holder": {
             "domain": domain,
             "emails": [{"email": email}],

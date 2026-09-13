@@ -162,10 +162,12 @@ def test_serial_intake_drops_user_rejected_company(monkeypatch, tmp_path):
     def _discover(trade, location, limit, skip_pdfs=None, yield_store=None, candidate_store=None):
         records = [
             {"company_name": "Rejected Co", "source_url": "https://x.example",
+             "trade_category": "general_contractor",  # P2: gc-query needs gc evidence
              "plan_holder": {"domain": "rejected.com",
                              "emails": [{"email": "no@rejected.com"}],
                              "person": {"name": ""}}},
             {"company_name": "Kept Co", "source_url": "https://x.example",
+             "trade_category": "general_contractor",  # P2: gc-query needs gc evidence
              "plan_holder": {"domain": "kept.com",
                              "emails": [{"email": "yes@kept.com"}],
                              "person": {"name": ""}}},
@@ -196,10 +198,12 @@ def test_serial_intake_drops_user_rejected_domain(monkeypatch, tmp_path):
     def _discover(trade, location, limit, skip_pdfs=None, yield_store=None, candidate_store=None):
         records = [
             {"company_name": "X Co", "source_url": "https://x.example",
+             "trade_category": "general_contractor",  # P2: gc-query needs gc evidence
              "plan_holder": {"domain": "rejected.com",
                              "emails": [{"email": "no@rejected.com"}],
                              "person": {"name": ""}}},
             {"company_name": "Y Co", "source_url": "https://x.example",
+             "trade_category": "general_contractor",  # P2: gc-query needs gc evidence
              "plan_holder": {"domain": "kept.com",
                              "emails": [{"email": "yes@kept.com"}],
                              "person": {"name": ""}}},
@@ -248,10 +252,12 @@ def test_streaming_intake_never_researches_rejected_lead(monkeypatch, tmp_path):
     def _discover(trade, location, limit, skip_pdfs=None, yield_store=None, candidate_store=None):
         records = [
             {"company_name": "Rejected Co", "source_url": "https://x.example",
+             "trade_category": "general_contractor",  # P2: gc-query needs gc evidence
              "plan_holder": {"domain": "rejected.com",
                              "emails": [{"email": "no@rejected.com"}],
                              "person": {"name": ""}}},
             {"company_name": "Kept Co", "source_url": "https://x.example",
+             "trade_category": "general_contractor",  # P2: gc-query needs gc evidence
              "plan_holder": {"domain": "kept.com",
                              "emails": [{"email": "yes@kept.com"}],
                              "person": {"name": ""}}},

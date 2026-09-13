@@ -23,6 +23,10 @@ def _record(company: str, email: str, domain: str, person: str = "") -> dict:
     return {
         "company_name": company,
         "source_url": "https://x.example",
+        # P2 trade gate: these runs query trade="gc" — records must carry gc
+        # evidence to be served (unlabeled records no longer serve to a
+        # trade-filtered run).
+        "trade_category": "general_contractor",
         "plan_holder": {
             "domain": domain,
             "emails": [{"email": email}],
@@ -590,11 +594,15 @@ def test_discovery_serves_cache_first_without_searching(monkeypatch, tmp_path):
     db = str(tmp_path / "leads.db")
     pending = PendingLeadsStore(db_path=db)
     dossiers = LeadResearchStore(db_path=db)
-    # Pre-stock the cache with surplus leads from a previous run.
+    # Pre-stock the cache with surplus leads from a previous run (P2: carry
+    # the trade — a gc query no longer serves unlabeled cached rows).
     pending.add([
-        {"email": "a@x.com", "domain": "x.com", "company": "A", "location": "Texas"},
-        {"email": "b@y.com", "domain": "y.com", "company": "B", "location": "Texas"},
-        {"email": "c@z.com", "domain": "z.com", "company": "C", "location": "Texas"},
+        {"email": "a@x.com", "domain": "x.com", "company": "A", "location": "Texas",
+         "trade": "gc"},
+        {"email": "b@y.com", "domain": "y.com", "company": "B", "location": "Texas",
+         "trade": "gc"},
+        {"email": "c@z.com", "domain": "z.com", "company": "C", "location": "Texas",
+         "trade": "gc"},
     ])
 
     # If discovery is called, that means the cache was NOT used — fail.
@@ -678,10 +686,15 @@ def test_discovery_excludes_researched_and_purges_cache(monkeypatch, tmp_path):
         person=PersonFindings(name="Amy", role="Owner", bound=True, role_relevance=True),
         potential_score=8.0, recommendation="contact_now",
     ))
+    # P2: the gc query needs gc-labelled cache rows to serve (unlabeled rows
+    # no longer serve to a trade-filtered run).
     pending.add([
-        {"email": "a@x.com", "domain": "x.com", "company": "A", "location": "Texas"},
-        {"email": "b@y.com", "domain": "y.com", "company": "B", "location": "Texas"},
-        {"email": "c@z.com", "domain": "z.com", "company": "C", "location": "Texas"},
+        {"email": "a@x.com", "domain": "x.com", "company": "A", "location": "Texas",
+         "trade": "gc"},
+        {"email": "b@y.com", "domain": "y.com", "company": "B", "location": "Texas",
+         "trade": "gc"},
+        {"email": "c@z.com", "domain": "z.com", "company": "C", "location": "Texas",
+         "trade": "gc"},
     ])
     assert pending.count() == 3
 
@@ -1325,7 +1338,8 @@ def test_discovery_filters_seen_domains_before_probe(monkeypatch):
         # Capture which records actually reached conversion (the probe stage).
         reached.append([r.get("website") for r in records])
         return ([{"email": "b@beta.co", "domain": "beta.co", "company": "Beta",
-                  "person": "", "source_url": "https://beta.co"}],
+                  "person": "", "source_url": "https://beta.co",
+                  "trade": "gc"}],  # P2: gc-query serve gate needs the trade
                 {"plan_emails": 0, "probed": 1, "with_email": 1, "dup_plan": 0,
                  "no_email": 0})
 
@@ -1375,7 +1389,8 @@ def test_plan_holder_rows_bypass_seen_domains_gate(monkeypatch):
         return ([{"email": r["plan_holder"]["emails"][0]["email"],
                   "domain": r["plan_holder"]["domain"],
                   "company": r["company_name"], "person": "",
-                  "source_url": r.get("source_url", "")}
+                  "source_url": r.get("source_url", ""),
+                  "trade": "gc"}  # P2: gc-query serve gate needs the trade
                  for r in records if r.get("plan_holder")],
                 {"plan_emails": 2, "probed": 0, "with_email": 2, "dup_plan": 0,
                  "no_email": 0})

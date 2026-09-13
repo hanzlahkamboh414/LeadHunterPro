@@ -1825,10 +1825,21 @@ class PendingLeadsStore:
 
     def take(
         self, count: int, location: str = "", *, cooldown_seconds: int = 0,
+        trade: str = "",
     ) -> list[dict]:
         """Return up to ``count`` pending leads (oldest first), filtered by
-        ``location`` when given. Leads stay in pending until ``remove`` — so a
-        research failure keeps the lead available for a future retry.
+        ``location`` when given and by ``trade`` when given. Leads stay in
+        pending until ``remove`` — so a research failure keeps the lead
+        available for a future retry.
+
+        TRADE GATE (big-bang P2 — the "drywall search showed GC data" fix):
+        when ``trade`` is a canonical slug, ONLY rows of that trade are
+        served. Rows of OTHER trades stay in their own pool for their own
+        consumers; ``trade = ''`` rows (honest unknown) are never served to
+        a trade-filtered run — an unknown trade is not this trade, and
+        serving it would be the exact cross-trade leak this fixes. An empty
+        ``trade`` argument means NO gate (the caller could not fold its
+        searched trade — fail-open, never starve on a labeling gap).
 
         ``dead`` leads are EXCLUDED: a confirmed dead-domain address can never
         be served again as a recurring "Skip" (the user's complaint). The row
@@ -1861,6 +1872,11 @@ class PendingLeadsStore:
                 "FROM pending_leads WHERE dead = 0 AND gated = 0"
             )
             args = []
+        if trade:
+            # Canonical-slug gate (see docstring): other-trade and unknown-
+            # trade rows stay in their pools for their own consumers.
+            sql += " AND trade = ?"
+            args.append(trade)
         if since is not None:
             sql += (
                 " AND (attempted_at IS NULL"

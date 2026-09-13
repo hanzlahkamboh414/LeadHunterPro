@@ -469,6 +469,19 @@ def _find_site_email(discover: Callable[[str], Any], url: str) -> str:
     return emails[0]
 
 
+def _fold_record_trade(record: dict) -> str:
+    """Fold a discovery record's trade to a canonical slug (P2) — the
+    record's OWN evidence only, strongest first: the classifier/source
+    label, then the company name. The name fallback is the SAME weak
+    evidence the P1 boot backfill uses, so a row's trade is identical
+    whether it is read fresh here or by the backfill after a later boot.
+    '' = honest unknown (no gate exception — see the trade gate)."""
+    return (
+        normalize_trade(record.get("trade_category", ""))
+        or normalize_trade(record.get("company_name", ""))
+    )
+
+
 def company_records_to_leads(
     records: list[dict],
     *,
@@ -530,7 +543,7 @@ def company_records_to_leads(
             # source-native) folds to a canonical slug here so it flows into
             # the pending cache — previously DROPPED at exactly this seam
             # (the cross-trade leak's root cause #2). '' = honest unknown.
-            "trade": normalize_trade(record.get("trade_category", "")),
+            "trade": _fold_record_trade(record),
         }
 
     if candidates:
@@ -581,7 +594,7 @@ def extract_email_leads(records: list[dict]) -> list[dict]:
                     # surfaced this lead's PDF, for working-lead credit.
                     "_discovery_dork": rec.get("_discovery_dork", ""),
                     # P1 trade routing (same fold as the website lane above).
-                    "trade": normalize_trade(rec.get("trade_category", "")),
+                    "trade": _fold_record_trade(rec),
                 }
             )
     return leads
@@ -683,6 +696,12 @@ def discover_until_target(
     pass_log: list[dict] = []
     from_cache = 0
     stale_purged = 0
+    # P2 trade routing: the SEARCHED trade, folded once. '' = the search names
+    # no canonical trade (admin free text outside the 14) — fail-open, NO gate
+    # (a labeling gap must never starve a run). Non-empty = every serve below
+    # (cache and fresh) is this trade ONLY; other-trade discoveries are stocked
+    # into their own pools for their own consumers, never shown here.
+    search_trade = normalize_trade(query.trade)
 
     # Confirmed-dead emails — filtered out of FRESH discovery too, so a dead
     # address that a live source happens to surface again is never re-researched
@@ -756,7 +775,7 @@ def discover_until_target(
         # keeps to reach the target without running live discovery.
         cached = pending_store.take(
             max(target * 2, 20), location=query.location,
-            cooldown_seconds=cooldown_seconds,
+            cooldown_seconds=cooldown_seconds, trade=search_trade,
         )
         for l in cached:
             # RESEARCHED STALE ROWS: the user's "same result every run" flood is
@@ -933,10 +952,23 @@ def discover_until_target(
 
         # Stock the discovery cache with ALL fresh leads, so any surplus is
         # reusable on a later run without paying for the same search again.
+        # Cross-trade leads are stocked too (P2 pools): a drywall search that
+        # surfaces GC companies keeps them for a GC consumer — never wastes
+        # them, never shows them here.
         if pending_store is not None:
             pending_store.add([{**l, "location": loc} for l in fresh])
 
-        for l in fresh:
+        # TRADE GATE (P2): when the search names a canonical trade, only that
+        # trade's fresh leads SERVE this run — the "drywall search showed GC
+        # data" fix. Unknown-trade ('') leads are stocked above but not
+        # served: an unknown trade is not this trade. Counted honestly so the
+        # pass log shows exactly where the discovery went.
+        trade_matching = [
+            l for l in fresh if not search_trade or l.get("trade") == search_trade
+        ]
+        trade_stocked_other = len(fresh) - len(trade_matching)
+
+        for l in trade_matching:
             if len(leads) >= target:
                 break
             seen.add((l["email"], l["domain"]))
@@ -954,7 +986,11 @@ def discover_until_target(
             "with_email": disco_stats.get("with_email", 0),
             "dup_plan": disco_stats.get("dup_plan", 0),
             "no_email": disco_stats.get("no_email", 0),
-            "new_leads": len(fresh),
+            # P2 honest counting: new_leads = SERVED this pass (this run's
+            # trade only); trade_stocked_other = fresh leads banked into OTHER
+            # trades' pools (never shown to this run — pool currency, not loss).
+            "new_leads": len(trade_matching),
+            "trade_stocked_other": trade_stocked_other,
             "non_client_drops": non_client_drops,
             "total_leads": len(leads),
             "elapsed_s": round(time.monotonic() - t0, 1),
@@ -968,10 +1004,15 @@ def discover_until_target(
         pass_log.append(entry)
         if emit:
             suffix = f" [exhausted — {entry['reason']}]" if exhausted else ""
+            pools_note = (
+                f", {trade_stocked_other} banked to other-trade pool(s)"
+                if trade_stocked_other else ""
+            )
             emit(
                 "discovery", pass_idx + 1, max_passes,
                 f"pass {pass_idx + 1}: trade={trade!r} loc={loc!r} "
-                f"[{entry['status']}] new={len(fresh)} total={len(leads)}{suffix}",
+                f"[{entry['status']}] new={len(trade_matching)} "
+                f"total={len(leads)}{pools_note}{suffix}",
                 data=entry,
             )
         if exhausted:
@@ -1608,6 +1649,9 @@ def _run_full_streaming(
     # intake gates below drop deleted emails and emails owned by another user
     # ("ak lead sirf ak user ko"; a deleted lead never resurfaces for anyone).
     deleted_pool, taken_pool = _intake_pools(store, user_id)
+    # P2 trade routing: the SEARCHED trade, folded once — same gate as the
+    # serial twin. '' = search names no canonical trade -> NO gate (fail-open).
+    search_trade = normalize_trade(query.trade)
 
     def _claim_next(batch: int) -> dict | None:
         """Return one NOT-already-claimed pending lead (peek-not-pop guarded).
@@ -1617,11 +1661,14 @@ def _run_full_streaming(
         makes each claim exclusive. Takes a window of ``batch`` and returns the
         first row no other consumer has claimed, or None when every row in the
         window is already in flight (or the buffer is empty).
+
+        TRADE GATE (P2): the take is trade-filtered, so only this run's trade
+        is claimable — other-trade buffer rows stay banked in their pools.
         """
         with write_lock:
             rows = pending_store.take(
                 batch, location=query.location,
-                cooldown_seconds=cooldown_seconds,
+                cooldown_seconds=cooldown_seconds, trade=search_trade,
             )
         for r in rows:
             # DELETE-SUPPRESSION: a deleted lead is never claimed, and its
@@ -1864,24 +1911,44 @@ def _run_full_streaming(
                 # same filter (a plan-holder record carries none by itself).
                 for l in fresh:
                     l["location"] = l.get("location") or query.location
+                # TRADE GATE (P2, streaming twin of the serial serve gate): ALL
+                # fresh leads are banked into the buffer (other-trade rows are
+                # pool currency for their own consumers), but only THIS trade's
+                # rows are claimable — so only they count as run progress. A
+                # cross-trade-only pass must not reset the dry-sweep/plateau
+                # guards (it feeds the pools, not this run).
+                trade_matching = [
+                    l for l in fresh
+                    if not search_trade or l.get("trade") == search_trade
+                ]
                 if fresh:
-                    got_new = True
                     with write_lock:
                         pending_store.add(fresh)  # -> the buffer
                     if emit:
+                        other = len(fresh) - len(trade_matching)
                         emit(
                             "discovery", pass_idx + 1, 1,
-                            f"+{len(fresh)} lead(s) buffered",
-                            data={"fresh": len(fresh), "trade": trade,
+                            f"+{len(trade_matching)} lead(s) buffered"
+                            + (f" ({other} banked to other-trade pools)"
+                               if other else ""),
+                            data={"fresh": len(fresh),
+                                  "trade_served": len(trade_matching),
+                                  "trade_banked_other": other,
+                                  "trade": trade,
                                   "location": loc,
                                   "status": status.value,
                                   "pass": pass_idx + 1, "round": rounds + 1},
                         )
+                if trade_matching:
+                    got_new = True
                 pass_log.append({
                     "pass": pass_idx + 1, "round": rounds + 1,
                     "trade": trade, "location": loc,
                     "status": status.value, "records": len(records),
                     "fresh": len(fresh),
+                    # P2 honest split: served-to-this-run vs banked to pools.
+                    "fresh_served": len(trade_matching),
+                    "fresh_banked_other": len(fresh) - len(trade_matching),
                 })
                 # Give consumers a beat to research the just-buffered wave
                 # before the plateau check reads their verdicts — this makes

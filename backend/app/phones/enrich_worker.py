@@ -7,7 +7,8 @@ Each pass:
 1. picks a small batch of CLAIMED-but-unenriched phone leads (a lead
    nobody owns has nobody waiting on its email),
 2. enriches each via :func:`app.phones.enrich.enrich_lead` (web search for
-   the official site + crawl for emails — free, no AI),
+   the official site + crawl for emails; when the crawl finds none, the P5
+   pattern-inference stage asks the company's mail server — free, no AI),
 3. stamps the outcome on the lead (found email, or the honest miss), and
 4. feeds every FOUND email into the emails vertical's pending-leads cache
    so email-vertical users are served it through their normal research
@@ -157,7 +158,9 @@ class PhoneEnrichmentWorker:
             "person": lead.get("person_name", ""),
             "source_url": outcome.get("website", "") or lead.get("source_url", ""),
             "location": location,
-            "dork": "phone_enrichment",
+            # The lane tag: "phone_enrichment" (literally seen on the site)
+            # or "pattern_inference" (P5 — mail-server-confirmed permutation).
+            "dork": outcome.get("dork", "") or "phone_enrichment",
             "trade": lead.get("trade", ""),
         }])
 

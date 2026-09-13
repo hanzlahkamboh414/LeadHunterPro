@@ -1,9 +1,11 @@
-"""Enrichment engine contracts — hermetic (search + fetch faked).
+"""Enrichment engine contracts — hermetic (search + fetch + inference faked).
 
 The engine's job is one honest mapping: phone lead -> the company's OWN
-website -> emails literally on it. These tests pin the honesty rules
-(aggregator results are listings, not the company; junk addresses are
-dropped; a miss is '') and the reuse seams (§14 — parser, fetch, search).
+website -> emails literally on it; and when the crawl finds none, the P5
+pattern-inference stage (faked here — the real one talks SMTP). These tests
+pin the honesty rules (aggregator results are listings, not the company;
+junk addresses are dropped; a miss is '') and the reuse seams (§14 —
+parser, fetch, search).
 """
 
 from __future__ import annotations
@@ -17,6 +19,11 @@ class _Page:
     def __init__(self, text: str = "", ok: bool = True):
         self.ok = ok
         self.text = text
+
+
+def _no_infer(person, site):
+    """Hermetic stand-in for the P5 engine: never verifies anything."""
+    return {"email": "", "reason": "no_mx"}
 
 
 def _lead(business="Acme GC", **kw):
@@ -38,9 +45,11 @@ def test_finds_email_on_homepage():
     def fetch(url, **kw):
         return _Page("<p>Email info@acmegc.com or call today</p>")
 
-    out = enrich_lead(_lead(), search_fn=search, fetch_fn=fetch)
+    out = enrich_lead(_lead(), search_fn=search, fetch_fn=fetch,
+                      infer_fn=_no_infer)
     assert out == {"email": "info@acmegc.com", "email_source": "website",
-                   "website": "https://acmegc.com"}
+                   "website": "https://acmegc.com",
+                   "dork": "phone_enrichment"}
     assert calls["search"] == 1  # one search, not a loop
 
 
@@ -88,7 +97,7 @@ def test_aggregator_results_are_not_the_company():
             "https://www.yelp.com/biz/acme", "https://facebook.com/acme",
             "https://acmegc.com",
         ],
-        fetch_fn=fetch,
+        fetch_fn=fetch, infer_fn=_no_infer,
     )
     assert out["website"] == "https://acmegc.com"
     assert out["email"] == ""  # honest miss on the real site
@@ -97,8 +106,10 @@ def test_aggregator_results_are_not_the_company():
 def test_no_website_is_an_honest_miss():
     out = enrich_lead(
         _lead(), search_fn=lambda q, n: [], fetch_fn=lambda u, **k: _Page(),
+        infer_fn=_no_infer,
     )
-    assert out == {"email": "", "email_source": "", "website": ""}
+    assert out == {"email": "", "email_source": "", "website": "",
+                   "dork": ""}
 
 
 def test_no_email_on_site_is_an_honest_miss():
@@ -108,6 +119,7 @@ def test_no_email_on_site_is_an_honest_miss():
         _lead(),
         search_fn=lambda q, n: ["https://acmegc.com"],
         fetch_fn=lambda u, **k: _Page("<p>We do great work</p>"),
+        infer_fn=_no_infer,
     )
     assert out["email"] == "" and out["email_source"] == ""
     assert out["website"] == "https://acmegc.com"
@@ -149,6 +161,83 @@ def test_no_business_name_no_search():
         return ["https://x.com"]
 
     out = enrich_lead(_lead(business=""), search_fn=search,
-                      fetch_fn=lambda u, **k: _Page())
-    assert out == {"email": "", "email_source": "", "website": ""}
+                      fetch_fn=lambda u, **k: _Page(), infer_fn=_no_infer)
+    assert out == {"email": "", "email_source": "", "website": "",
+                   "dork": ""}
     assert calls["n"] == 0  # nothing to search for — no wasted query
+
+
+# -- stage 2: the P5 pattern-inference fallback --------------------------------
+
+
+def test_inference_fills_the_miss_with_a_verified_permutation():
+    """Crawl finds nothing -> the mail-server-confirmed permutation wins,
+    tagged so the emails-vertical feed knows which lane produced it."""
+
+    def infer(person, site):
+        assert person == "Jane Smith" and site == "https://acmegc.com"
+        return {"email": "jane.smith@acmegc.com", "reason": "verified"}
+
+    out = enrich_lead(
+        _lead(),
+        search_fn=lambda q, n: ["https://acmegc.com"],
+        fetch_fn=lambda u, **k: _Page("<p>We do great work</p>"),
+        infer_fn=infer,
+    )
+    assert out == {
+        "email": "jane.smith@acmegc.com",
+        "email_source": "pattern_inference",
+        "website": "https://acmegc.com",
+        "dork": "pattern_inference",
+    }
+
+
+def test_inference_miss_is_still_an_honest_miss():
+    """Catch-all / greylist / no-MX from the engine: '' with the site kept."""
+
+    def infer(person, site):
+        return {"email": "", "reason": "catch_all"}
+
+    out = enrich_lead(
+        _lead(),
+        search_fn=lambda q, n: ["https://acmegc.com"],
+        fetch_fn=lambda u, **k: _Page("<p>We do great work</p>"),
+        infer_fn=infer,
+    )
+    assert out == {"email": "", "email_source": "",
+                   "website": "https://acmegc.com", "dork": ""}
+
+
+def test_no_person_name_skips_inference():
+    """Nothing to permutate without a person — no inference call at all."""
+    calls = {"n": 0}
+
+    def infer(person, site):
+        calls["n"] += 1
+        return {"email": "x@y.z", "reason": "verified"}
+
+    out = enrich_lead(
+        _lead(person_name=""),
+        search_fn=lambda q, n: ["https://acmegc.com"],
+        fetch_fn=lambda u, **k: _Page("<p>We do great work</p>"),
+        infer_fn=infer,
+    )
+    assert out["email"] == "" and out["website"] == "https://acmegc.com"
+    assert calls["n"] == 0
+
+
+def test_crawl_email_beats_inference():
+    """An address literally SEEN on the site is stronger evidence than a
+    server-confirmed permutation — the crawl stage's answer stands."""
+
+    def infer(person, site):
+        return {"email": "jane.smith@acmegc.com", "reason": "verified"}
+
+    out = enrich_lead(
+        _lead(),
+        search_fn=lambda q, n: ["https://acmegc.com"],
+        fetch_fn=lambda u, **k: _Page("<p>Email info@acmegc.com</p>"),
+        infer_fn=infer,
+    )
+    assert out["email"] == "info@acmegc.com"
+    assert out["email_source"] == "website"

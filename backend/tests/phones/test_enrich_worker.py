@@ -154,3 +154,31 @@ def test_batch_size_bounds_one_pass(stores):
     )
     stats = worker.run_once()
     assert stats["considered"] == 3
+
+
+def test_pattern_inference_lane_feeds_the_emails_vertical(stores):
+    """A P5-verified email (dork=pattern_inference) feeds the pending cache
+    under its OWN lane tag — the feed stays honest about where it came from."""
+    phone_store, pending_store = stores
+    phone_store.add([_rec("5031110001")])
+    phone_store.serve("gc", "", "", 10, "alice")
+
+    worker = PhoneEnrichmentWorker(
+        phone_store, pending_store,
+        enrich=lambda l: {
+            "email": "jane.smith@acmegc.com",
+            "email_source": "pattern_inference",
+            "website": "https://acmegc.com",
+            "dork": "pattern_inference",
+        },
+    )
+    stats = worker.run_once()
+    assert stats["found"] == 1 and stats["fed_to_emails"] == 1
+    cached = pending_store.get("jane.smith@acmegc.com")
+    assert cached is not None
+    assert cached["dork"] == "pattern_inference"
+
+    # And the phone lead's owner sees it on their own row, source-tagged.
+    mine = phone_store.list_owned("alice")
+    assert mine[0]["email"] == "jane.smith@acmegc.com"
+    assert mine[0]["email_source"] == "pattern_inference"

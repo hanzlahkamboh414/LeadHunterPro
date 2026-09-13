@@ -9,12 +9,15 @@ one). This module closes that gap with the company's OWN website:
 
 Honesty rules (CLAUDE.md §1/§12):
 
-* Only emails LITERALLY SEEN on the company's own pages are returned — a
-  page on Yelp/Facebook is a listing, not the company; an invented
-  ``first.last@domain`` pattern guess is NOT returned here (that is P5's
-  pattern-inference engine, which will carry its own verification).
-* No findable website / no email on it  ->  empty outcome, honestly ''.
-  Never a placeholder, never a filler.
+* Only emails LITERALLY SEEN on the company's own pages are returned by the
+  crawl stage — a page on Yelp/Facebook is a listing, not the company.
+* When the crawl finds nothing, the P5 pattern-inference engine runs as a
+  SECOND stage on the same site: the standard ``first.last@domain``
+  permutations for the lead's person, verified against the company's own
+  mail server (MX + RCPT, no message ever sent). Only an address the
+  server CONFIRMS is returned — still an answer, never a guess.
+* No findable website, no email on it, and no verified permutation  ->  an
+  empty outcome, honestly ''. Never a placeholder, never a filler.
 
 Everything is injected (search_fn / fetch_fn) so tests stay hermetic; the
 production defaults reuse the platform's existing seams (§14): the search
@@ -31,6 +34,7 @@ from urllib.parse import urlparse
 
 from app.crawlers.html_parser import HTMLParser
 from app.discovery.sources._http import fetch as _default_fetch
+from app.email.pattern_inference import infer_verified_email
 
 logger = logging.getLogger(__name__)
 
@@ -123,20 +127,26 @@ def enrich_lead(
     *,
     search_fn: Callable[[str, int], list[str]] | None = None,
     fetch_fn: Callable[..., Any] | None = None,
+    infer_fn: Callable[[str, str], dict[str, Any]] | None = None,
 ) -> dict[str, str]:
-    """Find one phone lead's email; return ``{email, email_source, website}``.
+    """Find one phone lead's email; return ``{email, email_source, website,
+    dork}``.
 
     ``email`` is '' when nothing findable — an honest miss, never a guess.
-    ``website'' is recorded even without an email: it is the provenance of
-    the attempt and the input P5's pattern-inference engine will need.
+    ``email_source`` says HOW it was found: ``website`` (literally seen on
+    the company's own page) or ``pattern_inference`` (the mail server
+    confirmed the permutation). ``dork`` tags the emails-vertical feed lane.
+    ``website`` is recorded even without an email: it is the provenance of
+    the attempt and the input P5's pattern-inference engine needs.
     """
     search = search_fn or _default_search
     do_fetch = fetch_fn or _default_fetch
+    do_infer = infer_fn or infer_verified_email
     parser = HTMLParser()
 
     business = (lead.get("business_name") or "").strip()
     if not business:
-        return {"email": "", "email_source": "", "website": ""}
+        return {"email": "", "email_source": "", "website": "", "dork": ""}
 
     query = f'"{business}"'
     city = (lead.get("city") or "").strip().title()
@@ -153,7 +163,7 @@ def enrich_lead(
             "enrich %r: no official website among %d result(s) — honest miss",
             business, len(urls),
         )
-        return {"email": "", "email_source": "", "website": ""}
+        return {"email": "", "email_source": "", "website": "", "dork": ""}
 
     # Homepage first, then up to two contact-ish pages on the same host.
     emails: list[str] = []
@@ -179,13 +189,35 @@ def enrich_lead(
             break
 
     email = _pick_best_email(emails, site)
-    if not email:
+    if email:
+        return {
+            "email": email,
+            "email_source": "website",
+            "website": site,
+            "dork": "phone_enrichment",
+        }
+
+    # Stage 2 (P5): the site is real but shows no email — ask the company's
+    # own mail server about the standard permutations for this person. Only
+    # a server-CONFIRMED address passes (MX + RCPT, catch-all aware, no
+    # message ever sent); everything else is an honest miss with a reason.
+    person = (lead.get("person_name") or "").strip()
+    if person:
+        inferred = do_infer(person, site)
+        if inferred.get("email"):
+            return {
+                "email": inferred["email"],
+                "email_source": "pattern_inference",
+                "website": site,
+                "dork": "pattern_inference",
+            }
         logger.info(
-            "enrich %r: website %s reachable but no email on it — honest miss",
-            business, site,
+            "enrich %r: pattern inference %s — honest miss",
+            business, inferred.get("reason", "unknown"),
         )
-    return {
-        "email": email,
-        "email_source": "website" if email else "",
-        "website": site,
-    }
+    else:
+        logger.info(
+            "enrich %r: website %s shows no email and the lead carries no "
+            "person name to infer from — honest miss", business, site,
+        )
+    return {"email": "", "email_source": "", "website": site, "dork": ""}

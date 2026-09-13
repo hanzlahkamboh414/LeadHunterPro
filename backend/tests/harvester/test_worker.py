@@ -161,6 +161,17 @@ def test_phones_lane_prefers_demanded_pair(tmp_path):
     assert worker._pick_phone_pair() == ("roofing", "WA")
 
 
+def test_phones_lane_state_demand_boosts_whole_state(tmp_path):
+    """P7.5: a trade-less search records a STATE-level demand row (trade='')
+    — its weight boosts EVERY covered pair of that state, so 'TX, 100
+    numbers' raises the whole state's stocking, any trade."""
+    worker = _worker(tmp_path)
+    worker._store.record_demand("", "TX")
+    slug, state = worker._pick_phone_pair()
+    assert state == "TX"
+    assert TRADE_COVERAGE[slug]["TX"] == "tdlr_license"
+
+
 def test_phones_lane_pair_cooldown_blocks_reharvest(tmp_path):
     """A pair harvested just now is inside the cooldown — with EVERY pair
     cooled down there is no candidate, and the lane skips honestly."""

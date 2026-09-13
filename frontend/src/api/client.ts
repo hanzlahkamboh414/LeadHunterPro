@@ -38,6 +38,7 @@ import type {
   LinkedInSearchResult,
   PhoneLead,
   PhonePoolStats,
+  PhoneSaved,
   PhoneSearchResult,
   SignupCategory,
 } from "../types";
@@ -379,12 +380,12 @@ export const api = {
     );
   },
 
-  // Phones vertical (P3) -------------------------------------------------
-  /** Serve phone leads: pool first (instant), live license-board gap-fill.
-   *  The response carries honest telemetry — what came from the pool vs the
-   *  network, and why if fewer than the target could be served. */
+  // Phones vertical (P3, calling workflow P7.5) --------------------------
+  /** Serve phone leads: instant pure-SQL serve from the harvester's pool.
+   *  Trade is OPTIONAL since P7.5 — state + quantity is the whole form; a
+   *  trade-less search serves the pool's mixed trades. */
   phoneSearch(input: {
-    trade: string;
+    trade?: string;
     state?: string;
     city?: string;
     target: number;
@@ -396,7 +397,7 @@ export const api = {
     });
   },
 
-  /** The caller's own (exclusively claimed) phone leads. */
+  /** The caller's own (exclusively claimed) call-sheet leads. */
   phoneLeads(filter: { trade?: string; state?: string; city?: string } = {}): Promise<PhoneLead[]> {
     const params = new URLSearchParams();
     if (filter.trade) params.set("trade", filter.trade);
@@ -404,6 +405,54 @@ export const api = {
     if (filter.city) params.set("city", filter.city);
     const qs = params.toString();
     return request<PhoneLead[]>(`/phones/leads${qs ? `?${qs}` : ""}`);
+  },
+
+  /** ✓Lead — person said "project doonga": snapshot to My Leads, retire
+   *  the number for good (never served to anyone else, never re-harvested). */
+  phoneMarkLead(leadId: number): Promise<{ saved_id: number; retired: boolean }> {
+    return request(`/phones/leads/${leadId}/lead`, { method: "POST" });
+  },
+
+  /** ☎Voicemail — park the number (14/30/60-day tiers); it recirculates
+   *  to the shared rotation after the cooldown; a 4th voicemail retires it. */
+  phoneMarkVoicemail(
+    leadId: number
+  ): Promise<{ retired: boolean; voicemail_count: number; cooldown_days: number }> {
+    return request(`/phones/leads/${leadId}/voicemail`, { method: "POST" });
+  },
+
+  /** 💾Store — keep the contact (row stays claimed on the call sheet). */
+  phoneStoreContact(leadId: number): Promise<{ saved_id: number; retired: boolean }> {
+    return request(`/phones/leads/${leadId}/store`, { method: "POST" });
+  },
+
+  /** 📝Note — save a note against a call-sheet lead (auto-stores a contact). */
+  phoneNoteLead(leadId: number, note: string): Promise<{ saved_id: number; retired: boolean }> {
+    return request(`/phones/leads/${leadId}/note`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ note }),
+    });
+  },
+
+  /** My Leads + My Contacts — the caller's saved rows, notes included. */
+  phoneSaved(kind?: "lead" | "contact"): Promise<PhoneSaved[]> {
+    const qs = kind ? `?kind=${kind}` : "";
+    return request<PhoneSaved[]>(`/phones/saved${qs}`);
+  },
+
+  /** Edit the note on a saved lead/contact row. */
+  phoneSetSavedNote(savedId: number, note: string): Promise<{ ok: boolean }> {
+    return request(`/phones/saved/${savedId}/note`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ note }),
+    });
+  },
+
+  /** Delete a saved lead/contact (the caller's own row only). */
+  phoneDeleteSaved(savedId: number): Promise<{ ok: boolean }> {
+    return request(`/phones/saved/${savedId}`, { method: "DELETE" });
   },
 
   /** The shared pool's honest inventory (totals + per-trade/state + mine). */

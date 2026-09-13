@@ -181,11 +181,20 @@ class HarvesterWorker:
         floor, then the longest-since-harvested. Pairs inside the cooldown
         window are skipped; a pair whose pool is at/over the floor AND has
         no demand is not worth a fetch at all.
+
+        P7.5: trade-less searches record STATE-level demand rows (trade='').
+        Their weight boosts EVERY covered pair of that state — a phone user
+        who asks for "TX, 100 numbers" is pulling all trades at once, so
+        the whole state's stocking rises to meet them.
         """
         now = self._now()
+        rows = self._store.top_demand(200)
         demand = {
-            (d["trade"], d["state"]): d["weight"]
-            for d in self._store.top_demand(200)
+            (d["trade"], d["state"]): d["weight"] for d in rows
+        }
+        state_demand = {
+            d["state"]: d["weight"]
+            for d in rows if not d["trade"] and d["state"]
         }
         candidates: list[tuple[float, int, str, str, str]] = []
         for slug in sorted(TRADE_COVERAGE):
@@ -198,7 +207,8 @@ class HarvesterWorker:
                     continue
                 deficit = self._min_pool_floor - self._phone_store.unclaimed_count(
                     slug, state)
-                weight = demand.get((slug, state), 0.0)
+                weight = (demand.get((slug, state), 0.0)
+                          + state_demand.get(state, 0.0))
                 if deficit <= 0 and weight <= 0:
                     continue
                 candidates.append((weight, deficit, last, slug, state))

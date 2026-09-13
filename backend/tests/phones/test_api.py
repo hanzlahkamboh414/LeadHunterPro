@@ -200,3 +200,141 @@ def test_email_fields_flow_to_the_api(client, make_user, tmp_stores):
     assert leads[0]["email_source"] == "website"
     assert leads[0]["website"] == "https://acme.com"
     assert leads[0]["email_status"] == "found"
+
+
+# ---------------------------------------------------------------------------
+# P7.5 — the calling workflow endpoints
+# ---------------------------------------------------------------------------
+
+def test_trade_less_search_is_the_default_flow(client, make_user, tmp_stores):
+    """The P7.5 form: state + quantity only. No trade key at all — the pool
+    serves mixed trades, coverage = anything stocking the state."""
+    _, phone_store = tmp_stores
+    phone_store.add([
+        {"phone": "5031110001", "person_name": "SMITH, JANE",
+         "business_name": "GC Co", "trade_category": "GENERAL",
+         "city": "SEATTLE", "state": "WA", "source": "wa_license",
+         "license_status": "ACTIVE", "source_url": "https://data.wa.gov/x"},
+        {"phone": "5031110002", "person_name": "SMITH, JANE",
+         "business_name": "Paint Co", "trade_category": "PAINTING/WALLCOVERING",
+         "city": "SEATTLE", "state": "WA", "source": "wa_license",
+         "license_status": "ACTIVE", "source_url": "https://data.wa.gov/x"},
+    ])
+    user = make_user("caller", category="phones")
+    headers = {"Authorization": f"Bearer {_token(user)}"}
+    resp = client.post("/api/v1/phones/search", headers=headers,
+                       json={"state": "WA", "target": 5})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["served_from_pool"] == 2
+    assert body["coverage"] == ["wa_license"]
+    trades = {l["trade"] for l in body["leads"]}
+    assert trades == {"gc", "painting"}  # mixed sheet, each row labelled
+    assert all("voicemail_count" in l for l in body["leads"])
+
+
+def test_calling_workflow_actions_end_to_end(client, make_user, tmp_stores):
+    """✓Lead / ☎Voicemail / 💾Store / 📝Note + My Leads/Contacts CRUD, over
+    HTTP exactly as the screen drives them."""
+    _, phone_store = tmp_stores
+    _stock(phone_store, 2)
+    user = make_user("caller", category="phones")
+    bob = make_user("rival", category="phones")
+    headers = {"Authorization": f"Bearer {_token(user)}"}
+    bob_headers = {"Authorization": f"Bearer {_token(bob)}"}
+
+    # 1) Trade-less search -> 2 numbers on the sheet.
+    resp = client.post("/api/v1/phones/search", headers=headers,
+                       json={"state": "WA", "target": 2}).json()
+    leads = client.get("/api/v1/phones/leads", headers=headers).json()
+    assert len(leads) == 2
+
+    # 2) ☎Voicemail on the first: parked 14 days, released off the sheet.
+    vm = client.post(f"/api/v1/phones/leads/{resp['leads'][0]['id']}/voicemail",
+                     headers=headers)
+    assert vm.status_code == 200
+    assert vm.json() == {"retired": False, "voicemail_count": 1,
+                         "cooldown_days": 14}
+    assert len(client.get("/api/v1/phones/leads", headers=headers).json()) == 1
+
+    # 3) 💾Store on the second: saved as a contact, stays claimed.
+    st = client.post(f"/api/v1/phones/leads/{resp['leads'][1]['id']}/store",
+                     headers=headers).json()
+    assert st["retired"] is False
+    assert len(client.get("/api/v1/phones/leads", headers=headers).json()) == 1
+
+    # 4) 📝Note on the remaining sheet lead: auto-stored contact + note.
+    sheet = client.get("/api/v1/phones/leads", headers=headers).json()
+    nt = client.post(f"/api/v1/phones/leads/{sheet[0]['id']}/note",
+                     headers=headers, json={"note": "call Tuesday"})
+    assert nt.status_code == 200
+
+    # 5) ✓Lead on it: snapshot saved, number retired for good.
+    ld = client.post(f"/api/v1/phones/leads/{sheet[0]['id']}/lead",
+                     headers=headers).json()
+    assert ld["retired"] is True
+    assert client.get("/api/v1/phones/leads", headers=headers).json() == []
+    # The retired number is suppressed: even the harvester's add() refuses.
+    counts = phone_store.add([{
+        "phone": resp["leads"][1]["phone"], "person_name": "SMITH, JANE",
+        "business_name": "Acme GC", "trade_category": "GENERAL",
+        "city": "SEATTLE", "state": "WA", "source": "wa_license",
+        "license_status": "ACTIVE", "source_url": "https://data.wa.gov/x",
+    }])
+    assert counts["suppressed"] == 1
+
+    # 6) My Leads / My Contacts: the saved rows, notes editable, deletable.
+    #    (The 📝Note upserted the SAME contact row the earlier 💾Store made —
+    #    saved rows are keyed by (user, phone, kind), so one number is one
+    #    contact per user, refreshed — never duplicated.)
+    saved = client.get("/api/v1/phones/saved", headers=headers).json()
+    kinds = sorted(s["kind"] for s in saved)
+    assert kinds == ["contact", "lead"]
+    contact = next(s for s in saved if s["kind"] == "contact")
+    assert contact["note"] == "call Tuesday"
+    saved_leads = client.get("/api/v1/phones/saved?kind=lead",
+                             headers=headers).json()
+    assert len(saved_leads) == 1
+    target = next(s for s in saved if s["kind"] == "lead")
+    ok = client.put(f"/api/v1/phones/saved/{target['id']}/note",
+                    headers=headers, json={"note": "project in October"})
+    assert ok.status_code == 200
+    assert client.get("/api/v1/phones/saved?kind=lead",
+                      headers=headers).json()[0]["note"] == "project in October"
+    # Another user's saved rows are invisible — and undeletable.
+    assert client.get("/api/v1/phones/saved", headers=bob_headers).json() == []
+    assert client.delete(f"/api/v1/phones/saved/{target['id']}",
+                         headers=bob_headers).status_code == 404
+    assert client.delete(f"/api/v1/phones/saved/{target['id']}",
+                         headers=headers).status_code == 200
+    assert len(client.get("/api/v1/phones/saved?kind=lead",
+                          headers=headers).json()) == 0
+
+
+def test_actions_require_ownership_and_category(client, make_user, tmp_stores):
+    """The action endpoints are owner-only (404 for anyone else's lead) and
+    the category gate covers the whole calling workflow, not just search."""
+    _, phone_store = tmp_stores
+    _stock(phone_store)
+    alice = make_user("alice", category="phones")
+    bob = make_user("bob", category="phones")
+
+    a_headers = {"Authorization": f"Bearer {_token(alice)}"}
+    b_headers = {"Authorization": f"Bearer {_token(bob)}"}
+    lead = client.post("/api/v1/phones/search", headers=a_headers,
+                       json={"state": "WA", "target": 1}).json()["leads"][0]
+
+    # Bob (a phones user, but NOT the owner) cannot act on alice's lead.
+    for action in ("lead", "voicemail", "store"):
+        resp = client.post(f"/api/v1/phones/leads/{lead['id']}/{action}",
+                           headers=b_headers)
+        assert resp.status_code == 404
+    # ...and the row is untouched — still alice's, still on her sheet.
+    assert len(client.get("/api/v1/phones/leads", headers=a_headers).json()) == 1
+
+    # An emails-only account is gated out of the calling workflow too.
+    emailer = make_user("emailer", category="emails")
+    e_headers = {"Authorization": f"Bearer {_token(emailer)}"}
+    assert client.post(f"/api/v1/phones/leads/{lead['id']}/voicemail",
+                       headers=e_headers).status_code == 403
+    assert client.get("/api/v1/phones/saved", headers=e_headers).status_code == 403

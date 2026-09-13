@@ -57,7 +57,10 @@ def _rec(phone: str, business: str = "Acme", trade: str = "GENERAL",
 def test_add_folds_trade_and_dedups(tmp_path):
     store = PhoneLeadsStore(db_path=str(tmp_path / "phones.db"))
     counts = store.add([_rec("5039573452"), _rec("5039573452")])
-    assert counts == {"inserted": 1, "duplicate": 1, "dropped_bad_phone": 0}
+    assert counts["inserted"] == 1
+    assert counts["duplicate"] == 1
+    assert counts["dropped_bad_phone"] == 0
+    assert counts["suppressed"] == 0  # P7.5: banned-number counter (honest 0)
     leads = store.serve("gc", "", "", 10, "u1")
     assert len(leads) == 1
     assert leads[0]["trade"] == "gc"          # P1 fold at ingest

@@ -94,6 +94,18 @@ def covered_sources(slug: str, state: str = "") -> list[str]:
     return sorted(coverage.values())
 
 
+def state_sources(state: str) -> list[str]:
+    """Source ids covering a STATE at all, across every trade (P7.5's
+    trade-less search: the user picks state + quantity only, so coverage
+    means "some license board stocks this state" — any trade)."""
+    st = (state or "").strip().upper()
+    if not st:
+        return sorted({src for m in TRADE_COVERAGE.values()
+                       for src in m.values()})
+    return sorted({src for m in TRADE_COVERAGE.values()
+                   for s, src in m.items() if s == st})
+
+
 def _soql_quote(value: str) -> str:
     """Escape a SoQL string literal (single quotes doubled)."""
     return value.replace("'", "''")

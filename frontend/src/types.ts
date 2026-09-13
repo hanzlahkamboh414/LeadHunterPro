@@ -552,6 +552,30 @@ export interface PhoneLead {
   email_source: string;
   website: string;
   email_status: "pending" | "found" | "none";
+  /** Calling workflow (P7.5): voicemails this number has drawn so far. */
+  voicemail_count: number;
+}
+
+/** A saved phone row (✓Lead or 💾Store output) — a full snapshot that
+ *  survives the pool row's retirement, plus the caller's note. */
+export interface PhoneSaved {
+  id: number;
+  phone: string;
+  person_name: string;
+  business_name: string;
+  trade: string;
+  city: string;
+  state: string;
+  source: string;
+  source_url: string;
+  license_status: string;
+  email: string;
+  email_source: string;
+  website: string;
+  kind: "lead" | "contact";
+  note: string;
+  created_at: string;
+  updated_at: string;
 }
 
 /** POST /phones/search — the served leads + honest harvest telemetry. */

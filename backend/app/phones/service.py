@@ -10,6 +10,13 @@ the user's expense; stocking is the harvester's job now). No source covers
 the trade = an honest "no coverage" reason, never fake results (CLAUDE.md
 §1). The search itself records demand (P6 hook), so the very shortfall the
 user saw is the signal that stocks the pair for their next search.
+
+P7.5: phone users search TRADE-LESS — state + quantity only (calling is
+about volume, not trades). The serve is the pool's fail-open slug='' path
+(mixed trades, each row carries its own trade); coverage for a trade-less
+search means "some source stocks this state", and the demand hook records
+a trade='' STATE-level row so the harvester boosts every covered pair of
+that state.
 """
 
 from __future__ import annotations
@@ -18,7 +25,7 @@ import logging
 from typing import Any
 
 from app.discovery.tradefold import normalize_trade
-from app.phones.soda import covered_sources
+from app.phones.soda import covered_sources, state_sources
 from app.phones.store import PhoneLeadsStore
 
 logger = logging.getLogger(__name__)
@@ -46,18 +53,23 @@ def phone_search(
             "stocked_new": 0,        # (the harvester, not the search, stocks)
             "banked_other_trade": 0,
             "dropped_bad_phone": 0,
-            "coverage": [...],       # source ids that (could) cover this trade
+            "coverage": [...],       # sources that (could) cover this search
             "reason": "",            # honest shortfall/coverage reason
         }
     """
     slug = normalize_trade(trade)
     # Fail-open (the P2 rule): a search trade that folds to '' has no gate —
-    # the pool can still serve whatever it happens to hold.
+    # the pool serves whatever it holds, mixed trades, each row labelled.
     target = max(1, min(target, 5000))
     state = (state or "").strip().upper()[:2]
     city = (city or "").strip()
 
     leads = store.serve(slug, state, city, target, user_id)
+    if slug:
+        coverage = covered_sources(slug, state)
+    else:
+        # Trade-less search (P7.5): coverage = anything stocking this state.
+        coverage = state_sources(state)
     outcome: dict[str, Any] = {
         "leads": leads,
         "served_from_pool": len(leads),
@@ -67,7 +79,7 @@ def phone_search(
         "stocked_new": 0,
         "banked_other_trade": 0,
         "dropped_bad_phone": 0,
-        "coverage": covered_sources(slug, state),
+        "coverage": coverage,
         "reason": "",
     }
     logger.info(
@@ -79,17 +91,17 @@ def phone_search(
     if len(leads) >= target:
         return outcome
 
-    if not outcome["coverage"]:
+    if not coverage:
         outcome["reason"] = (
             f"no phone source covers trade '{trade}'"
-            + (f" in {state}" if state else " in any state")
-            + " yet — pool served what it had"
-        )
+            if slug else f"no phone source covers {state or 'any state'} yet"
+        ) + " — pool served what it had"
     else:
-        # The demand hook (P6) already recorded this trade×state, so the
-        # harvester's next pass stocks exactly this pair.
+        # The demand hook (P6) already recorded this search, so the
+        # harvester's next pass stocks exactly this gap.
+        what = "trade+state pair" if slug else "state"
         outcome["reason"] = (
             f"pool served {len(leads)}/{target} — the background harvester "
-            f"is stocking this trade+state pair; try again in a few minutes"
+            f"is stocking this {what}; try again in a few minutes"
         )
     return outcome

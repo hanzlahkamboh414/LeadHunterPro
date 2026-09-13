@@ -452,6 +452,11 @@ class LeadResearchStore:
         B must still see the lead on their dashboard. INSERT ... SELECT
         guards existence — an unknown email is an honest False, never a
         dangling owner row. Returns True when a NEW owner row was created.
+
+        Deliberately PERMISSIVE (legacy sharing semantics — the admin-assign
+        path and pre-exclusivity junction rows rely on it). The race-guarded
+        variant is :meth:`serve_shared`'s private claim, which requires the
+        dossier to still be ownerless.
         """
         if not user_id:
             return False
@@ -465,6 +470,101 @@ class LeadResearchStore:
         conn.commit()
         conn.close()
         return cur.rowcount > 0
+
+    def serve_shared(
+        self, count: int, *, trade: str = "", location: str = "",
+        user_id: str = "",
+    ) -> list[LeadDossier]:
+        """P7 instant serve: hand out SHARED, already-researched dossiers.
+
+        The harvester (P6) stocks dossiers with ``user_id=''`` — researched
+        inventory that nobody owns yet. A user's search claims up to
+        ``count`` of those INSTANTLY (pure SQL + an ownership mark, zero AI
+        spend) instead of starting discovery from zero. Only genuinely
+        shared rows qualify: ``user_id=''``, not hidden, and NO owner row at
+        all — another user's claim is exclusivity ("ak lead sirf ak user
+        ko"), and the caller's own earlier claim is "already have it", not
+        new working data for this run's target.
+
+        ``trade`` is a canonical slug (the caller folds it; '' = no gate,
+        the P2 fail-open rule). ``location`` matching is STATE-LEVEL and
+        fail-open: a dossier's ``company.location`` is free-text research
+        evidence, so both sides fold through
+        :func:`app.harvester.store.state_from_location` — a KNOWN mismatch
+        skips the row, an unparsable side never starves the serve.
+
+        Visible-only: every candidate re-gates through
+        :func:`~app.lead_research.scoring.regate_recommendation` (the same
+        read-time gate as the leads page) — a stale stored recommendation
+        can never be served as a working lead. The claim itself is a private
+        race-guarded INSERT (an ownerless-only variant of :meth:`add_owner`):
+        two users serving the same row concurrently, exactly one wins — the
+        claim only lands while the dossier still has NO owner at all.
+        """
+        from app.harvester.store import state_from_location
+        from app.lead_research.scoring import regate_recommendation
+
+        if count <= 0 or not user_id:
+            return []
+        want_state = state_from_location(location)
+        sql = (
+            "SELECT d.email, d.dossier_json FROM dossiers d "
+            "WHERE d.user_id = '' AND d.hidden = 0 "
+            "AND (d.potential_score IS NULL OR d.potential_score >= 3.0) "
+            "AND NOT EXISTS (SELECT 1 FROM dossier_owners o "
+            "                WHERE o.email_hash = d.email_hash)"
+        )
+        args: list[Any] = []
+        if trade:
+            sql += " AND d.trade = ?"
+            args.append(trade)
+        # A generous window: re-gating + state folding can reject most of it.
+        sql += " ORDER BY d.updated_at ASC LIMIT ?"
+        args.append(count * 4 + 25)
+        conn = self._conn()
+        rows = conn.execute(sql, args).fetchall()
+        conn.close()
+
+        def _claim(email: str) -> bool:
+            """Atomically stamp ``user_id`` as the dossier's owner — but only
+            while it still has NO owner row (the serve_shared candidature).
+            INSERT ... WHERE NOT EXISTS is one statement, so a concurrent
+            claimant's INSERT makes ours insert nothing: exactly one wins."""
+            eh = _email_hash(email)
+            conn = self._conn()
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO dossier_owners (email_hash, user_id) "
+                "SELECT d.email_hash, ? FROM dossiers d "
+                "WHERE d.email_hash = ? "
+                "AND NOT EXISTS (SELECT 1 FROM dossier_owners o "
+                "                WHERE o.email_hash = d.email_hash)",
+                (user_id, eh),
+            )
+            conn.commit()
+            conn.close()
+            return cur.rowcount > 0
+
+        served: list[LeadDossier] = []
+        for email, dossier_json in rows:
+            if len(served) >= count:
+                break
+            d = LeadDossier.from_dict(json.loads(dossier_json))
+            if regate_recommendation(d) == "skip":
+                continue
+            if want_state:
+                have_state = state_from_location(d.company.location or "")
+                if have_state and have_state != want_state:
+                    continue
+            if not _claim(email):
+                continue  # lost the race — another user claimed it first
+            served.append(d)
+        if served:
+            logger.info(
+                "instant serve: %d shared dossier(s) claimed for %s "
+                "(trade=%r location=%r)",
+                len(served), user_id, trade, location,
+            )
+        return served
 
     def get(self, email: str) -> LeadDossier | None:
         """Retrieve a dossier by email."""

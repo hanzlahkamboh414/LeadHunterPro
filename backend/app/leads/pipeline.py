@@ -28,7 +28,7 @@ import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable
 from urllib.parse import urlparse
 
@@ -1372,6 +1372,72 @@ def run_research(
 # Full run — both phases, one call.
 # ---------------------------------------------------------------------------
 
+def _entry_from_dossier(d: Any) -> dict[str, Any]:
+    """A run-result entry built directly from a stored dossier — the same
+    shape run_research produces (plus an ``instant`` marker), so the job
+    feed / frontend needs no special case for served-from-pool leads."""
+    return {
+        "email": d.email,
+        "domain": d.domain,
+        "company": d.company.name,
+        "person": d.person.name,
+        "bound": d.person.bound,
+        "score": d.potential_score,
+        "recommendation": d.recommendation,
+        "intent": d.intent.needs_estimation if d.intent else "",
+        "timing": d.timing.window if d.timing else "",
+        "sources_checked": d.sources_checked,
+        "elapsed_s": 0.0,
+        # Instant-served dossiers were re-gated VISIBLE at serve time and
+        # are new-to-this-user (no prior owner) — genuine working output.
+        "working": True,
+        "instant": True,
+    }
+
+
+def _instant_serve(
+    query: "ResearchQuery",
+    emit: EmitFn | None = None,
+    store: Any | None = None,
+    pending_store: Any | None = None,
+    user_id: str = "",
+) -> list[dict[str, Any]]:
+    """P7 Phase 0: claim SHARED already-researched dossiers instantly.
+
+    :meth:`LeadResearchStore.serve_shared` does the SQL + the race-guarded
+    ownership claim; this helper turns each claimed dossier into a result
+    entry (auto-filed into the run's folder/tags, removed from the pending
+    buffer so discovery never re-surfaces it) and emits it through the
+    normal ``research`` phase so the live feed shows it like any lead.
+    """
+    served = store.serve_shared(
+        query.target_emails,
+        trade=normalize_trade(query.trade), location=query.location,
+        user_id=user_id,
+    )
+    entries: list[dict[str, Any]] = []
+    for i, d in enumerate(served, 1):
+        # AUTO-FILE AT SERVE TIME — the same policy as research-save time,
+        # so instant leads never sit unfiled in the inbox.
+        if query.folder or query.search_name:
+            store.set_meta(
+                d.email, folder=query.folder,
+                tags=[query.search_name] if query.search_name else [],
+            )
+        if pending_store is not None:
+            pending_store.remove([d.email])
+        entry = _entry_from_dossier(d)
+        entries.append(entry)
+        if emit:
+            emit(
+                "research", i, len(served),
+                f"lead {i}/{len(served)}: {d.email} -> INSTANT "
+                f"(already researched in the shared pool)",
+                email=d.email, data=entry,
+            )
+    return entries
+
+
 def run_full(
     query: ResearchQuery,
     emit: EmitFn | None = None,
@@ -1456,6 +1522,38 @@ def run_full(
             "working_leads": 0,
         }
 
+    # PHASE 0 (P7 instant serve): claim SHARED, already-researched dossiers
+    # FIRST — pure SQL + an ownership mark, zero AI spend. The harvester
+    # (P6) stocks that pool around the clock; a user's search now serves
+    # from it instantly. Pool alone fulfils the target -> the run IS
+    # instant (no discovery, no research). Partial fulfilment -> discovery
+    # only chases the REMAINDER.
+    original_query = query
+    instant: list[dict[str, Any]] = []
+    if store is not None and user_id:
+        instant = _instant_serve(
+            query, emit=emit, store=store, pending_store=pending_store,
+            user_id=user_id,
+        )
+        if len(instant) >= query.target_emails:
+            return {
+                "query": query.describe(),
+                "trade": query.trade,
+                "location": query.location,
+                "target_emails": query.target_emails,
+                "leads_found": len(instant),
+                "discovery_passes": [],
+                "results": instant,
+                "working_leads": len(instant),
+                "requested": query.target_emails,
+                "shortfall": 0,
+                "shortfall_reason": "",
+                "instant_served": len(instant),
+            }
+        if instant:
+            # Discovery chases only the remainder of the ORIGINAL target.
+            query = replace(query, target_emails=query.target_emails - len(instant))
+
     # PHASE D — streaming producer/consumer. When a real persistence store AND a
     # real discovery cache are present AND research runs concurrently, run_full
     # switches to the continuous pipeline: a producer thread streams freshly
@@ -1469,11 +1567,26 @@ def run_full(
     from app.core.config import settings as _cfg
     if (pending_store is not None and store is not None
             and max(1, _cfg.LEADS_CONCURRENCY) > 1):
-        return _run_full_streaming(
+        outcome = _run_full_streaming(
             query, emit=emit, cancel=cancel, store=store, paused=paused,
             pending_store=pending_store, cooldown_seconds=cooldown_seconds,
             user_id=user_id,
         )
+        if instant:
+            # Merge the instant serve back on top: the run's real delivery is
+            # instant pool leads + freshly discovered ones, measured against
+            # the ORIGINAL target.
+            outcome["results"] = instant + outcome["results"]
+            outcome["working_leads"] = (
+                int(outcome.get("working_leads") or 0) + len(instant))
+            outcome["leads_found"] = len(outcome["results"])
+            outcome["shortfall"] = max(
+                0, original_query.target_emails - outcome["working_leads"])
+            outcome["target_emails"] = original_query.target_emails
+            outcome["requested"] = original_query.target_emails
+            outcome["query"] = original_query.describe()
+        outcome["instant_served"] = len(instant)
+        return outcome
 
     pass_log: list[dict] = []
     results: list[dict] = []
@@ -1521,18 +1634,26 @@ def run_full(
     else:
         shortfall_reason = "max_topup_rounds_reached"
 
+    if instant:
+        # Merge the instant serve back on top: the run's real delivery is
+        # instant pool leads + freshly discovered ones, measured against the
+        # ORIGINAL target.
+        results = instant + results
+        working += len(instant)
+
     return {
-        "query": query.describe(),
+        "query": original_query.describe(),
         "trade": query.trade,
         "location": query.location,
-        "target_emails": query.target_emails,
+        "target_emails": original_query.target_emails,
         "leads_found": len(results),
         "discovery_passes": pass_log,
         "results": results,
         "working_leads": working,
-        "requested": query.target_emails,
-        "shortfall": max(0, query.target_emails - working),
+        "requested": original_query.target_emails,
+        "shortfall": max(0, original_query.target_emails - working),
         "shortfall_reason": shortfall_reason,
+        "instant_served": len(instant),
     }
 
 

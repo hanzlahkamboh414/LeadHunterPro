@@ -54,22 +54,18 @@ def client(tmp_stores, tmp_path, monkeypatch):
         activity_module, "_activity_store",
         ActivityStore(db_path=str(tmp_path / "users.db")),
     )
-
-    # Hermetic: the SODA fetcher returns one WA gc row.
-    from app.discovery.sources.status import SourceStatus
-    from app.phones import service as phones_service
-
-    def _fake_fetch(source_id, slug, city="", limit=200):
-        records = [{
-            "phone": "5031110001", "person_name": "SMITH, JANE",
-            "business_name": "Acme GC", "trade_category": "GENERAL",
-            "city": "SEATTLE", "state": "WA", "source": "wa_license",
-            "license_status": "ACTIVE", "source_url": "https://data.wa.gov/x",
-        }]
-        return SourceStatus.SUCCESS, records, {"source": source_id}
-
-    monkeypatch.setattr(phones_service, "fetch_license_records", _fake_fetch)
     return TestClient(app)
+
+
+def _stock(store: PhoneLeadsStore, n: int = 1) -> None:
+    """P7: the search is pure SQL — tests pre-stock the shared pool the way
+    the harvester does, instead of faking an in-request SODA fetch."""
+    store.add([{
+        "phone": f"503111000{i}", "person_name": "SMITH, JANE",
+        "business_name": "Acme GC", "trade_category": "GENERAL",
+        "city": "SEATTLE", "state": "WA", "source": "wa_license",
+        "license_status": "ACTIVE", "source_url": "https://data.wa.gov/x",
+    } for i in range(1, n + 1)])
 
 
 def _token(user) -> str:
@@ -111,10 +107,12 @@ def test_emails_only_account_gets_403(client, make_user):
     assert "Emails vertical only" in resp.json()["detail"]
 
 
-def test_phones_and_both_and_admin_pass_gate(client, make_user):
+def test_phones_and_both_and_admin_pass_gate(client, make_user, tmp_stores):
     """The gate lets phones/both/admin THROUGH (200). The lead itself is
     EXCLUSIVE — the first claimant owns it, later searches in this test
     honestly get 0 (the pool only had one row)."""
+    _, phone_store = tmp_stores
+    _stock(phone_store)
     served = []
     for username, category, admin in [
         ("phoner", "phones", False), ("bothr", "both", False), ("root", "", True),
@@ -132,7 +130,9 @@ def test_phones_and_both_and_admin_pass_gate(client, make_user):
 # search + leads + stats endpoints
 # ---------------------------------------------------------------------------
 
-def test_search_serves_and_records_activity(client, make_user):
+def test_search_serves_and_records_activity(client, make_user, tmp_stores):
+    _, phone_store = tmp_stores
+    _stock(phone_store)
     user = make_user("alice", category="phones")
     headers = {"Authorization": f"Bearer {_token(user)}"}
 
@@ -141,8 +141,11 @@ def test_search_serves_and_records_activity(client, make_user):
                              "target": 5})
     assert resp.status_code == 200
     body = resp.json()
-    assert body["fetched_live"] == 1
+    # P7: the serve is pure SQL — no in-request fetch, coverage still honest.
+    assert body["served_from_pool"] == 1
+    assert body["fetched_live"] == 0
     assert body["coverage"] == ["wa_license"]
+    assert "harvester" in body["reason"]
     lead = body["leads"][0]
     assert lead["phone"] == "+15031110001"
     assert lead["trade"] == "gc"
@@ -171,9 +174,11 @@ def test_requires_auth(client):
     assert resp.status_code == 401
 
 
-def test_email_fields_flow_to_the_api(client, make_user):
+def test_email_fields_flow_to_the_api(client, make_user, tmp_stores):
     """A freshly served lead is enrichment-pending; once the worker stamps a
     found email, both /phones/leads and a new search expose it honestly."""
+    _, phone_store = tmp_stores
+    _stock(phone_store)
     user = make_user("caller", category="phones")
     headers = {"Authorization": f"Bearer {_token(user)}"}
 

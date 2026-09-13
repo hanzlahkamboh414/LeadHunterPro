@@ -180,6 +180,13 @@ class LeadResearchStore:
         # Per-user data isolation. Empty string = pre-migration rows (admin
         # sees all).
         _add_column(conn, "dossiers", "user_id", "TEXT NOT NULL DEFAULT ''")
+        # Trade routing (big-bang P1): the lead's OWN canonical trade slug
+        # (tradefold.normalize_trade of the researched industry string) —
+        # written by save(), and lazy-backfilled once below from the
+        # evidence pre-P1 rows already carry. '' = honest "trade unknown":
+        # such rows are trade-agnostic for serving (fail-open), never a
+        # guess forced into one of the 14 buckets.
+        _add_column(conn, "dossiers", "trade", "TEXT NOT NULL DEFAULT ''")
         # Phase B.2 — first-class folder catalog. A folder is a persisted, clickable
         # group (empty folders included — "create the folder first, then move leads").
         # Names are also backfilled from dossiers on read, so folders that only ever
@@ -290,8 +297,37 @@ class LeadResearchStore:
             "ON crm_events (email_hash, id)"
         )
         self._backfill_filter_columns(conn)
+        self._backfill_trade_columns(conn)
         conn.commit()
         conn.close()
+
+    def _backfill_trade_columns(self, conn: sqlite3.Connection) -> None:
+        """Lazy trade backfill (big-bang P1): pre-P1 dossier rows get their
+        canonical trade from the evidence they ALREADY carry — the
+        researched ``company.industry`` string, folded through
+        ``tradefold.normalize_trade``.
+
+        Idempotence: only ``trade = ''`` rows are scanned; a row whose
+        industry folds to '' stays '' (honest unknown) and is simply
+        re-scanned on a later boot — a few thousand string folds, not even
+        a measurable cost. A corrupt legacy row never blocks boot.
+        """
+        from app.discovery.tradefold import normalize_trade
+
+        rows = conn.execute(
+            "SELECT email_hash, dossier_json FROM dossiers WHERE trade = ''"
+        ).fetchall()
+        for eh, payload in rows:
+            try:
+                d = LeadDossier.from_dict(json.loads(payload))
+            except (ValueError, TypeError):
+                continue  # a corrupt legacy row is not our job to fix here
+            trade = normalize_trade(d.company.industry)
+            if trade:
+                conn.execute(
+                    "UPDATE dossiers SET trade = ? WHERE email_hash = ?",
+                    (trade, eh),
+                )
 
     def _backfill_filter_columns(self, conn: sqlite3.Connection) -> None:
         """One-time (idempotent) pass that fills the persisted filter columns for
@@ -342,22 +378,29 @@ class LeadResearchStore:
 
     def save(self, dossier: LeadDossier, user_id: str = "") -> None:
         """Save or update a dossier (writes the persisted filter columns too)."""
+        from app.discovery.tradefold import normalize_trade
+
         eh = _email_hash(dossier.email)
         rec, score, bound = self._filter_values(dossier)
+        # The lead's OWN trade from its researched industry string (P1) —
+        # research evidence, refreshed on every re-research, never the
+        # SEARCHED trade of whichever run happened to save the row.
+        trade = normalize_trade(dossier.company.industry)
         conn = self._conn()
         conn.execute("""
             INSERT INTO dossiers (email_hash, email, domain, dossier_json,
                                   recommendation, potential_score, bound,
-                                  user_id, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                                  user_id, trade, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(email_hash) DO UPDATE SET
                 dossier_json = excluded.dossier_json,
                 recommendation = excluded.recommendation,
                 potential_score = excluded.potential_score,
                 bound = excluded.bound,
+                trade = excluded.trade,
                 updated_at = CURRENT_TIMESTAMP
         """, (eh, dossier.email, dossier.domain, json.dumps(dossier.to_dict()),
-              rec, score, bound, user_id))
+              rec, score, bound, user_id, trade))
         # Sharing (Phase 2): the researcher's own search surfaced this lead —
         # record the owner even when the upsert lands on another user's row
         # (two jobs racing the same email; the column keeps the FIRST owner,
@@ -1672,14 +1715,42 @@ class PendingLeadsStore:
         # ADVANCE past them — invisible to serving, exactly like ``dead``, same
         # additive guarded-ALTER pattern. Default 0 keeps old code compatible.
         _add_column(conn, "pending_leads", "gated", "INTEGER NOT NULL DEFAULT 0")
+        # Trade routing (big-bang P1): the lead's OWN canonical trade slug
+        # (tradefold). '' = unknown — served trade-agnostically (fail-open).
+        # Stocked by ``add`` from the lead dict's ``trade`` key (threaded by
+        # the pipeline from discovery records); P2's ``take(trade=...)`` will
+        # serve from it. Pre-P1 rows are lazily backfilled below from the
+        # company name — the only trade evidence a cached row carries.
+        _add_column(conn, "pending_leads", "trade", "TEXT NOT NULL DEFAULT ''")
+        self._backfill_pending_trade(conn)
         conn.commit()
         conn.close()
+
+    @staticmethod
+    def _backfill_pending_trade(conn: sqlite3.Connection) -> None:
+        """Lazy trade backfill for cached rows saved before the column
+        existed: fold the company NAME through the normalizer ("XYZ Drywall
+        Inc" -> drywall). Weak evidence, so honestly '' when nothing
+        clearly matches — never a guess. Idempotent (''-only scan; the
+        unmappable tail is re-scanned each boot at negligible cost)."""
+        from app.discovery.tradefold import normalize_trade
+
+        rows = conn.execute(
+            "SELECT email_hash, company FROM pending_leads WHERE trade = ''"
+        ).fetchall()
+        for eh, company in rows:
+            trade = normalize_trade(company or "")
+            if trade:
+                conn.execute(
+                    "UPDATE pending_leads SET trade = ? WHERE email_hash = ?",
+                    (trade, eh),
+                )
 
     def get(self, email: str) -> dict | None:
         eh = _email_hash(email)
         conn = self._conn()
         row = conn.execute(
-            "SELECT email, domain, company, person, source_url, location, dork "
+            "SELECT email, domain, company, person, source_url, location, dork, trade "
             "FROM pending_leads WHERE email_hash = ?", (eh,)
         ).fetchone()
         conn.close()
@@ -1688,7 +1759,7 @@ class PendingLeadsStore:
         return {
             "email": row[0], "domain": row[1], "company": row[2],
             "person": row[3], "source_url": row[4], "location": row[5],
-            "dork": row[6],
+            "dork": row[6], "trade": row[7],
         }
 
     def add(self, leads: list[dict]) -> int:
@@ -1728,10 +1799,14 @@ class PendingLeadsStore:
                 )
                 continue
             eh = _email_hash(email)
+            # P1: discovery's folded trade label (tradefold.normalize_trade of
+            # the record's trade_category — wired in leads.pipeline) stocks the
+            # trade column; '' = honest unknown (P2's trade gate treats it as
+            # not-this-trade, never serves it cross-trade).
             conn.execute("""
                 INSERT INTO pending_leads
-                    (email_hash, email, domain, company, person, source_url, location, dork)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (email_hash, email, domain, company, person, source_url, location, dork, trade)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(email_hash) DO UPDATE SET location = excluded.location
             """, (
                 eh, email,
@@ -1741,6 +1816,7 @@ class PendingLeadsStore:
                 lead.get("source_url", ""),
                 lead.get("location", ""),
                 lead.get("dork", "") or lead.get("_discovery_dork", ""),
+                lead.get("trade", ""),
             ))
             added += 1
         conn.commit()
@@ -1775,13 +1851,13 @@ class PendingLeadsStore:
         conn = self._conn()
         if location:
             sql = (
-                "SELECT email, domain, company, person, source_url, location, dork "
+                "SELECT email, domain, company, person, source_url, location, dork, trade "
                 "FROM pending_leads WHERE location = ? AND dead = 0 AND gated = 0"
             )
             args: list[Any] = [location]
         else:
             sql = (
-                "SELECT email, domain, company, person, source_url, location, dork "
+                "SELECT email, domain, company, person, source_url, location, dork, trade "
                 "FROM pending_leads WHERE dead = 0 AND gated = 0"
             )
             args = []
@@ -1816,7 +1892,7 @@ class PendingLeadsStore:
             served.append(
                 {"email": r[0], "domain": r[1], "company": r[2],
                  "person": r[3], "source_url": r[4], "location": r[5],
-                 "dork": r[6]},
+                 "dork": r[6], "trade": r[7]},
             )
         if gated_emails:
             # Persist the advance so the NEXT take() window starts AFTER the

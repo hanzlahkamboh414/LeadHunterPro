@@ -42,6 +42,7 @@ from app.discovery.query_expansion import (
 )
 from app.discovery.sources.plan_holder_source import PlanHolderSource
 from app.discovery.sources.status import SourceStatus
+from app.discovery.tradefold import normalize_trade
 from app.discovery.yield_learning import segment_key
 from app.company_profile import get_profile
 
@@ -525,6 +526,11 @@ def company_records_to_leads(
             "source_url": record.get("source_url") or website,
             # Layer-1 dork attribution (Phase G), passed through for credit.
             "_discovery_dork": record.get("_discovery_dork", ""),
+            # P1 trade routing: the record's trade label (classifier or
+            # source-native) folds to a canonical slug here so it flows into
+            # the pending cache — previously DROPPED at exactly this seam
+            # (the cross-trade leak's root cause #2). '' = honest unknown.
+            "trade": normalize_trade(record.get("trade_category", "")),
         }
 
     if candidates:
@@ -574,6 +580,8 @@ def extract_email_leads(records: list[dict]) -> list[dict]:
                     # Layer-1 dork attribution (Phase G): the dork template that
                     # surfaced this lead's PDF, for working-lead credit.
                     "_discovery_dork": rec.get("_discovery_dork", ""),
+                    # P1 trade routing (same fold as the website lane above).
+                    "trade": normalize_trade(rec.get("trade_category", "")),
                 }
             )
     return leads

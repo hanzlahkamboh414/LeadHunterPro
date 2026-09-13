@@ -150,7 +150,12 @@ def test_sender_selfcheck_open_not_counted(tmp_path, monkeypatch):
     c = _make_campaign(ctx, emails=["a@x.com"])
     ctx["sched"].run_once()
     row = _sent_row(ctx, c["id"], "a@x.com")
-    # No backdating: sent_at is 'now', the fetch is within the grace.
+    # The scheduler's fake Clock is frozen at a FIXED NOW, but the pixel
+    # endpoint stamps REAL wall-clock time — comparing the two made this
+    # test pass only in the 5 minutes after 04:00 UTC each day (a
+    # time-bomb). Backdate sent_at to the REAL now so "just sent" is
+    # measured against the same clock the fire uses.
+    _backdate(ctx, row["id"], sent_at=_ago(0))
 
     anon = TestClient(app)
     r = anon.get(f"/api/v1/campaigns/track/{pixel_token(row['id'])}.png")

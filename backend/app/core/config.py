@@ -162,6 +162,26 @@ class Settings(BaseSettings):
     # verdict), so searches stay under budget. 0 = unlimited (old behavior).
     MAX_ACTIVE_JOBS: int = 4
 
+    # P6 background harvester — the 24/7 stocker (big-bang plan). One
+    # daemon pass every HARVESTER_INTERVAL_S under admission control (it
+    # only works when user searches leave pipeline budget spare): the
+    # phones lane stocks trade×state pools with free license-board SODA
+    # fetches, the emails lane runs harvest-time AI research (SHARED
+    # dossiers, user_id='') — but ONLY for pairs users have actually
+    # searched, so the AI lane never spends without a demand signal. Daily
+    # quotas are the big-bang numbers: 5,000 stocked phone rows and 2,000
+    # researched email leads per day. HARVESTER_ENABLED=false is the dev
+    # kill-switch (set in the local .env so a dev machine never spends).
+    HARVESTER_ENABLED: bool = True
+    HARVESTER_INTERVAL_S: float = 300.0
+    HARVEST_PHONE_BATCH: int = 250
+    HARVEST_EMAIL_BATCH: int = 25
+    HARVEST_PAIR_COOLDOWN_S: float = 21600.0  # one pair every 6h max
+    HARVEST_MIN_POOL_FLOOR: int = 100         # per trade×state pool target
+    HARVEST_STALENESS_DAYS: int = 30
+    DAILY_PHONE_QUOTA: int = 5000
+    DAILY_EMAIL_QUOTA: int = 2000
+
     # Optional lightweight auth for the Leads API (M12 baseline). When set,
     # requests must carry `X-API-Key: <key>`. When empty, the Leads API is
     # open (localhost/dev). Full user auth is a later phase.

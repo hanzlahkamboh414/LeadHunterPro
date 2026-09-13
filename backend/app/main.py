@@ -60,6 +60,19 @@ async def lifespan(app: FastAPI):
     except Exception:  # noqa: BLE001 — an enricher failure must not kill the app
         logger.exception("phone enrichment worker failed to start — continuing")
 
+    # Background harvester (P6): one daemon thread that stocks the trade×state
+    # phone pools (free license-board fetches) and runs demand-gated email
+    # research with the spare admission-control budget (SHARED dossiers, so
+    # any user's later search serves them instantly). Same rule — lifespan,
+    # never import time, so pytest never spawns a real harvest loop.
+    harvester = None
+    try:
+        from app.harvester.worker import get_worker as get_harvester
+        harvester = get_harvester()
+        harvester.start()
+    except Exception:  # noqa: BLE001 — a harvester failure must not kill the app
+        logger.exception("background harvester failed to start — continuing")
+
     # The sweep is the startup block; yield hands control to the app until it
     # shuts down.
     yield
@@ -67,6 +80,8 @@ async def lifespan(app: FastAPI):
         scheduler.stop()
     if enricher is not None:
         enricher.stop()
+    if harvester is not None:
+        harvester.stop()
 
 
 app = FastAPI(

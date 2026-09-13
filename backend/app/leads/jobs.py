@@ -322,6 +322,16 @@ class JobManager:
             self._active_jobs += 1
             return True
 
+    def active_count(self) -> int:
+        """How many pipelines hold an ACTIVE slot right now.
+
+        The P6 harvester's admission control reads this: the background
+        stocker stays out of the way while live user searches fill the
+        pipeline budget.
+        """
+        with self._lock:
+            return self._active_jobs
+
     def recover_orphans(self) -> int:
         """Mark jobs stuck in a live state as failed (root-cause fix).
 

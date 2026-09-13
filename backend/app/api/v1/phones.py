@@ -151,6 +151,18 @@ def search(
         body.city, outcome["served_from_pool"], outcome["fetched_live"],
         outcome["stocked_new"],
     )
+    # P6 demand signal: what users search for is what the harvester stocks.
+    # Telemetry only — the hook is guarded so a harvester hiccup can never
+    # fail a user's search (the same rule as the LinkedIn byproduct).
+    try:
+        from app.discovery.tradefold import normalize_trade
+        from app.harvester.store import record_demand_safe
+        record_demand_safe(
+            normalize_trade(body.trade) or body.trade.strip().lower(),
+            body.state,
+        )
+    except Exception:  # noqa: BLE001 — demand telemetry must never break a search
+        logger.exception("harvester demand hook failed — search continues")
     get_activity().record(
         user.id, user.username, "phone_search",
         detail=f"{body.trade} · {body.state or 'any'} · {body.target} targets",

@@ -269,6 +269,17 @@ def create_job(body: JobCreate, user: User = Depends(get_current_user)) -> JobOu
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     job = _manager.submit(query, user_id=user.id)
+    # P6 demand signal for the background harvester: the emails lane stocks
+    # what users actually search for (harvest-time AI, demand-gated).
+    # Telemetry only — guarded so it can never fail the job submission.
+    try:
+        from app.harvester.store import record_demand_safe, state_from_location
+        record_demand_safe(
+            query.trade.strip().lower(),
+            state_from_location(query.location),
+        )
+    except Exception:  # noqa: BLE001 — demand telemetry must never break a job
+        logger.exception("harvester demand hook failed — job continues")
     logger.info("POST /leads/jobs -> %s (%s)", job.id, query.describe())
     get_activity().record(
         user.id, user.username, "search",

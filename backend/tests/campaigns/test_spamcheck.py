@@ -348,6 +348,41 @@ def test_improve_falls_back_when_ai_raises():
     r = spamcheck.improve_script(ask, SPAM_SUBJECT, SPAM_BODY)
     assert r["method"] == "rules"
     assert "act now" not in r["body"].lower()
+    # The fallback also gets the completed skeleton.
+    assert "best regards" in r["body"].lower()
+
+
+def test_improve_cleans_reintroduced_filler_and_completes_structure():
+    """The AI rewrite can bring banned filler back ('I noticed', 'no cost')
+    and skip the skeleton — the deterministic cleanup removes the filler
+    and the sign-off / signature / compliance footer are added."""
+    long_body = (
+        "Hi {{first_name}}, I noticed that your team handles many "
+        "projects at no cost to the owner during preconstruction reviews, "
+        "and I wanted to share how our takeoff process can reduce manual "
+        "counting and speed up proposal timelines for busy contractors "
+        "who bid every week across several states and keep winning new "
+        "work throughout the year.")
+    ask = lambda prompt: _ai_reply(  # noqa: E731 — test stub
+        "Estimating for {{company_name}}", long_body)
+    monkey_company = "The Best Estimator LLC"
+    import app.campaigns.spamcheck as sc
+    old = sc._COMPANY_NAME
+    sc._COMPANY_NAME = monkey_company
+    try:
+        r = spamcheck.improve_script(ask, "s", "b")
+    finally:
+        sc._COMPANY_NAME = old
+    assert r["method"] == "ai"
+    low = r["body"].lower()
+    assert "i noticed" not in low
+    assert "no cost" not in low
+    assert "best regards" in low
+    assert monkey_company.lower() in low
+    assert "unsubscribe" in low  # >= 60 words -> footer added
+    # The completed script scores far below the original problem level.
+    after = spamcheck.analyze_script(r["subject"], r["body"])
+    assert after["score"] < 15, [f["rule"] for f in after["findings"]]
 
 
 def test_improve_strips_dashes_from_ai_text():

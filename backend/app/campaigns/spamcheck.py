@@ -180,7 +180,8 @@ _SIGNOFF_LINE = re.compile(
     r"^\s*(?:best regards|best|thanks|regards|cheers|sincerely)[,.]?\s*$",
     re.IGNORECASE)
 _CONTACT_INFO = re.compile(
-    r"(?:www\.|https?://|\S+@\S+\.\S+|\+?\d[\d\s().-]{7,}\d)", re.IGNORECASE)
+    r"(?:www\.|https?://|\S+@\S+\.\S+|\+?\d[\d\s().-]{7,}\d|"
+    r"\[\s*(?:phone|email|website)\s*\])", re.IGNORECASE)
 #: A line explaining HOW the sender found the recipient — recipients trust
 #: a named source, and it is a compliance best practice (CAN-SPAM spirit).
 _SOURCE_NOTE = re.compile(
@@ -537,28 +538,91 @@ def _rules_fix(subject: str, body: str) -> tuple[str, str, list[str]]:
     return _unmask(subj, back_subj), _unmask(txt, back_txt), notes
 
 
+def _complete_structure(body: str) -> tuple[str, list[str]]:
+    """Ensure the fixed script carries the skeleton the rulebook expects:
+    a 'Best regards,' sign-off, the company name and contact placeholders
+    in the signature, and the compliance footer. Unknown contact details
+    stay as [Phone] | [Email] | [Website] placeholders — nothing is ever
+    invented for the sender (the placeholders remind them to fill it in)."""
+    notes: list[str] = []
+    company = _sender_company()
+    lines = body.split("\n")
+    signoff_idx = next((i for i, ln in enumerate(lines)
+                        if _SIGNOFF_LINE.match(ln)), None)
+    if signoff_idx is None:
+        lines = body.rstrip().split("\n") + [
+            "", "Best regards,", company or "[Your Name]"]
+        body = "\n".join(lines)
+        signoff_idx = len(lines) - 2
+        notes.append("Added the 'Best regards,' sign-off")
+    tail = "\n".join(lines[signoff_idx + 1:])
+    additions: list[str] = []
+    if company and company.lower() not in tail.lower():
+        additions.append(company)
+        notes.append(f"Added the company name ({company}) to the signature")
+    if not _CONTACT_INFO.search(tail):
+        additions.append("[Phone] | [Email] | [Website]")
+        notes.append("Added contact-info placeholders — fill in the real "
+                     "details before sending")
+    if additions:
+        at = signoff_idx + 1
+        while at < len(lines) and not lines[at].strip():
+            at += 1
+        if at < len(lines):
+            at += 1  # keep the sender-name line first
+        lines[at:at] = additions
+        body = "\n".join(lines)
+    if len(_words(body)) >= 60 and not re.search(
+            r"unsubscribe|opt[\s-]?out|let me know if you'?d rather not",
+            body, re.IGNORECASE):
+        body = body.rstrip() + (
+            "\n\nYou received this email because we identified your "
+            "company through public business listings. If you'd prefer not "
+            "to receive future messages, reply with Unsubscribe and we "
+            "will remove you from our list.")
+        notes.append("Added the compliance/opt-out footer")
+    elif len(_words(body)) >= 60 and not _SOURCE_NOTE.search(body):
+        body = body.rstrip() + (
+            "\n\nI found your company through public business listings.")
+        notes.append("Added a how-I-found-you line")
+    return body, notes
+
+
 def build_improve_prompt(subject: str, body: str, findings: list[dict]) -> str:
+    company = _sender_company() or "[Your Company]"
     lines = [
         "You rewrite a cold-outreach email so mailbox providers do not read "
-        "it as spam, keeping the writer's meaning and tone.",
+        "it as spam, keeping the writer's meaning and offer.",
         "",
         "Rules:",
-        "1. Keep the SAME meaning, offer, and professional tone — this is a "
-        "rewrite for deliverability, not new marketing copy.",
-        "2. Remove every spam trigger listed below: no hype words, no fake "
-        "urgency, no ALL CAPS, no '!!', no exaggerated claims.",
-        "3. Keep it roughly the same length (short is good).",
-        "4. Copy every {{variable}} (like {{first_name}}) EXACTLY as written "
-        "— they are placeholders filled by software later.",
-        "5. Plain text, no markdown, no quotes around the text.",
-        "6. NEVER use em-dashes (—) or en-dashes (–) — they read as "
+        "1. Keep the SAME meaning and offer — this is a rewrite for "
+        "deliverability, not new marketing copy.",
+        "2. Remove every spam problem listed below: no hype words, no fake "
+        "urgency, no ALL CAPS, no '!!', no exaggerated claims, and no "
+        "template filler ('I came across', 'hope this email finds you "
+        "well', 'seamless', 'delve', 'revolutionizing'...).",
+        "3. Copy every {{variable}} (like {{first_name}}) EXACTLY as "
+        "written — they are placeholders filled by software later.",
+        "4. Plain text, no markdown, no quotes around the text.",
+        "5. NEVER use em-dashes (—) or en-dashes (–) — they read as "
         "machine-written. Use commas instead.",
-        "7. The subject stays under 60 characters if you can.",
-        "8. If the findings mention word count, bring the body to roughly "
-        "120-150 words.",
-        "9. If the opener or the call-to-action is flagged, open with a "
-        "specific-sounding line about the lead and use a soft, low-pressure "
-        "ask.",
+        "6. The subject stays under 60 characters if you can.",
+        "",
+        "Structure the rewrite as a complete cold email:",
+        "- Open with 'Hi {{first_name}},' (or keep the existing greeting)",
+        "- The first line after the greeting: something specific-sounding "
+        "about the recipient's company, never a generic reach-out phrase",
+        "- 120-150 words of content, short plain sentences",
+        "- ONE soft, low-pressure ask (e.g. 'Would a short call next week "
+        "work?') — never hard-sell",
+        "- Sign off with 'Best regards,' then the sender's name, then "
+        f"'{company}' and the literal line '[Phone] | [Email] | [Website]' "
+        "(placeholders — NEVER invent a phone number, email or website)",
+        "- End with this exact compliance footer:",
+        "  \"You received this email because we identified your company "
+        "through public business listings. If you'd prefer not to receive "
+        "future messages, reply with Unsubscribe and we will remove you "
+        "from our list.\"",
         "",
         f"Current subject: {subject}",
         "",
@@ -607,7 +671,10 @@ def _parse_ai_reply(reply: str, subject: str, body: str) -> tuple[str, str] | No
 
 def improve_script(ask: Ask, subject: str, body: str) -> dict:
     """The one-click fix: AI rewrite (best-effort), deterministic rules
-    rewrite as the guaranteed fallback. Returns the new subject/body plus
+    rewrite as the guaranteed fallback. The AI's output gets the same
+    deterministic cleanup (it can reintroduce filler like 'I noticed' or
+    'no cost') and the standard skeleton is completed (sign-off,
+    signature, compliance footer). Returns the new subject/body plus
     how it was produced and what was changed."""
     findings = analyze_script(subject, body)["findings"]
     try:
@@ -616,11 +683,15 @@ def improve_script(ask: Ask, subject: str, body: str) -> dict:
     except Exception:  # noqa: BLE001 — best-effort by design
         parsed = None
     if parsed is not None:
-        return {"subject": parsed[0], "body": parsed[1], "method": "ai",
+        subj, txt, notes = _rules_fix(parsed[0], parsed[1])
+        txt, added = _complete_structure(txt)
+        return {"subject": subj, "body": txt, "method": "ai",
                 "notes": ["Rewritten by AI with spam triggers removed — "
-                          "review before sending"]}
+                          "review before sending"] + notes + added}
     subj, txt, notes = _rules_fix(subject, body)
-    return {"subject": subj, "body": txt, "method": "rules", "notes": notes}
+    txt, added = _complete_structure(txt)
+    return {"subject": subj, "body": txt, "method": "rules",
+            "notes": notes + added}
 
 
 _module_ask: Ask | None = None
@@ -700,6 +771,14 @@ def build_analysis_prompt(subject: str, body: str,
         "5. Any other red flags: exaggerated or unverifiable claims, a "
         "subject that promises what the body doesn't deliver, trust "
         "problems, anything a spam filter or a busy recipient would flag.",
+        "",
+        "Calibration — score honestly, not harshly: a plain, professional "
+        "B2B introduction with standard structure is NORMAL cold outreach, "
+        "not spam. Generic wording or a simple pitch is a quality issue: "
+        "keep those under 30. Reserve scores above 50 for what mailbox "
+        "providers genuinely flag: scam language, heavy hype, fake "
+        "urgency, deceptive structure. A missing nice-to-have is not a "
+        "spam risk.",
         "",
         "Score each category 0-100 for spam risk (0 = clean, 100 = certain "
         "spam):",

@@ -395,15 +395,27 @@ def test_improve_strips_dashes_from_ai_text():
     assert "—" not in r["body"] and "–" not in r["body"]
 
 
-def test_improve_rejects_ai_invented_variables():
-    """'{{company}}' is not a real field — if the model invents one, the
-    reply is rejected and the deterministic rewrite is used instead (an
-    invented variable would go out literally to every lead)."""
+def test_improve_sanitizes_ai_invented_variables():
+    """'{{company}}' is not a real field. An invented variable is
+    sanitized, not a rejection: aliases map to the canonical field when
+    the original had it, otherwise plain words — the send can never
+    break and the user still gets the real AI rewrite."""
+    # Original HAS {{company_name}} -> the invented {{company}} maps to it.
     ask = lambda prompt: _ai_reply(  # noqa: E731 — test stub
-        "Estimating for {{company_name}}", "Hi!")
-    r = spamcheck.improve_script(ask, "s", "b")
-    assert r["method"] == "rules"
-    assert "{{" not in r["body"]
+        "Estimating for {{company}}", "Hi {{first_name}}, a rewrite.")
+    r = spamcheck.improve_script(ask, "Quote for {{company_name}}",
+                                 "Hi {{first_name}}, original.")
+    assert r["method"] == "ai"
+    assert "{{company_name}}" in r["subject"]
+    assert "{{company}}" not in r["subject"]
+    # Original has NO company variable -> plain words, never a broken
+    # placeholder going out literally to every lead.
+    ask2 = lambda prompt: _ai_reply(  # noqa: E731 — test stub
+        "Estimating for {{company}}", "Hi!")
+    r2 = spamcheck.improve_script(ask2, "s", "b")
+    assert r2["method"] == "ai"
+    assert "{{" not in r2["subject"]
+    assert "your company" in r2["subject"].lower()
 
 
 def test_improve_prompt_forbids_invented_facts():

@@ -647,6 +647,50 @@ def build_improve_prompt(subject: str, body: str, findings: list[dict]) -> str:
     return "\n".join(lines)
 
 
+#: Variable aliases the model tends to write ({{company}} is not a real
+#: field — the real one is {{company_name}}); mapped to the canonical.
+_VAR_ALIAS = {
+    "company": "company_name",
+    "companyname": "company_name",
+    "name": "first_name",
+    "firstname": "first_name",
+    "first name": "first_name",
+    "city": "location",
+    "lastname": "last_name",
+}
+#: Plain-text fallbacks when an invented variable has no original to map
+#: to — the text must stay readable, never carry a broken placeholder.
+_VAR_PLAIN = {
+    "first_name": "there", "name": "there", "last_name": "",
+    "company": "your company", "company_name": "your company",
+    "location": "your area", "city": "your area",
+}
+
+
+def _sanitize_vars(new_subject: str, new_body: str,
+                   original_vars: set[str]) -> tuple[str, str]:
+    """The model invents variables ({{company}} is not a real field and
+    would go out literally to every lead). Instead of rejecting the whole
+    rewrite for that, map aliases to the canonical fields and swap
+    unmapped ones for plain words — the send can never break."""
+    def _clean(text: str) -> str:
+        def _sub(m: re.Match[str]) -> str:
+            var = m.group(0)
+            if var in original_vars:
+                return var
+            inner = var[2:-2].strip().lower()
+            canonical = "{{" + _VAR_ALIAS.get(inner, inner) + "}}"
+            if canonical in original_vars:
+                return canonical
+            word = inner.split("_")[0]
+            return _VAR_PLAIN.get(inner, _VAR_PLAIN.get(word, ""))
+        out = _VAR.sub(_sub, text)
+        out = re.sub(r"[ \t]{2,}", " ", out)
+        out = re.sub(r" ,", ",", out)
+        return out
+    return _clean(new_subject), _clean(new_body)
+
+
 def _parse_ai_reply(reply: str, subject: str, body: str) -> tuple[str, str] | None:
     """The model's 'SUBJECT:/BODY:' answer, or None when it is unusable
     (wrong shape, empty, or it lost a {{variable}})."""
@@ -660,16 +704,17 @@ def _parse_ai_reply(reply: str, subject: str, body: str) -> tuple[str, str] | No
     new_subject, new_body = m.group(1).strip(), m.group(2).strip()
     if not new_subject or not new_body:
         return None
+    # The model must not INVENT variables: '{{company}}' is not a real
+    # field. Aliases map to the canonical fields, the rest become plain
+    # words — the send can never break, so this is a sanitize, not a
+    # rejection (a rejection left the user with no real rewrite).
+    original_vars = set(_VAR.findall(subject) + _VAR.findall(body))
+    new_subject, new_body = _sanitize_vars(new_subject, new_body,
+                                           original_vars)
     # Every original variable must survive — a dropped {{first_name}} would
     # break the send. Mangled variables -> rules fallback instead.
-    original_vars = set(_VAR.findall(subject) + _VAR.findall(body))
     for var in original_vars:
         if var not in new_subject and var not in new_body:
-            return None
-    # And the model must not INVENT variables either: '{{company}}' is not
-    # a real field and would go out literally to every lead.
-    for var in set(_VAR.findall(new_subject + new_body)):
-        if var not in original_vars:
             return None
     # The format headers must not leak into the script itself.
     if "SUBJECT:" in new_body or "BODY:" in new_body:

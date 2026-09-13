@@ -414,6 +414,35 @@ class LeadResearchStore:
             )
         conn.commit()
         conn.close()
+        # LinkedIn byproduct (big-bang P4): a researched person's LinkedIn
+        # URL is a lead in its own right — stocked into the LinkedIn
+        # vertical's pool for ANY user to claim (exclusivity applies at
+        # SERVE, not at stock: the researcher keeps the dossier; the
+        # LinkedIn row is shared inventory). Guarded: a byproduct failure
+        # must never break the dossier save it rides on.
+        if dossier.person.linkedin:
+            try:
+                from app.linkedin.store import (
+                    clean_linkedin_url, get_store, is_person_linkedin_url,
+                )
+                if is_person_linkedin_url(
+                        clean_linkedin_url(dossier.person.linkedin)):
+                    get_store().add([{
+                        "person_name": dossier.person.name,
+                        "role": dossier.person.role,
+                        "linkedin_url": dossier.person.linkedin,
+                        "company_name": dossier.company.name,
+                        "domain": dossier.domain,
+                        "trade": dossier.company.industry,
+                        "location": dossier.company.location,
+                        "source": "email_research",
+                        "source_email": dossier.email,
+                    }])
+            except Exception:  # noqa: BLE001 — byproduct only, never fatal
+                logger.exception(
+                    "linkedin byproduct split failed for %s — dossier saved",
+                    dossier.email,
+                )
 
     def add_owner(self, email: str, user_id: str) -> bool:
         """Record that ``user_id``'s own search surfaced an EXISTING dossier.

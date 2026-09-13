@@ -578,3 +578,28 @@ export interface PhonePoolStats {
 
 /** Signup category — which verticals the account uses. */
 export type SignupCategory = "emails" | "phones" | "both";
+
+// LinkedIn vertical (P4) -----------------------------------------------------
+
+/** One LinkedIn person lead — an email-research byproduct (no live fetch,
+ *  no quota): the decision-maker's profile URL found during research. */
+export interface LinkedInLead {
+  id: number;
+  person_name: string;
+  role: string;
+  linkedin_url: string;
+  company_name: string;
+  domain: string;
+  trade: string;
+  city: string;
+  state: string;
+  source: string;
+  source_email: string;
+}
+
+/** POST /linkedin/search — pool-only serve with an honest shortfall reason. */
+export interface LinkedInSearchResult {
+  leads: LinkedInLead[];
+  served_from_pool: number;
+  reason: string;
+}

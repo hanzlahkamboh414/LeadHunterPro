@@ -34,6 +34,8 @@ import type {
   JobSummary,
   LeadDetail,
   LeadSummary,
+  LinkedInLead,
+  LinkedInSearchResult,
   PhoneLead,
   PhonePoolStats,
   PhoneSearchResult,
@@ -407,6 +409,46 @@ export const api = {
   /** The shared pool's honest inventory (totals + per-trade/state + mine). */
   phoneStats(): Promise<PhonePoolStats> {
     return request<PhonePoolStats>("/phones/stats");
+  },
+
+  // LinkedIn vertical (P4) — email-research byproduct, pool-only serve ---
+  /** Serve LinkedIn person leads from the byproduct pool (instant SQL —
+   *  there is no live LinkedIn fetch by design, so a shortfall is reported
+   *  honestly and never padded). */
+  linkedinSearch(input: {
+    trade?: string;
+    state?: string;
+    city?: string;
+    target: number;
+  }): Promise<LinkedInSearchResult> {
+    return request<LinkedInSearchResult>("/linkedin/search", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+  },
+
+  /** The caller's own (exclusively claimed) LinkedIn leads. */
+  linkedinLeads(
+    filter: { trade?: string; state?: string; city?: string } = {},
+  ): Promise<LinkedInLead[]> {
+    const params = new URLSearchParams();
+    if (filter.trade) params.set("trade", filter.trade);
+    if (filter.state) params.set("state", filter.state);
+    if (filter.city) params.set("city", filter.city);
+    const qs = params.toString();
+    return request<LinkedInLead[]>(`/linkedin/leads${qs ? `?${qs}` : ""}`);
+  },
+
+  /** The byproduct pool's honest inventory (+ how many are mine). */
+  linkedinStats(): Promise<{
+    total: number;
+    claimed: number;
+    unclaimed: number;
+    by_trade: Record<string, number>;
+    mine: number;
+  }> {
+    return request("/linkedin/stats");
   },
 
   // Jobs ---------------------------------------------------------------

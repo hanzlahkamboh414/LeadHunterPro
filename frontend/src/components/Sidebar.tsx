@@ -10,6 +10,7 @@ import {
   LogOut,
   Send,
   Phone,
+  Briefcase,
 } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
 
@@ -19,6 +20,10 @@ import { useAuth } from "../contexts/AuthContext";
 const NAV = [
   { to: "/", label: "Dashboard", icon: LayoutGrid, end: true, adminOnly: false },
   { to: "/research", label: "Research", icon: Search, end: false, adminOnly: false },
+  // P4: LinkedIn is a research BYPRODUCT lane — every authenticated account
+  // sees it (no signup-category gate, no quota). NOT part of the adminOnly /
+  // category machinery above.
+  { to: "/linkedin", label: "LinkedIn", icon: Briefcase, end: false, adminOnly: false },
   { to: "/leads", label: "Companies", icon: Building2, end: false, adminOnly: false },
   { to: "/contacts", label: "Contacts", icon: Users, end: false, adminOnly: false },
   { to: "/campaigns", label: "Campaigns", icon: Send, end: false, adminOnly: false },

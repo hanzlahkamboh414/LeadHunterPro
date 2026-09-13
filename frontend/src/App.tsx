@@ -14,6 +14,7 @@ import AdminGate from "./screens/AdminGate";
 import Login from "./screens/Login";
 import Signup from "./screens/Signup";
 import Phones from "./screens/Phones";
+import LinkedIn from "./screens/LinkedIn";
 import ResetPassword from "./screens/ResetPassword";
 import { PrivacyPolicy, TermsOfService } from "./screens/Legal";
 import { useAuth } from "./contexts/AuthContext";
@@ -55,6 +56,8 @@ export default function App() {
                 <Route path="/" element={<Dashboard />} />
                 <Route path="/research" element={<Execute />} />
                 {phonesVisible && <Route path="/phones" element={<Phones />} />}
+                {/* P4: the LinkedIn byproduct lane — every account, no gate. */}
+                <Route path="/linkedin" element={<LinkedIn />} />
                 <Route path="/leads" element={<Leads />} />
                 <Route path="/contacts" element={<Contacts />} />
                 <Route path="/campaigns" element={<Campaigns />} />
@@ -106,6 +109,9 @@ export default function App() {
             <Route path="/" element={<Dashboard />} />
             <Route path="/research" element={<Execute />} />
             {phonesVisible && <Route path="/phones" element={<Phones />} />}
+            {/* P4: the LinkedIn byproduct lane — every authenticated account,
+                no signup-category gate (matches the backend's user gate). */}
+            <Route path="/linkedin" element={<LinkedIn />} />
             <Route path="/leads" element={<Leads />} />
             <Route path="/contacts" element={<Contacts />} />
             <Route path="/campaigns" element={<Campaigns />} />

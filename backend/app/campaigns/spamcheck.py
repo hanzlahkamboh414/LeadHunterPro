@@ -603,15 +603,21 @@ def build_improve_prompt(subject: str, body: str, findings: list[dict]) -> str:
         "well', 'seamless', 'delve', 'revolutionizing'...).",
         "3. Copy every {{variable}} (like {{first_name}}) EXACTLY as "
         "written — they are placeholders filled by software later.",
-        "4. Plain text, no markdown, no quotes around the text.",
-        "5. NEVER use em-dashes (—) or en-dashes (–) — they read as "
+        "4. Use ONLY the {{variables}} that appear in the current text — "
+        "never add new ones the writer did not have.",
+        "5. Plain text, no markdown, no quotes around the text.",
+        "6. NEVER use em-dashes (—) or en-dashes (–) — they read as "
         "machine-written. Use commas instead.",
-        "6. The subject stays under 60 characters if you can.",
+        "7. The subject stays under 60 characters if you can.",
         "",
         "Structure the rewrite as a complete cold email:",
         "- Open with 'Hi {{first_name}},' (or keep the existing greeting)",
-        "- The first line after the greeting: something specific-sounding "
-        "about the recipient's company, never a generic reach-out phrase",
+        "- The first line after the greeting: plain and honest, built only "
+        "from the {{variables}} already in the text (company, location) — "
+        "NEVER invent claims about the recipient (projects, announcements, "
+        "bids, expansions, wins); a verified research fact is added per "
+        "lead at send time by the personalization option, so the template "
+        "must not pretend to have one",
         "- 120-150 words of content, short plain sentences",
         "- ONE soft, low-pressure ask (e.g. 'Would a short call next week "
         "work?') — never hard-sell",
@@ -656,8 +662,14 @@ def _parse_ai_reply(reply: str, subject: str, body: str) -> tuple[str, str] | No
         return None
     # Every original variable must survive — a dropped {{first_name}} would
     # break the send. Mangled variables -> rules fallback instead.
-    for var in set(_VAR.findall(subject) + _VAR.findall(body)):
+    original_vars = set(_VAR.findall(subject) + _VAR.findall(body))
+    for var in original_vars:
         if var not in new_subject and var not in new_body:
+            return None
+    # And the model must not INVENT variables either: '{{company}}' is not
+    # a real field and would go out literally to every lead.
+    for var in set(_VAR.findall(new_subject + new_body)):
+        if var not in original_vars:
             return None
     # The format headers must not leak into the script itself.
     if "SUBJECT:" in new_body or "BODY:" in new_body:

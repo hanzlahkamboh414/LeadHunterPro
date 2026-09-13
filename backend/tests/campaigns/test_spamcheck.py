@@ -314,24 +314,25 @@ def _ai_verdict(score: int = 85, summary: str = "Pushy hype throughout.",
 def _dual_ask(prompts: list[str]) -> "callable":
     """A fake _module_ask that answers BOTH shapes: the analysis prompt
     (JSON verdict) and the improve prompt (SUBJECT:/BODY:). Records every
-    prompt so tests can assert on what the model was shown."""
+    prompt so tests can assert on what the model was shown. The improve
+    reply uses ONLY variables the original SPAM text has ({{first_name}})
+    — invented variables get rejected by design."""
     def ask(prompt: str) -> str:
         prompts.append(prompt)
         if "deliverability expert" in prompt:
             return _ai_verdict()
-        return _ai_reply("Estimating for {{company_name}}",
+        return _ai_reply("Estimating support",
                          "Hi {{first_name}}, a calm professional rewrite.")
     return ask
 
 
 def test_improve_uses_ai_when_valid():
     ask = lambda prompt: _ai_reply(  # noqa: E731 — test stub
-        "Estimating for {{company_name}}",
+        "Estimating support",
         "Hi {{first_name}}, a calm professional rewrite.")
     r = spamcheck.improve_script(ask, SPAM_SUBJECT, SPAM_BODY)
     assert r["method"] == "ai"
     assert "{{first_name}}" in r["body"]
-    assert "{{company_name}}" in r["subject"]
 
 
 def test_improve_falls_back_when_ai_drops_variable():
@@ -364,13 +365,13 @@ def test_improve_cleans_reintroduced_filler_and_completes_structure():
         "who bid every week across several states and keep winning new "
         "work throughout the year.")
     ask = lambda prompt: _ai_reply(  # noqa: E731 — test stub
-        "Estimating for {{company_name}}", long_body)
+        "Estimating support", long_body)
     monkey_company = "The Best Estimator LLC"
     import app.campaigns.spamcheck as sc
     old = sc._COMPANY_NAME
     sc._COMPANY_NAME = monkey_company
     try:
-        r = spamcheck.improve_script(ask, "s", "b")
+        r = spamcheck.improve_script(ask, "s", "Hi {{first_name}}, short.")
     finally:
         sc._COMPANY_NAME = old
     assert r["method"] == "ai"
@@ -388,11 +389,30 @@ def test_improve_cleans_reintroduced_filler_and_completes_structure():
 def test_improve_strips_dashes_from_ai_text():
     """The same em-dash ban as the opening lines — an AI tell."""
     ask = lambda prompt: _ai_reply(  # noqa: E731 — test stub
-        "Estimating for {{company_name}}",
-        "Hi {{first_name}}, we saw your work, amazing jobs, and want to "
-        "help with takeoffs.")
+        "Estimating support",
+        "We saw your work, amazing jobs, and want to help with takeoffs.")
     r = spamcheck.improve_script(ask, "s", "b")
     assert "—" not in r["body"] and "–" not in r["body"]
+
+
+def test_improve_rejects_ai_invented_variables():
+    """'{{company}}' is not a real field — if the model invents one, the
+    reply is rejected and the deterministic rewrite is used instead (an
+    invented variable would go out literally to every lead)."""
+    ask = lambda prompt: _ai_reply(  # noqa: E731 — test stub
+        "Estimating for {{company_name}}", "Hi!")
+    r = spamcheck.improve_script(ask, "s", "b")
+    assert r["method"] == "rules"
+    assert "{{" not in r["body"]
+
+
+def test_improve_prompt_forbids_invented_facts():
+    """The rewrite must never pretend to know the recipient — a verified
+    research fact is added per lead at send time, so the template stays
+    honest (the reference cold-email standard: never invent facts)."""
+    prompt = spamcheck.build_improve_prompt("s", "b", [])
+    assert "NEVER invent claims" in prompt
+    assert "never add new ones" in prompt
 
 
 def test_improve_on_clean_script_still_returns_usable_text():

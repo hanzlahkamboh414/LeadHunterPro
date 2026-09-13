@@ -145,3 +145,74 @@ def test_list_owned_and_pool_stats(tmp_path):
     assert stats["claimed"] == 1
     assert stats["unclaimed"] == 1
     assert stats["by_trade"]["gc"] == 1
+
+
+# ---------------------------------------------------------------------------
+# enrichment (phone -> email)
+# ---------------------------------------------------------------------------
+
+def test_pre_enrichment_db_migrates_additively(tmp_path):
+    """A phone_leads.db created BEFORE the email columns keeps every row and
+    gains the four new columns (the users.category ALTER pattern)."""
+    import sqlite3
+
+    db = str(tmp_path / "phones.db")
+    conn = sqlite3.connect(db)
+    conn.execute("""
+        CREATE TABLE phone_leads (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            phone TEXT NOT NULL,
+            person_name TEXT NOT NULL DEFAULT '',
+            business_name TEXT NOT NULL DEFAULT '',
+            trade TEXT NOT NULL DEFAULT '',
+            city TEXT NOT NULL DEFAULT '',
+            state TEXT NOT NULL DEFAULT '',
+            source TEXT NOT NULL DEFAULT '',
+            license_status TEXT NOT NULL DEFAULT '',
+            source_url TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE (phone, business_name)
+        )
+    """)
+    conn.execute(
+        "INSERT INTO phone_leads (phone, business_name, trade, created_at,"
+        " updated_at) VALUES ('5039573452', 'Legacy Co', 'gc', 'x', 'y')"
+    )
+    conn.commit()
+    conn.close()
+
+    store = PhoneLeadsStore(db_path=db)  # the ALTER runs here
+    served = store.serve("gc", "", "", 10, "u1")
+    assert len(served) == 1
+    assert served[0]["business_name"] == "Legacy Co"
+    assert served[0]["email"] == ""          # new columns, honest defaults
+    assert served[0]["enriched_at"] == ""
+
+
+def test_pending_enrichment_claimed_first_and_set_enrichment(tmp_path):
+    store = PhoneLeadsStore(db_path=str(tmp_path / "phones.db"))
+    store.add([_rec("5031110001"), _rec("5031110002"), _rec("5031110003")])
+    store.serve("gc", "", "", 1, "alice")  # claims exactly one
+
+    # Only the CLAIMED lead is work for the enricher.
+    pending = store.pending_enrichment(10)
+    assert [l["id"] for l in pending] == \
+        [l["id"] for l in store.list_owned("alice")]
+    assert len(pending) == 1
+
+    # A found email is stamped with its provenance...
+    store.set_enrichment(
+        pending[0]["id"], email="info@acme.com",
+        email_source="website", website="https://acme.com",
+    )
+    lead = store.list_owned("alice")[0]
+    assert lead["email"] == "info@acme.com"
+    assert lead["email_source"] == "website"
+    assert lead["website"] == "https://acme.com"
+    assert lead["enriched_at"] != ""
+
+    # ...and an enriched lead (found OR miss) never returns to the queue.
+    assert store.pending_enrichment(10) == []
+    # claimed_only=False reaches the unclaimed inventory too.
+    assert len(store.pending_enrichment(10, claimed_only=False)) == 2

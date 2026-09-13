@@ -80,6 +80,13 @@ class PhoneLeadOut(BaseModel):
     source: str = ""
     license_status: str = ""
     source_url: str = ""
+    email: str = ""
+    email_source: str = ""
+    website: str = ""
+    #: "pending" = the background enricher has not reached this lead yet;
+    #: "found" = an email literally seen on the company's own site;
+    #: "none" = enrichment ran, nothing findable (honest miss, never a guess).
+    email_status: str = "pending"
 
     class Config:
         from_attributes = True
@@ -97,6 +104,8 @@ class PhoneSearchOut(BaseModel):
 
 
 def _lead_out(lead: dict[str, Any]) -> PhoneLeadOut:
+    email = lead.get("email", "")
+    enriched = bool(lead.get("enriched_at", ""))
     return PhoneLeadOut(
         id=int(lead["id"]),
         phone=lead.get("phone", ""),
@@ -108,6 +117,10 @@ def _lead_out(lead: dict[str, Any]) -> PhoneLeadOut:
         source=lead.get("source", ""),
         license_status=lead.get("license_status", ""),
         source_url=lead.get("source_url", ""),
+        email=email,
+        email_source=lead.get("email_source", ""),
+        website=lead.get("website", ""),
+        email_status="found" if email else ("none" if enriched else "pending"),
     )
 
 

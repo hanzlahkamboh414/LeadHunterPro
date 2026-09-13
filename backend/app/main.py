@@ -48,11 +48,25 @@ async def lifespan(app: FastAPI):
     except Exception:  # noqa: BLE001 — a scheduler failure must not kill the app
         logger.exception("campaign scheduler failed to start — continuing")
 
+    # Phone-lead email enrichment (phones vertical): one daemon thread that
+    # enriches claimed phone leads with emails from their own websites and
+    # feeds the finds into the emails vertical's pending cache. Same rule —
+    # lifespan, never import time, so pytest never spawns a real crawl loop.
+    enricher = None
+    try:
+        from app.phones.enrich_worker import get_worker
+        enricher = get_worker()
+        enricher.start()
+    except Exception:  # noqa: BLE001 — an enricher failure must not kill the app
+        logger.exception("phone enrichment worker failed to start — continuing")
+
     # The sweep is the startup block; yield hands control to the app until it
     # shuts down.
     yield
     if scheduler is not None:
         scheduler.stop()
+    if enricher is not None:
+        enricher.stop()
 
 
 app = FastAPI(

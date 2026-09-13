@@ -100,11 +100,33 @@ class PhoneLeadsStore:
                     source TEXT NOT NULL DEFAULT '',
                     license_status TEXT NOT NULL DEFAULT '',
                     source_url TEXT NOT NULL DEFAULT '',
+                    email TEXT NOT NULL DEFAULT '',
+                    email_source TEXT NOT NULL DEFAULT '',
+                    website TEXT NOT NULL DEFAULT '',
+                    enriched_at TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     UNIQUE (phone, business_name)
                 )
             """)
+            # Pre-enrichment databases: the phone_enrichment columns arrive as
+            # an additive ALTER (the users.category pattern) — a phone_leads.db
+            # created before this phase keeps every row, all with email=''.
+            existing = {
+                r[1] for r in conn.execute(
+                    "PRAGMA table_info(phone_leads)"
+                ).fetchall()
+            }
+            for col, decl in (
+                ("email", "TEXT NOT NULL DEFAULT ''"),
+                ("email_source", "TEXT NOT NULL DEFAULT ''"),
+                ("website", "TEXT NOT NULL DEFAULT ''"),
+                ("enriched_at", "TEXT NOT NULL DEFAULT ''"),
+            ):
+                if col not in existing:
+                    conn.execute(
+                        f"ALTER TABLE phone_leads ADD COLUMN {col} {decl}"
+                    )
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS phone_lead_owners (
                     lead_id INTEGER NOT NULL,
@@ -261,6 +283,60 @@ class PhoneLeadsStore:
                 args,
             ).fetchone()
             return int(row[0]) if row else 0
+        finally:
+            conn.close()
+
+    # -- enrichment -----------------------------------------------------------
+
+    def pending_enrichment(
+        self, limit: int, claimed_only: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Leads the enrichment worker should work on next.
+
+        CLAIMED FIRST (``claimed_only`` default): a lead nobody owns has no
+        user waiting on its email — enrichment effort goes where someone is
+        looking. Unclaimed rows are picked up by a later pass once served.
+        A lead with ``enriched_at`` set is done (found OR honestly none) and
+        never re-enriched: one attempt per lead, no retry loop.
+        """
+        frag = " AND l.id IN (SELECT lead_id FROM phone_lead_owners)" \
+            if claimed_only else ""
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                f"""
+                SELECT l.* FROM phone_leads l
+                WHERE l.enriched_at = ''{frag}
+                ORDER BY l.id ASC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            rows = cur.fetchall()
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, r)) for r in rows]
+        finally:
+            conn.close()
+
+    def set_enrichment(
+        self, lead_id: int, *, email: str, email_source: str, website: str,
+    ) -> None:
+        """Record one lead's enrichment outcome — a FOUND email, or the honest
+        'tried and none findable' empty string. Either way ``enriched_at``
+        stamps the lead done so the worker never re-attempts it."""
+        conn = self._conn()
+        try:
+            conn.execute(
+                """
+                UPDATE phone_leads
+                SET email = ?, email_source = ?, website = ?,
+                    enriched_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (email.strip(), email_source.strip(), website.strip(),
+                 _now(), _now(), lead_id),
+            )
+            conn.commit()
         finally:
             conn.close()
 

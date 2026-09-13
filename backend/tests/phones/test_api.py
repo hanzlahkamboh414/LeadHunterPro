@@ -169,3 +169,29 @@ def test_requires_auth(client):
     resp = client.post("/api/v1/phones/search",
                        json={"trade": "GC", "target": 5})
     assert resp.status_code == 401
+
+
+def test_email_fields_flow_to_the_api(client, make_user):
+    """A freshly served lead is enrichment-pending; once the worker stamps a
+    found email, both /phones/leads and a new search expose it honestly."""
+    user = make_user("caller", category="phones")
+    headers = {"Authorization": f"Bearer {_token(user)}"}
+
+    resp = client.post("/api/v1/phones/search", headers=headers,
+                       json={"trade": "GC", "state": "WA", "target": 5})
+    lead = resp.json()["leads"][0]
+    assert lead["email"] == ""
+    assert lead["email_status"] == "pending"
+
+    # Simulate the background enricher's write on the shared store.
+    import app.api.v1.phones as phones_mod
+    phones_mod._store.set_enrichment(
+        lead["id"], email="info@acme.com",
+        email_source="website", website="https://acme.com",
+    )
+
+    leads = client.get("/api/v1/phones/leads", headers=headers).json()
+    assert leads[0]["email"] == "info@acme.com"
+    assert leads[0]["email_source"] == "website"
+    assert leads[0]["website"] == "https://acme.com"
+    assert leads[0]["email_status"] == "found"

@@ -532,7 +532,11 @@ export interface AdminUserLeadSummary {
 
 // Phones vertical (P3) -------------------------------------------------------
 
-/** One phone lead served from the shared pool (license-board sourced). */
+/** One phone lead served from the shared pool (license-board sourced).
+ *  `email` is enrichment output: only an address literally seen on the
+ *  company's own website — never a guess. `email_status` is the honest
+ *  lifecycle: "pending" (background enricher hasn't reached it), "found",
+ *  or "none" (tried, nothing findable). */
 export interface PhoneLead {
   id: number;
   phone: string;
@@ -544,6 +548,10 @@ export interface PhoneLead {
   source: string;
   license_status: string;
   source_url: string;
+  email: string;
+  email_source: string;
+  website: string;
+  email_status: "pending" | "found" | "none";
 }
 
 /** POST /phones/search — the served leads + honest harvest telemetry. */

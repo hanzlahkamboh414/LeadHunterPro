@@ -57,6 +57,22 @@ export default function Phones() {
 
   useEffect(refreshMine, [refreshMine]);
 
+  // The background enricher stamps emails on claimed leads continuously —
+  // poll so the Email column fills in live while the screen is open.
+  useEffect(() => {
+    const t = setInterval(refreshMine, 15000);
+    return () => clearInterval(t);
+  }, [refreshMine]);
+
+  // Live email state by lead id: a search result is a snapshot, but the
+  // enrichment outcome arrives later — the polled my-leads rows are the
+  // truth for any lead shown.
+  const mineById = useMemo(() => {
+    const m = new Map<number, PhoneLead>();
+    mine.forEach((l) => m.set(l.id, l));
+    return m;
+  }, [mine]);
+
   const runSearch = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!trade) {
@@ -84,10 +100,11 @@ export default function Phones() {
   const downloadCsv = () => {
     const rows = result?.leads.length ? result.leads : mine;
     if (rows.length === 0) return;
-    const header = "person,business,phone,trade,city,state,source,license_status";
+    const header =
+      "person,business,phone,email,trade,city,state,source,license_status";
     const lines = rows.map((l) =>
       [
-        l.person_name, l.business_name, l.phone, l.trade,
+        l.person_name, l.business_name, l.phone, l.email, l.trade,
         l.city, l.state, l.source, l.license_status,
       ]
         .map((v) => `"${(v || "").replace(/"/g, '""')}"`)
@@ -260,6 +277,7 @@ export default function Phones() {
                   <th className="px-4 py-2.5 font-medium">Person</th>
                   <th className="px-4 py-2.5 font-medium">Business</th>
                   <th className="px-4 py-2.5 font-medium">Phone</th>
+                  <th className="px-4 py-2.5 font-medium">Email</th>
                   <th className="px-4 py-2.5 font-medium">Trade</th>
                   <th className="px-4 py-2.5 font-medium">Location</th>
                   <th className="px-4 py-2.5 font-medium">Source</th>
@@ -278,6 +296,32 @@ export default function Phones() {
                       >
                         {prettyPhone(l.phone)}
                       </a>
+                    </td>
+                    <td className="px-4 py-2.5">
+                      {/* The enrichment outcome: only an email literally seen
+                          on the company's own site — never a mix-in from the
+                          emails vertical, never a guess. */}
+                      {(() => {
+                        const live = mineById.get(l.id) ?? l;
+                        if (live.email) {
+                          return (
+                            <a
+                              href={`mailto:${live.email}`}
+                              className="text-indigo-300 hover:text-indigo-200"
+                            >
+                              {live.email}
+                            </a>
+                          );
+                        }
+                        if (live.email_status === "pending") {
+                          return (
+                            <span className="text-slate-500 italic">
+                              finding…
+                            </span>
+                          );
+                        }
+                        return <span className="text-slate-600">—</span>;
+                      })()}
                     </td>
                     <td className="px-4 py-2.5 text-slate-400 capitalize">{l.trade || "—"}</td>
                     <td className="px-4 py-2.5 text-slate-400">

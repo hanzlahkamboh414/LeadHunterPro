@@ -1,7 +1,34 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
-import { Search } from "lucide-react";
+import { Search, Mail, Phone, Layers } from "lucide-react";
+import type { SignupCategory } from "../types";
+
+const CATEGORY_OPTIONS: {
+  value: SignupCategory;
+  label: string;
+  hint: string;
+  icon: typeof Mail;
+}[] = [
+  {
+    value: "emails",
+    label: "Email leads",
+    hint: "Verified emails of construction companies",
+    icon: Mail,
+  },
+  {
+    value: "phones",
+    label: "Phone leads",
+    hint: "Direct phone numbers from license boards",
+    icon: Phone,
+  },
+  {
+    value: "both",
+    label: "Both",
+    hint: "Emails + phone numbers in one account",
+    icon: Layers,
+  },
+];
 
 export default function Signup() {
   const { signup } = useAuth();
@@ -11,6 +38,7 @@ export default function Signup() {
   const [name, setName] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+  const [category, setCategory] = useState<SignupCategory>("both");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -23,7 +51,7 @@ export default function Signup() {
     }
     setLoading(true);
     try {
-      await signup(username, email, password, name.trim());
+      await signup(username, email, password, name.trim(), category);
       navigate("/");
     } catch (err: any) {
       setError(err?.message || "Signup failed");
@@ -113,6 +141,45 @@ export default function Signup() {
               required
               className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500/50"
             />
+          </div>
+
+          {/* P3 — the vertical question: which leads does this account want?
+              Existing behavior (emails) stays available; the default is Both
+              so nobody is locked out of what the platform already offered. */}
+          <div>
+            <label className="block text-[12px] text-slate-400 mb-2">
+              Which leads do you want?
+            </label>
+            <div className="grid gap-2">
+              {CATEGORY_OPTIONS.map(({ value, label, hint, icon: Icon }) => (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => setCategory(value)}
+                  className={`flex items-center gap-3 rounded-lg border px-3 py-2.5 text-left transition-colors ${
+                    category === value
+                      ? "border-indigo-500/60 bg-indigo-500/10"
+                      : "border-white/10 bg-white/[0.04] hover:border-white/20"
+                  }`}
+                >
+                  <Icon
+                    className={`w-4 h-4 shrink-0 ${
+                      category === value ? "text-indigo-400" : "text-slate-500"
+                    }`}
+                  />
+                  <span>
+                    <span
+                      className={`block text-[13px] font-medium ${
+                        category === value ? "text-white" : "text-slate-300"
+                      }`}
+                    >
+                      {label}
+                    </span>
+                    <span className="block text-[11.5px] text-slate-500">{hint}</span>
+                  </span>
+                </button>
+              ))}
+            </div>
           </div>
 
           <button

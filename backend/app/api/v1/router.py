@@ -17,6 +17,7 @@ from app.api.v1.admin import router as admin_router
 from app.api.v1.campaigns import router as campaigns_router
 from app.api.v1.leadership import router as leadership_router
 from app.api.v1.leads import router as leads_router
+from app.api.v1.phones import router as phones_router
 from app.api.v1.research import router as research_router
 from app.api.v1.source_intelligence import router as source_intelligence_router
 
@@ -37,5 +38,6 @@ api_router.include_router(discovery_router)
 api_router.include_router(source_intelligence_router)
 api_router.include_router(connectors_router)
 api_router.include_router(leads_router)
+api_router.include_router(phones_router)
 api_router.include_router(email_accounts_router)
 api_router.include_router(campaigns_router)

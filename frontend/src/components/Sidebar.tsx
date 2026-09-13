@@ -9,6 +9,7 @@ import {
   ShieldCheck,
   LogOut,
   Send,
+  Phone,
 } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
 
@@ -26,12 +27,26 @@ const NAV = [
   { to: "/admin", label: "Admin", icon: ShieldCheck, end: false, adminOnly: true },
 ];
 
+// P3: the Phones vertical is category-gated (phones | both accounts, admin,
+// and open-site mode where everyone runs as the shared "both" account).
+// Shared with App.tsx so the route gate and the nav gate agree.
+export function canSeePhones(category?: string | null, isAdmin?: boolean, userExists?: boolean): boolean {
+  if (!userExists) return true; // open-site mode (no session)
+  return Boolean(isAdmin) || category === "phones" || category === "both";
+}
+
 export default function Sidebar() {
   const { user, logout } = useAuth();
 
   const visibleNav = NAV.filter(
     (item) => !item.adminOnly || user?.is_admin,
   );
+
+  // Phones sits after Research — the two lead-hunting entry points together.
+  const nav = [...visibleNav];
+  if (canSeePhones(user?.category, user?.is_admin, Boolean(user))) {
+    nav.splice(2, 0, { to: "/phones", label: "Phones", icon: Phone, end: false, adminOnly: false });
+  }
 
   return (
     // The shell is now a fixed viewport height, so the rail scrolls on its own
@@ -54,7 +69,7 @@ export default function Sidebar() {
         </div>
 
         <nav className="flex flex-col gap-0.5">
-          {visibleNav.map(({ to, label, icon: Icon, end }) => (
+          {nav.map(({ to, label, icon: Icon, end }) => (
             <NavLink
               key={to}
               to={to}

@@ -13,6 +13,10 @@ interface AuthUser {
   username: string;
   name: string;
   is_admin: boolean;
+  /** Which verticals the account uses (P3): "emails" | "phones" | "both".
+   *  Tokens minted before P3 carry no claim — they default to "both", the
+   *  same default the backend's additive migration gives existing rows. */
+  category: "emails" | "phones" | "both";
 }
 
 interface AuthState {
@@ -24,7 +28,13 @@ interface AuthState {
    *  user UI — the admin panel is reachable only via /admin4269. */
   authEnabled: boolean | null;
   login: (username: string, password: string) => Promise<void>;
-  signup: (username: string, email: string, password: string, name?: string) => Promise<void>;
+  signup: (
+    username: string,
+    email: string,
+    password: string,
+    name?: string,
+    category?: "emails" | "phones" | "both",
+  ) => Promise<void>;
   logout: () => void;
   resetPassword: (username: string, newPassword: string) => Promise<void>;
 }
@@ -88,6 +98,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           username: (payload.username as string) || "",
           name: (payload.name as string) || "",
           is_admin: Boolean(payload.is_admin),
+          category: (payload.category as AuthUser["category"]) || "both",
         });
       } else {
         // Token expired
@@ -117,8 +128,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 
   const signup = useCallback(
-    async (username: string, email: string, password: string, name = "") => {
-      const res = await api.signup(username, email, password, name);
+    async (
+      username: string,
+      email: string,
+      password: string,
+      name = "",
+      category: "emails" | "phones" | "both" = "both",
+    ) => {
+      const res = await api.signup(username, email, password, name, category);
       storeToken(res.token);
     },
     [storeToken],

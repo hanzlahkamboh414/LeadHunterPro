@@ -529,3 +529,44 @@ export interface AdminUserLeadSummary {
   total: number;
   dates: string[];
 }
+
+// Phones vertical (P3) -------------------------------------------------------
+
+/** One phone lead served from the shared pool (license-board sourced). */
+export interface PhoneLead {
+  id: number;
+  phone: string;
+  person_name: string;
+  business_name: string;
+  trade: string;
+  city: string;
+  state: string;
+  source: string;
+  license_status: string;
+  source_url: string;
+}
+
+/** POST /phones/search — the served leads + honest harvest telemetry. */
+export interface PhoneSearchResult {
+  leads: PhoneLead[];
+  served_from_pool: number;
+  fetched_live: number;
+  stocked_new: number;
+  banked_other_trade: number;
+  dropped_bad_phone: number;
+  coverage: string[];
+  reason: string;
+}
+
+/** GET /phones/stats — the shared pool's honest inventory. */
+export interface PhonePoolStats {
+  total: number;
+  claimed: number;
+  unclaimed: number;
+  by_trade: Record<string, number>;
+  by_state: Record<string, number>;
+  mine: number;
+}
+
+/** Signup category — which verticals the account uses. */
+export type SignupCategory = "emails" | "phones" | "both";

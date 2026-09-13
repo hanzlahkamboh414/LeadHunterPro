@@ -28,6 +28,10 @@ class User:
     is_admin: bool
     created_at: str
     name: str = ""
+    #: Product verticals this account signed up for: "emails" | "phones" |
+    #: "both". Gates which vertical APIs the account may call (P3). Admins
+    #: are always allowed every vertical.
+    category: str = "both"
 
     def to_dict(self) -> dict:
         return {
@@ -37,6 +41,7 @@ class User:
             "is_admin": self.is_admin,
             "created_at": self.created_at,
             "name": self.name,
+            "category": self.category,
         }
 
 
@@ -76,6 +81,12 @@ class UserStore:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
         if "name" not in cols:
             conn.execute("ALTER TABLE users ADD COLUMN name TEXT NOT NULL DEFAULT ''")
+        # P3 signup category (emails/phones/both). Existing accounts keep
+        # access to everything they already had -> default 'both'.
+        if "category" not in cols:
+            conn.execute(
+                "ALTER TABLE users ADD COLUMN category TEXT NOT NULL DEFAULT 'both'"
+            )
         # Backfill: existing NON-admin accounts with no display name get one
         # derived from their username (first letters capitalised). The admin
         # account keeps whatever it has — the UI falls back to the username.
@@ -100,16 +111,23 @@ class UserStore:
             is_admin=bool(row[4]),
             created_at=row[5],
             name=(row[6] if len(row) > 6 else "") or "",
+            category=((row[7] if len(row) > 7 else "") or "both"),
         )
 
     def create(self, username: str, email: str, password: str,
-               name: str = "") -> User:
+               name: str = "", category: str = "both") -> User:
         """Create a new user. Raises ValueError on duplicate username/email.
 
         ``name`` is the display name (shown in the topbar). Empty -> derived
         from the username (first letters capitalised).
+
+        ``category`` is the signup vertical answer: "emails" | "phones" |
+        "both" (default) — anything else falls back to "both" so a bad
+        client payload can never lock an account out of everything.
         """
         pw_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+        if category not in ("emails", "phones", "both"):
+            category = "both"
         user = User(
             id=uuid.uuid4().hex[:12],
             username=username.strip(),
@@ -118,14 +136,15 @@ class UserStore:
             is_admin=False,
             created_at=_now(),
             name=(name or "").strip() or _display_name(username),
+            category=category,
         )
         conn = sqlite3.connect(self._db_path)
         try:
             conn.execute(
-                "INSERT INTO users (id, username, email, password_hash, is_admin, created_at, name) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO users (id, username, email, password_hash, is_admin, created_at, name, category) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (user.id, user.username, user.email, user.password_hash,
-                 int(user.is_admin), user.created_at, user.name),
+                 int(user.is_admin), user.created_at, user.name, user.category),
             )
             conn.commit()
         except sqlite3.IntegrityError as e:

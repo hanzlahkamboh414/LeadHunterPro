@@ -38,6 +38,9 @@ class SignupRequest(BaseModel):
     email: str = Field(..., min_length=5, max_length=100)
     password: str = Field(..., min_length=4, max_length=100)
     name: str = Field("", max_length=100)
+    #: P3 signup question — which vertical is this account for?
+    #: "emails" | "phones" | "both" (default both; anything else -> both).
+    category: str = Field("both", max_length=10)
 
 
 class LoginRequest(BaseModel):
@@ -55,6 +58,7 @@ class AuthOut(BaseModel):
     username: str
     name: str = ""
     is_admin: bool = False
+    category: str = "both"
     token: str
 
 
@@ -64,6 +68,7 @@ class MeOut(BaseModel):
     name: str = ""
     email: str
     is_admin: bool
+    category: str = "both"
 
 
 # ---------------------------------------------------------------------------
@@ -80,20 +85,23 @@ def signup(body: SignupRequest) -> AuthOut:
             email=body.email,
             password=body.password,
             name=body.name,
+            category=body.category,
         )
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
 
     token = create_access_token(
-        user.id, user.is_admin, username=user.username, name=user.name
+        user.id, user.is_admin, username=user.username, name=user.name,
+        category=user.category,
     )
-    logger.info("Signup: user %s created", user.username)
+    logger.info("Signup: user %s created (category=%s)", user.username, user.category)
     get_activity().record(user.id, user.username, "signup")
     return AuthOut(
         user_id=user.id,
         username=user.username,
         name=user.name,
         is_admin=user.is_admin,
+        category=user.category,
         token=token,
     )
 
@@ -107,7 +115,8 @@ def login(body: LoginRequest) -> AuthOut:
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
     token = create_access_token(
-        user.id, user.is_admin, username=user.username, name=user.name
+        user.id, user.is_admin, username=user.username, name=user.name,
+        category=user.category,
     )
     logger.info("Login: user %s", user.username)
     get_activity().record(user.id, user.username, "login")
@@ -116,6 +125,7 @@ def login(body: LoginRequest) -> AuthOut:
         username=user.username,
         name=user.name,
         is_admin=user.is_admin,
+        category=user.category,
         token=token,
     )
 
@@ -152,6 +162,7 @@ def me(user: User = Depends(get_current_user)) -> MeOut:
         name=user.name,
         email=user.email,
         is_admin=user.is_admin,
+        category=user.category,
     )
 
 

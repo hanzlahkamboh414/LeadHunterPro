@@ -34,6 +34,10 @@ import type {
   JobSummary,
   LeadDetail,
   LeadSummary,
+  PhoneLead,
+  PhonePoolStats,
+  PhoneSearchResult,
+  SignupCategory,
 } from "../types";
 
 const BASE = import.meta.env.VITE_API_BASE || "/api/v1";
@@ -191,11 +195,17 @@ export const api = {
     });
   },
 
-  signup(username: string, email: string, password: string, name = ""): Promise<{ user_id: string; username: string; name: string; token: string }> {
+  signup(
+    username: string,
+    email: string,
+    password: string,
+    name = "",
+    category: SignupCategory = "both",
+  ): Promise<{ user_id: string; username: string; name: string; token: string }> {
     return request("/auth/signup", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username, email, password, name }),
+      body: JSON.stringify({ username, email, password, name, category }),
     });
   },
 
@@ -365,6 +375,38 @@ export const api = {
     return request<AdminUserLeadSummary>(
       `/admin/users/${encodeURIComponent(userId)}/leads-summary`
     );
+  },
+
+  // Phones vertical (P3) -------------------------------------------------
+  /** Serve phone leads: pool first (instant), live license-board gap-fill.
+   *  The response carries honest telemetry — what came from the pool vs the
+   *  network, and why if fewer than the target could be served. */
+  phoneSearch(input: {
+    trade: string;
+    state?: string;
+    city?: string;
+    target: number;
+  }): Promise<PhoneSearchResult> {
+    return request<PhoneSearchResult>("/phones/search", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+  },
+
+  /** The caller's own (exclusively claimed) phone leads. */
+  phoneLeads(filter: { trade?: string; state?: string; city?: string } = {}): Promise<PhoneLead[]> {
+    const params = new URLSearchParams();
+    if (filter.trade) params.set("trade", filter.trade);
+    if (filter.state) params.set("state", filter.state);
+    if (filter.city) params.set("city", filter.city);
+    const qs = params.toString();
+    return request<PhoneLead[]>(`/phones/leads${qs ? `?${qs}` : ""}`);
+  },
+
+  /** The shared pool's honest inventory (totals + per-trade/state + mine). */
+  phoneStats(): Promise<PhonePoolStats> {
+    return request<PhonePoolStats>("/phones/stats");
   },
 
   // Jobs ---------------------------------------------------------------

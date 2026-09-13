@@ -1,5 +1,5 @@
 import { Navigate, Route, Routes } from "react-router-dom";
-import Sidebar from "./components/Sidebar";
+import Sidebar, { canSeePhones } from "./components/Sidebar";
 import Topbar from "./components/Topbar";
 import Dashboard from "./screens/Dashboard";
 import Execute from "./screens/Execute";
@@ -13,6 +13,7 @@ import Admin from "./screens/Admin";
 import AdminGate from "./screens/AdminGate";
 import Login from "./screens/Login";
 import Signup from "./screens/Signup";
+import Phones from "./screens/Phones";
 import ResetPassword from "./screens/ResetPassword";
 import { PrivacyPolicy, TermsOfService } from "./screens/Legal";
 import { useAuth } from "./contexts/AuthContext";
@@ -38,6 +39,7 @@ export default function App() {
 
   // Not logged in — only show auth pages
   if (!token || !user) {
+    const phonesVisible = canSeePhones(null, false, false); // open mode: shared account
     // Login auth is OFF (the admin toggle): the site opens straight into the
     // normal user UI. The admin panel is reachable ONLY through the secret
     // /admin4269 password gate.
@@ -52,6 +54,7 @@ export default function App() {
                 <Route path="/admin4269" element={<AdminGate />} />
                 <Route path="/" element={<Dashboard />} />
                 <Route path="/research" element={<Execute />} />
+                {phonesVisible && <Route path="/phones" element={<Phones />} />}
                 <Route path="/leads" element={<Leads />} />
                 <Route path="/contacts" element={<Contacts />} />
                 <Route path="/campaigns" element={<Campaigns />} />
@@ -90,6 +93,9 @@ export default function App() {
   }
 
   // Logged in — normal app shell
+  // P3: the Phones route exists only for accounts whose category includes
+  // phones (phones | both) or the admin — the nav link uses the same rule.
+  const phonesVisible = canSeePhones(user.category, user.is_admin, true);
   return (
     <div className="h-screen w-full overflow-hidden bg-[#0B0E14] text-slate-200 flex font-sans">
       <Sidebar />
@@ -99,6 +105,7 @@ export default function App() {
           <Routes>
             <Route path="/" element={<Dashboard />} />
             <Route path="/research" element={<Execute />} />
+            {phonesVisible && <Route path="/phones" element={<Phones />} />}
             <Route path="/leads" element={<Leads />} />
             <Route path="/contacts" element={<Contacts />} />
             <Route path="/campaigns" element={<Campaigns />} />

@@ -42,12 +42,29 @@ def _capture_send(monkeypatch):
     return sent
 
 
+def _fresh_token(ctx):
+    """Re-date the connected account's token expiry to the REAL now.
+
+    ``_setup`` connects it with ``NOW + 1h`` where NOW is a FIXED datetime —
+    but the test-send endpoint checks expiry against the real wall clock, so
+    after that fixed moment passes, every happy-path test-send 409s as an
+    expired token (a time-bomb, same family as the frozen-Clock selfcheck
+    one). The scheduler-based tests are immune (their Clock is consistent);
+    only this endpoint compares fake-NOW to real now.
+    """
+    ctx["email_store"].update_tokens(
+        ctx["account_id"], ctx["user"].id, access_token="AT-1",
+        token_expires_at=_iso(datetime.now(timezone.utc) + timedelta(hours=1)),
+    )
+
+
 # ---------------------------------------------------------------------------
 # The happy path — rendered draft, delivered, NOTHING created
 # ---------------------------------------------------------------------------
 
 def test_test_send_renders_sample_lead_and_sends(tmp_path, monkeypatch):
     ctx = _setup(tmp_path, monkeypatch)
+    _fresh_token(ctx)
     sent = _capture_send(monkeypatch)
     resp = _post(ctx)
     assert resp.status_code == 200
@@ -68,6 +85,7 @@ def test_test_send_creates_nothing(tmp_path, monkeypatch):
     """The spam check must never pollute real campaign data: no campaign,
     no send row, and the test recipient is not 'already emailed'."""
     ctx = _setup(tmp_path, monkeypatch)
+    _fresh_token(ctx)
     _capture_send(monkeypatch)
     assert _post(ctx).status_code == 200
     assert ctx["store"].list_for_user(ctx["user"].id) == []
@@ -136,6 +154,7 @@ def test_test_send_empty_subject_422(tmp_path, monkeypatch):
 
 def test_test_send_failure_is_502_and_marks_revoked(tmp_path, monkeypatch):
     ctx = _setup(tmp_path, monkeypatch)
+    _fresh_token(ctx)
 
     def refuse(*a, **kw):
         raise RuntimeError("401 invalid_grant")

@@ -490,8 +490,13 @@ def test_api_already_sent_exclusion(tmp_path, monkeypatch):
 def test_api_pause_resume_delete(tmp_path, monkeypatch):
     ctx = _setup(tmp_path, monkeypatch)
     ctx["leads"].save(_dossier("jane@acme.com"))
-    cid = ctx["client"].post("/api/v1/campaigns",
-                             json=_create_body(ctx)).json()["campaign"]["id"]
+    # start_at in the REAL future: resume compares against datetime.now, not
+    # the test's fixed NOW (whose +1h moment has passed — time-bomb).
+    cid = ctx["client"].post(
+        "/api/v1/campaigns",
+        json=_create_body(
+            ctx, start_at=_iso(datetime.now(timezone.utc) + timedelta(hours=1)))
+    ).json()["campaign"]["id"]
 
     # Scheduled -> pause -> resume returns it to SCHEDULED (start in future).
     assert ctx["client"].post(f"/api/v1/campaigns/{cid}/pause").json()["status"] == "paused"

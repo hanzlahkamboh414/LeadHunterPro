@@ -9,6 +9,11 @@ one). This module closes that gap with the company's OWN website:
 
 Honesty rules (CLAUDE.md §1/§12):
 
+* Stage 0 (P8): the Overture places dataset carries emails for many
+  phone numbers; one local phone-keyed lookup answers those for FREE
+  before any search credit is spent. It is materialized data, not a
+  guess — but it is still a dataset the business itself published, so a
+  hit short-circuits the pipeline as a first-class source.
 * Only emails LITERALLY SEEN on the company's own pages are returned by the
   crawl stage — a page on Yelp/Facebook is a listing, not the company.
 * When the crawl finds nothing, the P5 pattern-inference engine runs as a
@@ -122,9 +127,27 @@ def _pick_best_email(emails: list[str], website: str) -> str:
     return emails[0] if emails else ""
 
 
+def _default_overture(phone: str) -> dict[str, str]:
+    """The production stage-0 lookup: Overture's phone-keyed email table.
+
+    Returns ``{}`` whenever the local ``overture.duckdb`` has not been
+    synced yet (or anything goes wrong) — stage 0 is an accelerator over
+    the local materialization of a FREE dataset, never a dependency.
+    """
+    try:
+        from app.phones.overture import OvertureStore
+
+        hits = OvertureStore().lookup_emails([phone])
+        return hits.get(phone, {})
+    except Exception:  # noqa: BLE001 — stage 0 must never break enrichment
+        logger.info("overture stage 0 unavailable — honest empty", exc_info=True)
+        return {}
+
+
 def enrich_lead(
     lead: dict[str, Any],
     *,
+    overture_fn: Callable[[str], dict[str, str]] | None = None,
     search_fn: Callable[[str, int], list[str]] | None = None,
     fetch_fn: Callable[..., Any] | None = None,
     infer_fn: Callable[[str, str], dict[str, Any]] | None = None,
@@ -133,16 +156,35 @@ def enrich_lead(
     dork}``.
 
     ``email`` is '' when nothing findable — an honest miss, never a guess.
-    ``email_source`` says HOW it was found: ``website`` (literally seen on
-    the company's own page) or ``pattern_inference`` (the mail server
-    confirmed the permutation). ``dork`` tags the emails-vertical feed lane.
+    ``email_source`` says HOW it was found: ``overture`` (the P8 phone-keyed
+    dataset join — free, no crawl spent), ``website`` (literally seen on the
+    company's own page) or ``pattern_inference`` (the mail server confirmed
+    the permutation). ``dork`` tags the emails-vertical feed lane.
     ``website`` is recorded even without an email: it is the provenance of
     the attempt and the input P5's pattern-inference engine needs.
     """
+    do_overture = overture_fn or _default_overture
     search = search_fn or _default_search
     do_fetch = fetch_fn or _default_fetch
     do_infer = infer_fn or infer_verified_email
     parser = HTMLParser()
+
+    # Stage 0 (P8): Overture already KNOWS the email behind many numbers —
+    # one local-dictionary lookup, and a hit means the search and crawl (and
+    # their credits) are never spent on this lead. The furniture rules apply
+    # to dataset emails exactly as to scraped ones (§14): a placeholder is
+    # a miss, and the pipeline falls through.
+    phone = (lead.get("phone") or "").strip()
+    if phone:
+        hit = do_overture(phone)
+        emails = _clean_emails([hit.get("email", "")])
+        if emails:
+            return {
+                "email": emails[0],
+                "email_source": "overture",
+                "website": hit.get("website", ""),
+                "dork": "overture",
+            }
 
     business = (lead.get("business_name") or "").strip()
     if not business:

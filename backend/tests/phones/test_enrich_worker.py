@@ -182,3 +182,29 @@ def test_pattern_inference_lane_feeds_the_emails_vertical(stores):
     mine = phone_store.list_owned("alice")
     assert mine[0]["email"] == "jane.smith@acmegc.com"
     assert mine[0]["email_source"] == "pattern_inference"
+
+
+def test_overture_lane_feeds_the_emails_vertical(stores):
+    """A P8 Overture-joined email (dork=overture) feeds the pending cache
+    under its OWN lane tag, exactly like the other lanes."""
+    phone_store, pending_store = stores
+    phone_store.add([_rec("5031110001")])
+    phone_store.serve("gc", "", "", 10, "alice")
+
+    worker = PhoneEnrichmentWorker(
+        phone_store, pending_store,
+        enrich=lambda l: {
+            "email": "info@acme.com",
+            "email_source": "overture",
+            "website": "https://acme.com",
+            "dork": "overture",
+        },
+    )
+    stats = worker.run_once()
+    assert stats["found"] == 1 and stats["fed_to_emails"] == 1
+    cached = pending_store.get("info@acme.com")
+    assert cached is not None
+    assert cached["dork"] == "overture"
+
+    mine = phone_store.list_owned("alice")
+    assert mine[0]["email_source"] == "overture"

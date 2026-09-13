@@ -10,6 +10,16 @@ python-multipart>=0.0.9
 sqlalchemy>=2.0.0
 alembic>=1.13.0
 psycopg2-binary>=2.9.0
+#
+# duckdb: the P8 Overture connector. Overture Maps' places theme (74M
+# businesses, free CDLA Permissive 2.0) is the only open dataset with
+# emails keyed by phone number, published as Parquet on anonymous S3.
+# DuckDB + httpfs is the query engine for the one-time (monthly) bulk
+# sync into output/overture.duckdb; lookups then run locally. A live
+# list_has_any scan over S3 measured ~7 minutes (2026-09-14, release
+# 2026-08-19.0), which is why the join is materialized, not queried
+# per lead. Verified live 2026-09-14 against duckdb 1.5.5.
+duckdb>=1.1.0
 
 # Validation & settings
 pydantic>=2.0.0

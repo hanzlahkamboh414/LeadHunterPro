@@ -158,8 +158,9 @@ class PhoneEnrichmentWorker:
             "person": lead.get("person_name", ""),
             "source_url": outcome.get("website", "") or lead.get("source_url", ""),
             "location": location,
-            # The lane tag: "phone_enrichment" (literally seen on the site)
-            # or "pattern_inference" (P5 — mail-server-confirmed permutation).
+            # The lane tag: "overture" (P8 — the phone-keyed dataset join),
+            # "phone_enrichment" (literally seen on the site) or
+            # "pattern_inference" (P5 — mail-server-confirmed permutation).
             "dork": outcome.get("dork", "") or "phone_enrichment",
             "trade": lead.get("trade", ""),
         }])

@@ -5,6 +5,13 @@ the send row (HMAC-signed). The pixel endpoint is unauthenticated — the
 signature is the auth — and a forged token gets the same gif but marks
 nothing. Only a SENT row can open; the first open time is kept forever.
 
+Counting is honest, not naive: an <img> request carries no viewer
+identity, so two glitches are filtered by time — a fire within the
+post-send grace is the SENDER opening their own Sent copy (not counted),
+and a fire within the dedupe window of the last counted open is the same
+view re-fetched by the mail client's image proxy (Gmail does this several
+times per open — without the dedupe, one view showed as 3x).
+
 Sends view: sends() now carries opened_at / opened_count / replied_at per
 lead, so the Campaigns screen can show the whole story — which lead, via
 which account, when sent, when the follow-up is due, when opened, when
@@ -19,12 +26,16 @@ subject they were actually sent with.
 from __future__ import annotations
 
 import base64
+from datetime import datetime, timedelta, timezone
 from email import message_from_bytes
 
 from fastapi.testclient import TestClient
 
 import app.email_accounts.google as google
-from app.campaigns.tracking import PIXEL_GIF, parse_token, pixel_token, pixel_url
+from app.campaigns.tracking import (
+    OPEN_DEDUPE_S, OPEN_SEND_GRACE_S, PIXEL_GIF, is_repeat_view,
+    is_sender_selfcheck, parse_token, pixel_token, pixel_url,
+)
 from app.main import app
 
 from tests.campaigns.test_multiaccount_ai import (
@@ -37,6 +48,26 @@ def _sent_row(ctx, campaign_id: int, email: str) -> dict:
             if s["email"] == email and s["state"] == "sent"]
     assert rows, f"no sent row for {email}"
     return rows[-1]
+
+
+def _ago(hours: float) -> str:
+    return (datetime.now(timezone.utc) -
+            timedelta(hours=hours)).isoformat()
+
+
+def _backdate(ctx, send_id: int, *, sent_at: str | None = None,
+              last_open_at: str | None = None) -> None:
+    """Rewind a send row's clocks so a pixel fire 'now' is outside the
+    grace/dedupe windows (tests can't wait an hour for the real thing)."""
+    conn = ctx["store"]._conn()
+    if sent_at is not None:
+        conn.execute("UPDATE campaign_sends SET sent_at = ? WHERE id = ?",
+                     (sent_at, send_id))
+    if last_open_at is not None:
+        conn.execute("UPDATE campaign_sends SET last_open_at = ? WHERE id = ?",
+                     (last_open_at, send_id))
+    conn.commit()
+    conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -69,13 +100,14 @@ def test_pixel_url_shape():
 
 def test_pixel_marks_open_anonymously(tmp_path, monkeypatch):
     """The <img> tag carries no JWT — the signature is the auth. A real
-    token marks the open (first time kept, count grows); a forged one gets
-    the same gif but marks nothing."""
+    token (after the send grace has passed) marks the open: first counted
+    time kept, count grows — but only for NEW views, an hour apart."""
     ctx = _setup(tmp_path, monkeypatch, accounts=1)
     _capture_send(monkeypatch)
     c = _make_campaign(ctx, emails=["a@x.com"])
     ctx["sched"].run_once()
     row = _sent_row(ctx, c["id"], "a@x.com")
+    _backdate(ctx, row["id"], sent_at=_ago(2))  # past the send grace
 
     anon = TestClient(app)  # no Authorization header at all
     r = anon.get(f"/api/v1/campaigns/track/{pixel_token(row['id'])}.png")
@@ -90,13 +122,67 @@ def test_pixel_marks_open_anonymously(tmp_path, monkeypatch):
     assert mine["opened_count"] == 1
     first_open = mine["opened_at"]
 
-    # Second load: count grows, the FIRST open time stays.
+    # Immediate re-fetch: SAME view (the mail client's image proxy asks
+    # repeatedly) — count stays 1, the FIRST open time stays.
     r2 = anon.get(f"/api/v1/campaigns/track/{pixel_token(row['id'])}.png")
     assert r2.status_code == 200 and r2.content == PIXEL_GIF
     mine = next(s for s in ctx["store"].sends(
         c["id"], ctx["user"].id) if s["id"] == row["id"])
+    assert mine["opened_count"] == 1
+    assert mine["opened_at"] == first_open
+
+    # An hour later it IS a new view: count grows, first time still kept.
+    _backdate(ctx, row["id"], last_open_at=_ago(2))
+    r3 = anon.get(f"/api/v1/campaigns/track/{pixel_token(row['id'])}.png")
+    assert r3.status_code == 200
+    mine = next(s for s in ctx["store"].sends(
+        c["id"], ctx["user"].id) if s["id"] == row["id"])
     assert mine["opened_count"] == 2
     assert mine["opened_at"] == first_open
+
+
+def test_sender_selfcheck_open_not_counted(tmp_path, monkeypatch):
+    """The user report: the SENDER opening their own Sent copy right
+    after sending fired the pixel and showed as opens. A fire within the
+    post-send grace is that self-check — nothing is marked."""
+    ctx = _setup(tmp_path, monkeypatch, accounts=1)
+    _capture_send(monkeypatch)
+    c = _make_campaign(ctx, emails=["a@x.com"])
+    ctx["sched"].run_once()
+    row = _sent_row(ctx, c["id"], "a@x.com")
+    # No backdating: sent_at is 'now', the fetch is within the grace.
+
+    anon = TestClient(app)
+    r = anon.get(f"/api/v1/campaigns/track/{pixel_token(row['id'])}.png")
+    assert r.status_code == 200 and r.content == PIXEL_GIF  # same gif
+    mine = next(s for s in ctx["store"].sends(
+        c["id"], ctx["user"].id) if s["id"] == row["id"])
+    assert mine["opened_at"] == ""
+    assert mine["opened_count"] == 0
+
+
+def test_open_window_helpers():
+    """The two time filters, at their boundaries — and failing OPEN when
+    a timestamp can't be parsed (a bad value must never hide a real open)."""
+    now = datetime.now(timezone.utc).isoformat()
+
+    def _s_ago(seconds: float) -> str:
+        return (datetime.now(timezone.utc) -
+                timedelta(seconds=seconds)).isoformat()
+
+    # Sender self-check: within the grace yes, past it no.
+    assert is_sender_selfcheck(_s_ago(60), now) is True
+    assert is_sender_selfcheck(_s_ago(OPEN_SEND_GRACE_S + 60), now) is False
+    assert is_sender_selfcheck("", now) is False          # never sent?
+    assert is_sender_selfcheck("garbage", now) is False   # fail open
+    # Repeat view: within the dedupe window yes, past it / never no.
+    assert is_repeat_view(_s_ago(60), now) is True
+    assert is_repeat_view(_s_ago(OPEN_DEDUPE_S + 60), now) is False
+    assert is_repeat_view("", now) is False               # first open
+    assert is_repeat_view("garbage", now) is False        # fail open
+    # The windows are the documented constants.
+    assert OPEN_SEND_GRACE_S == 300
+    assert OPEN_DEDUPE_S == 3600
 
 
 def test_forged_token_marks_nothing(tmp_path, monkeypatch):

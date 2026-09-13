@@ -45,6 +45,7 @@ import threading
 from typing import Any
 
 from app.auth.models import _now
+from app.campaigns.tracking import is_repeat_view, is_sender_selfcheck
 
 _INIT_LOCK = threading.RLock()
 
@@ -193,6 +194,11 @@ class CampaignStore:
             if "opened_count" not in cols:
                 conn.execute("ALTER TABLE campaign_sends "
                              "ADD COLUMN opened_count INTEGER NOT NULL DEFAULT 0")
+            # Dedupe anchor: when the last COUNTED open happened, so a
+            # re-fetched pixel (same view) doesn't inflate the count.
+            if "last_open_at" not in cols:
+                conn.execute("ALTER TABLE campaign_sends "
+                             "ADD COLUMN last_open_at TEXT NOT NULL DEFAULT ''")
             # Every campaign's primary account becomes a campaign_accounts row
             # (idempotent) — pre-E5 campaigns keep working unchanged.
             conn.execute(
@@ -644,16 +650,35 @@ class CampaignStore:
     # -- Status transitions ------------------------------------------------
 
     def mark_opened(self, send_id: int, *, opened_at: str) -> bool:
-        """The tracking pixel fired: count this open, keep the FIRST open
-        time. Only a SENT row can open — a forged token naming a pending
-        or failed row marks nothing."""
+        """The tracking pixel fired — count it, unless it isn't a real,
+        NEW open. Only a SENT row can open, and a fire that is (a) within
+        the post-send grace (the sender viewing their own Sent copy — an
+        <img> request carries no viewer identity, time is the only
+        signal) or (b) within the dedupe window of the last counted open
+        (the mail client's image proxy re-fetching the pixel for the SAME
+        view — Gmail does this several times per open) is skipped. The
+        first counted open time is kept forever. A forged token naming a
+        pending or failed row marks nothing."""
         conn = self._conn()
+        row = conn.execute(
+            "SELECT sent_at, last_open_at FROM campaign_sends "
+            "WHERE id = ? AND state = 'sent'",
+            (send_id,),
+        ).fetchone()
+        if row is None:
+            conn.close()
+            return False
+        if is_sender_selfcheck(row[0] or "", opened_at) \
+                or is_repeat_view(row[1] or "", opened_at):
+            conn.close()
+            return False
         cur = conn.execute(
             "UPDATE campaign_sends SET "
             "opened_count = opened_count + 1, "
-            "opened_at = CASE WHEN opened_at = '' THEN ? ELSE opened_at END "
+            "opened_at = CASE WHEN opened_at = '' THEN ? ELSE opened_at END, "
+            "last_open_at = ? "
             "WHERE id = ? AND state = 'sent'",
-            (opened_at, send_id),
+            (opened_at, opened_at, send_id),
         )
         conn.commit()
         conn.close()

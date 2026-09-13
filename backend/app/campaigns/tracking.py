@@ -12,10 +12,21 @@ never by a third-party tracker, and the only data it produces is "this
 email was opened, now, for the Nth time" — which is exactly what the
 privacy policy says. Honest by construction.
 
+An <img> request carries NO viewer identity, so two glitches of the
+technique are filtered by TIME, not by identity:
+* the sender opening their own Sent copy right after sending (to see
+  how it looks) fires the pixel too — a fire within OPEN_SEND_GRACE_S
+  of the send itself is treated as that self-check and not counted;
+* mail clients (Gmail's image proxy worst of all) re-fetch the pixel
+  several times for ONE view — a fire within OPEN_DEDUPE_S of the last
+  COUNTED open is the same view and not counted either.
+
 Known honesty limits (inherent to the technique, not bugs): image
 caching and privacy features like Apple Mail Privacy Protection can
-record an open nobody did, and clients that block images record nothing.
-The open count is a signal, not a proof.
+record an open nobody did, clients that block images record nothing,
+and a sender opening their Sent copy AFTER the grace window still
+counts — no pixel tracker on earth can tell those apart. The open count
+is a signal, not a proof.
 """
 
 from __future__ import annotations
@@ -23,8 +34,47 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+from datetime import datetime
 
 from app.core.config import settings
+
+#: A pixel fire this soon after the SEND is the sender opening their own
+#: Sent copy (the mail client re-fetches remote images for it), not the
+#: recipient — don't count it.
+OPEN_SEND_GRACE_S = 300
+
+#: A pixel fire this soon after the last COUNTED open is the same view
+#: re-fetched (Gmail's image proxy requests the pixel repeatedly per
+#: single open — without this, one view showed as 3x).
+OPEN_DEDUPE_S = 3600
+
+
+def _gap_seconds(anchor: str, now: str) -> float | None:
+    """Seconds from ``anchor`` to ``now``, or None when either timestamp
+    can't be parsed. Callers treat None as "no evidence" and count the
+    open — a bad timestamp must never hide a real one."""
+    try:
+        return (datetime.fromisoformat(now) - datetime.fromisoformat(anchor)
+                ).total_seconds()
+    except (ValueError, TypeError):
+        return None
+
+
+def is_sender_selfcheck(sent_at: str, now: str) -> bool:
+    """True when this pixel fire is within the post-send grace — almost
+    certainly the SENDER viewing their own Sent copy, not the recipient."""
+    gap = _gap_seconds(sent_at, now)
+    return gap is not None and gap < OPEN_SEND_GRACE_S
+
+
+def is_repeat_view(last_open_at: str, now: str) -> bool:
+    """True when this pixel fire lands within the dedupe window of the
+    last COUNTED open — the same view re-fetched by the mail client's
+    image proxy. An empty anchor (never counted) is never a repeat."""
+    if not last_open_at:
+        return False
+    gap = _gap_seconds(last_open_at, now)
+    return gap is not None and gap < OPEN_DEDUPE_S
 
 #: The classic 43-byte 1x1 transparent GIF.
 PIXEL_GIF = base64.b64decode(

@@ -220,7 +220,9 @@ def track_open(token: str) -> Response:
     """The open-tracking pixel: an invisible 1x1 GIF named by an
     HMAC-signed send id. Deliberately UNAUTHENTICATED — an <img> tag
     carries no JWT; the signature in the token is the auth. A random or
-    forged URL gets the same gif and marks nothing (no probing oracle)."""
+    forged URL gets the same gif and marks nothing (no probing oracle).
+    The store filters fires by time: the sender's own just-sent copy and
+    re-fetches of the same view don't count (see tracking.py)."""
     if token.endswith(".png"):
         token = token[:-4]
     send_id = parse_token(token)

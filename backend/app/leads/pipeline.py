@@ -1634,6 +1634,14 @@ def run_full(
     else:
         shortfall_reason = "max_topup_rounds_reached"
 
+    # HARVEST BUDGET (P12 blocker fix): a cancelled run is a STOP, not a
+    # failure — when the caller's cancel seam fired (the harvester's
+    # wall-clock budget), the run reports the honest budget reason so the
+    # pass log can distinguish "stopped by budget" from "sources drained".
+    # Whatever was researched is already banked (shared dossiers persist).
+    if cancel is not None and cancel() and not shortfall_reason:
+        shortfall_reason = "harvest_budget_expired"
+
     if instant:
         # Merge the instant serve back on top: the run's real delivery is
         # instant pool leads + freshly discovered ones, measured against the
@@ -2138,7 +2146,15 @@ def _run_full_streaming(
             with state_lock:
                 producer_done = True
                 if working < target_emails:
-                    shortfall_reason = shortfall_reason or "discovery_exhausted"
+                    # HARVEST BUDGET (P12 blocker fix, streaming twin of the
+                    # serial path): a cancelled producer stopped by budget is
+                    # an honest budget stop — reported as such, never mis-
+                    # labeled discovery_exhausted.
+                    if cancel is not None and cancel():
+                        shortfall_reason = (
+                            shortfall_reason or "harvest_budget_expired")
+                    else:
+                        shortfall_reason = shortfall_reason or "discovery_exhausted"
 
     def _research_one(email: str, domain: str, source_url: str, dork: str,
                       t0: float) -> dict | None:

@@ -256,6 +256,78 @@ def test_emails_lane_research_error_is_honest(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# emails-lane wall-clock budget (the 2.5-hour grind fix)
+# ---------------------------------------------------------------------------
+
+def test_budget_expired_is_false_outside_a_pass(tmp_path):
+    """No pass running -> the cancel seam must read False (run_full is
+    only ever inside a pass when it calls cancel, but the deadline is
+    also None between passes — an old deadline can never leak)."""
+    worker = _worker(tmp_path, email_budget_s=0.01)
+    assert worker._budget_expired() is False
+    assert worker._email_deadline is None
+
+
+def test_budget_deadline_set_during_pass_and_cleared_after(tmp_path):
+    """The pass arms the deadline before research and clears it in a
+    finally — even a crashing research call never leaves one armed."""
+    def spy(query):
+        assert worker._email_deadline is not None  # armed while running
+        return {"leads_found": 3, "working_leads": 3, "shortfall": 0}
+    worker = _worker(tmp_path, research=spy)
+    worker._store.record_demand("roofing", "TX")
+    stats = worker.run_once()
+    assert stats["emails"]["stocked"] == 3
+    assert worker._email_deadline is None
+
+    def boom(query):
+        raise RuntimeError("ai down")
+    worker._research = boom
+    worker._store.record_demand("plumbing", "WA")
+    worker.run_once()
+    assert worker._email_deadline is None  # cleared even on the error path
+
+
+def test_budget_expired_fires_once_deadline_passes(tmp_path):
+    worker = _worker(tmp_path, email_budget_s=0.05)
+    worker._store.record_demand("roofing", "TX")
+
+    def slow(query):
+        # Simulate the 2.5-hour grind: outlast the budget, keep "working".
+        import time as _t
+        while not worker._budget_expired():
+            _t.sleep(0.01)
+        return {"leads_found": 5, "working_leads": 5, "shortfall": 20,
+                "shortfall_reason": "harvest_budget_expired"}
+
+    worker._research = slow
+    stats = worker.run_once()
+    emails = stats["emails"]
+    assert emails["stocked"] == 5            # what was banked by the deadline
+    assert worker._store.quota_used("emails") == 5
+    # The run history records the budget split honestly.
+    run = worker._store.recent_runs("emails")[0]
+    assert run["outcome"] == "success"
+    assert "budget_hit=yes" in run["detail"]
+
+
+def test_zero_budget_disables_the_deadline(tmp_path):
+    """budget=0 means "no budget" (the old behaviour), not "instant
+    cancel" — deadline stays None and the seam reads False forever."""
+    worker = _worker(tmp_path, email_budget_s=0)
+    worker._store.record_demand("roofing", "TX")
+
+    def plain(query):
+        assert worker._budget_expired() is False
+        return {"leads_found": 2, "working_leads": 2, "shortfall": 0}
+
+    worker._research = plain
+    stats = worker.run_once()
+    assert stats["emails"]["stocked"] == 2
+    assert worker._email_deadline is None
+
+
+# ---------------------------------------------------------------------------
 # staleness re-verify
 # ---------------------------------------------------------------------------
 

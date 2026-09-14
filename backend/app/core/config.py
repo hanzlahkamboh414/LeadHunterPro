@@ -179,6 +179,15 @@ class Settings(BaseSettings):
     HARVEST_PAIR_COOLDOWN_S: float = 21600.0  # one pair every 6h max
     HARVEST_MIN_POOL_FLOOR: int = 100         # per trade×state pool target
     HARVEST_STALENESS_DAYS: int = 30
+    # Wall-clock budget for ONE emails-lane pass (soft stop via run_full's
+    # cancel seam, checked between passes and between researched leads).
+    # Live evidence 2026-09-14: an electrician/TX discovery loop ground on
+    # for 2.5 HOURS — no budget meant a blocked harvester thread and hours
+    # of discovery data accumulating in RAM (the OOM curve's slow half).
+    # 45 min keeps a pass a pass; whatever is stocked by then is banked and
+    # the next pass resumes with fresh cooldown — the demand-gated lane
+    # never loses a pair, it just splits the work.
+    HARVEST_EMAIL_BUDGET_S: float = 2700.0
     DAILY_PHONE_QUOTA: int = 5000
     DAILY_EMAIL_QUOTA: int = 2000
 

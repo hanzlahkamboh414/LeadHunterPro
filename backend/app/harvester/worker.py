@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -89,6 +90,7 @@ class HarvesterWorker:
         interval_s: float = 300.0,
         phone_batch: int = 250,
         email_batch: int = 25,
+        email_budget_s: float = 2700.0,
         pair_cooldown_s: float = 21600.0,
         min_pool_floor: int = 100,
         staleness_days: int = 30,
@@ -115,11 +117,18 @@ class HarvesterWorker:
         self._interval_s = interval_s
         self._phone_batch = phone_batch
         self._email_batch = email_batch
+        self._email_budget_s = email_budget_s
         self._pair_cooldown_s = pair_cooldown_s
         self._min_pool_floor = min_pool_floor
         self._staleness_days = staleness_days
         self._daily_phone_quota = daily_phone_quota
         self._daily_email_quota = daily_email_quota
+        # Emails-lane wall-clock deadline for the CURRENT pass (a
+        # monotonic timestamp, or None when no pass is running). Set by
+        # _harvest_emails, read by _budget_expired through run_full's
+        # cancel seam — a plain bool flag could not express "the pass is
+        # over, stop", only "someone asked to stop".
+        self._email_deadline: float | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -351,15 +360,36 @@ class HarvesterWorker:
             return trade, state
         return None
 
+    def _budget_expired(self) -> bool:
+        """run_full's cancel seam: True once the current emails pass has
+        outrun its wall-clock budget (no pass running = not cancelled —
+        run_full only ever calls this while one is)."""
+        return (
+            self._email_deadline is not None
+            and time.monotonic() >= self._email_deadline
+        )
+
     def _default_research(self, query: ResearchQuery) -> dict[str, Any]:
         """The real emails lane: run_full with SHARED dossiers (user_id="").
-        Any user's later search serves them instantly from the pool."""
+        Any user's later search serves them instantly from the pool.
+
+        The pass carries a WALL-CLOCK BUDGET (``email_budget_s``, soft
+        cancel seam): a discovery loop with no budget ground on for
+        2.5 hours on the 2026-09-14 test server, blocking the harvester
+        thread and stacking discovery data in RAM. The budget is checked
+        between discovery passes and between researched leads, so
+        whatever is researched by the deadline is banked (a shared
+        dossier is a shared dossier); the pair's cooldown then splits
+        the remaining work across later passes — the demand-gated lane
+        never loses a pair, it just never grinds.
+        """
         from app.leads.pipeline import run_full
         return run_full(
             query,
             store=self._lead_store,
             pending_store=self._pending_store,
             user_id="",
+            cancel=self._budget_expired,
         )
 
     def _harvest_emails(self) -> dict[str, Any]:
@@ -384,6 +414,10 @@ class HarvesterWorker:
             search_name="harvester",
         )
         try:
+            self._email_deadline = (
+                time.monotonic() + self._email_budget_s
+                if self._email_budget_s > 0 else None
+            )
             result = self._research(query)
         except Exception:  # noqa: BLE001 — one bad harvest must not kill the pass
             self._store.record_run("emails", trade, state, "error", 0)
@@ -393,21 +427,29 @@ class HarvesterWorker:
                 trade, state,
             )
             return outcome
+        finally:
+            self._email_deadline = None
         stocked = int(result.get("leads_found") or 0)
         self._store.record_stocked("emails", stocked)
+        budget_note = (
+            " budget_hit=yes (pass split — remainder on a later pass)"
+            if result.get("shortfall_reason") == "harvest_budget_expired"
+            else ""
+        )
         self._store.record_run(
             "emails", trade, state, "success", stocked,
             detail=(f"target={target} working={result.get('working_leads', 0)} "
-                    f"shortfall={result.get('shortfall', 0)}"),
+                    f"shortfall={result.get('shortfall', 0)}{budget_note}"),
         )
         outcome["pair"] = pair
         outcome["target"] = target
         outcome["stocked"] = stocked
         logger.info(
             "harvester emails lane: researched %d lead(s) for %s/%s "
-            "(target %d, working %s, shortfall %s)",
+            "(target %d, working %s, shortfall %s%s)",
             stocked, trade, state, target,
             result.get("working_leads", 0), result.get("shortfall", 0),
+            budget_note,
         )
         return outcome
 
@@ -491,6 +533,7 @@ def get_worker() -> HarvesterWorker:
                 interval_s=settings.HARVESTER_INTERVAL_S,
                 phone_batch=settings.HARVEST_PHONE_BATCH,
                 email_batch=settings.HARVEST_EMAIL_BATCH,
+                email_budget_s=settings.HARVEST_EMAIL_BUDGET_S,
                 pair_cooldown_s=settings.HARVEST_PAIR_COOLDOWN_S,
                 min_pool_floor=settings.HARVEST_MIN_POOL_FLOOR,
                 staleness_days=settings.HARVEST_STALENESS_DAYS,

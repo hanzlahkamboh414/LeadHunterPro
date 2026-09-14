@@ -1888,3 +1888,47 @@ def test_intake_gate_blocks_noise_industries():
     # Construction should NOT be blocked
     assert not prof.is_non_client("General Contractor")
     assert not prof.is_non_client("Commercial Builder")
+
+
+def test_run_full_budget_cancel_is_an_honest_stop(monkeypatch, tmp_path):
+    """The harvester's wall-clock budget rides the cancel seam: when it
+    fires mid-run, whatever was researched is banked and the shortfall
+    carries the explicit harvest_budget_expired reason — never a generic
+    failure, never a fabricated target."""
+    from app.lead_research.service import LeadResearchStore
+
+    db = str(tmp_path / "leads.db")
+    store = LeadResearchStore(db_path=db)
+
+    calls = {"n": 0}
+
+    def _staged(trade, location, limit, skip_pdfs=None, yield_store=None, candidate_store=None):
+        calls["n"] += 1
+        return SourceStatus.SUCCESS, [
+            _record(f"C{calls['n']}", f"c{calls['n']}@x.com", "x.com"),
+        ], {"pdf_urls": [f"https://ph/{calls['n']}.pdf"]}
+
+    monkeypatch.setattr("app.leads.pipeline.run_discovery", _staged)
+
+    from app.lead_research.models import CompanyProfile, LeadDossier, PersonFindings
+
+    class _LiveAgent:
+        def research(self, email, domain, *a, **k):
+            return LeadDossier(
+                email=email, domain=domain,
+                company=CompanyProfile(name="Acme", industry="general contractor", location="Texas"),
+                person=PersonFindings(name="Jane", role="Owner", bound=True, role_relevance=True),
+                potential_score=8.5, recommendation="contact_now",
+            )
+
+    monkeypatch.setattr("app.lead_research.agent.AILeadResearchAgent", _LiveAgent)
+
+    # The "budget": expired from the very start — every seam check reads
+    # True, so discovery stops after its first pass and the run reports
+    # the explicit budget reason (not no_more_leads, not a crash).
+    query = ResearchQuery(trade="gc", location="Texas", target_emails=5)
+    outcome = run_full(query, store=store, cancel=lambda: True)
+
+    assert outcome["working_leads"] <= 1     # one pass's worth banked at most
+    assert outcome["shortfall"] >= 4
+    assert outcome["shortfall_reason"] == "harvest_budget_expired"

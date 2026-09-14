@@ -195,3 +195,33 @@ def test_mx_status_lookup_exception_is_unknown():
 def test_mx_status_hosts_passthrough():
     assert mx_status("acme.com", lookup=_mx("hosts", ["mx.acme.com"])) == (
         "hosts", ["mx.acme.com"])
+
+
+def test_public_resolvers_down_falls_back_to_system(monkeypatch):
+    """Networks that block UDP/53 to public resolvers (the EC2 test VPS)
+    still get verdicts: the SYSTEM resolver is tried last, and once it
+    answers it is remembered so later domains skip the dead fallbacks."""
+    import dns.resolver
+
+    import app.email.heuristic_verifier as hv
+
+    class _Rec:
+        preference, exchange = 10, "mx.acme.com."
+
+    class _FakeResolver:
+        def __init__(self):
+            self.nameservers = []  # [] = the system default config
+
+        def resolve(self, domain, rdtype):
+            if self.nameservers:
+                # A public resolver — simulate the network block.
+                raise OSError("UDP/53 blocked")
+            return [_Rec()]
+
+    monkeypatch.setattr(hv, "_preferred_ns", [])
+    monkeypatch.setattr(dns.resolver, "Resolver", _FakeResolver)
+    assert hv.mx_status("acme.com") == ("hosts", ["mx.acme.com"])
+    # The system config (None) is now preferred — the second call never
+    # touches the blocked public resolvers.
+    assert hv._preferred_ns == [None]
+    assert hv.mx_status("other.com") == ("hosts", ["mx.acme.com"])

@@ -91,6 +91,11 @@ PROVIDER_FINGERPRINTS: tuple[tuple[str, str], ...] = (
 #: "unknown" is an honest "could not judge" (never a negative).
 CONFIDENCE_TIERS = ("high", "medium", "low", "unknown", "dead")
 
+#: The last resolver config that answered an MX query (see mx_status).
+#: Single-element list so the in-place update is safe to race — the
+#: worst case is one duplicated lookup, never a wrong verdict.
+_preferred_ns: list[str | None] = []
+
 
 def _provider_of(mx_hosts: list[str]) -> str:
     """The provider whose infrastructure serves these MX hosts, or ''."""
@@ -130,33 +135,49 @@ def mx_status(
 
     from app.email.domain_verifier import _FAST_DNS_RESOLVERS
 
+    # Resolver candidates: the public fast resolvers first, the SYSTEM
+    # resolver last — some networks (the EC2 test VPS) block UDP/53 to
+    # public IPs while the local/VPC resolver answers fine, and an
+    # unreachable resolver must never become a verdict. The last config
+    # that answered is remembered and tried FIRST afterwards, so a
+    # network where only the system resolver works pays the fallback
+    # timeout once, not once per domain.
+    order: list[str | None] = [*_FAST_DNS_RESOLVERS, None]
+    if _preferred_ns:
+        first = _preferred_ns[0]
+        order = [first] + [ns for ns in order if ns != first]
+
     saw_authoritative_none = False
-    for ns in _FAST_DNS_RESOLVERS:
+    for ns in order:
         resolver = dns.resolver.Resolver()
-        resolver.nameservers = [ns]
+        if ns is not None:
+            resolver.nameservers = [ns]
         resolver.timeout = timeout
         resolver.lifetime = timeout + 1.0
         try:
             answer = resolver.resolve(domain, "MX")
-            pairs = sorted(
-                (int(r.preference), str(r.exchange).rstrip(".").lower())
-                for r in answer
-            )
-            hosts = [h for _, h in pairs if h and h != "."]
-            if hosts:
-                return ("hosts", hosts)
-            # A null MX (RFC 7505): the domain publishes "we accept no
-            # mail" — authoritative.
-            return ("none", [])
         except dns.resolver.NXDOMAIN:
             # The domain itself does not exist — authoritative.
+            _preferred_ns[:] = [ns]
             return ("none", [])
         except dns.resolver.NoAnswer:
             # The domain exists but publishes no MX — authoritative.
             saw_authoritative_none = True
+            _preferred_ns[:] = [ns]
             continue
         except Exception:  # noqa: BLE001 — one dead resolver -> next
             continue
+        _preferred_ns[:] = [ns]
+        pairs = sorted(
+            (int(r.preference), str(r.exchange).rstrip(".").lower())
+            for r in answer
+        )
+        hosts = [h for _, h in pairs if h and h != "."]
+        if hosts:
+            return ("hosts", hosts)
+        # A null MX (RFC 7505): the domain publishes "we accept no
+        # mail" — authoritative.
+        return ("none", [])
     if saw_authoritative_none:
         return ("none", [])
     return ("unknown", None)

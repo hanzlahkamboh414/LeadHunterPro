@@ -39,7 +39,10 @@ from typing import Any, Callable
 from app.discovery.tradefold import trade_label
 from app.harvester.store import HarvesterStore, US_STATE_NAMES
 from app.leads.pipeline import ResearchQuery
-from app.phones.soda import TRADE_COVERAGE, fetch_license_records
+from app.phones.soda import (
+    effective_trade_coverage,
+    fetch_license_records,
+)
 from app.phones.store import PhoneLeadsStore
 
 logger = logging.getLogger(__name__)
@@ -197,8 +200,9 @@ class HarvesterWorker:
             for d in rows if not d["trade"] and d["state"]
         }
         candidates: list[tuple[float, int, str, str, str]] = []
-        for slug in sorted(TRADE_COVERAGE):
-            for state in sorted(TRADE_COVERAGE[slug]):
+        coverage = effective_trade_coverage()
+        for slug in sorted(coverage):
+            for state in sorted(coverage[slug]):
                 last = self._store.last_run_at("phones", slug, state)
                 last_dt = _parse_ts(last)
                 if (last_dt is not None
@@ -229,7 +233,20 @@ class HarvesterWorker:
         if room <= 0:
             outcome["skipped"] = "quota_exhausted"
             return outcome
-        source_id = TRADE_COVERAGE[slug][state]
+        source_id = effective_trade_coverage().get(slug, {}).get(state)
+        if not source_id:
+            # Honest skip: the source retired between selection and harvest
+            # (scout circuit breaker) — the pair cools down via record_run.
+            self._store.record_run(
+                "phones", slug, state, "no_coverage", 0,
+                detail="source retired before harvest",
+            )
+            outcome["skipped"] = "no_coverage"
+            logger.info(
+                "harvester phones lane: %s/%s lost coverage before harvest",
+                slug, state,
+            )
+            return outcome
         status, records, meta = self._fetch(
             source_id, slug, "", min(self._phone_batch, room),
         )
@@ -362,7 +379,7 @@ class HarvesterWorker:
         harvested = 0
         for item in self._store.take_reverify(1):
             slug, state = item["trade"], item["state"]
-            if TRADE_COVERAGE.get(slug, {}).get(state):
+            if effective_trade_coverage().get(slug, {}).get(state):
                 self._harvest_phone_pair(slug, state)
                 harvested += 1
                 logger.info(
@@ -377,8 +394,9 @@ class HarvesterWorker:
         pair (one queue row each)."""
         now = self._now()
         enqueued = 0
-        for slug in sorted(TRADE_COVERAGE):
-            for state in sorted(TRADE_COVERAGE[slug]):
+        coverage = effective_trade_coverage()
+        for slug in sorted(coverage):
+            for state in sorted(coverage[slug]):
                 last = _parse_ts(self._store.last_run_at("phones", slug, state))
                 if last is None:
                     continue  # never harvested — a fresh pair, not a stale one

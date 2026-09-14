@@ -24,6 +24,14 @@ Structural facts encoded here:
   - data.texas.gov DNS intermittently fails on some resolvers; requests
     support an optional pinned IP (--resolve equivalent).
 
+P9 — AI Source Scout wiring: the hand connectors above stay the seed
+coverage, and every PROMOTED scout source (:mod:`app.source_scout`)
+extends it at runtime through :func:`effective_trade_coverage`. Hand
+connectors always win per (trade, state) — a scout source fills gaps, it
+never shadows a verified hand connector. A scout source's fetches feed
+the production circuit breaker (3 consecutive fails auto-retire it and
+it drops out of coverage on the next lookup).
+
 Every fetch goes through the shared ``app.discovery.sources._http.fetch``
 (never raises, classifies into SourceStatus) so these sources degrade
 gracefully exactly like every other source (CLAUDE.md §4).
@@ -32,11 +40,17 @@ gracefully exactly like every other source (CLAUDE.md §4).
 from __future__ import annotations
 
 import logging
+import os
 from datetime import date
 from typing import Any
 
 from app.discovery.sources._http import fetch
 from app.discovery.sources.status import SourceStatus
+from app.source_scout.store import (
+    STATUS_PROMOTED,
+    ScoutStore,
+    default_db_path as _scout_db_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -77,8 +91,66 @@ TDLR_TRADE_VALUES: dict[str, list[str]] = {
 TRADE_COVERAGE: dict[str, dict[str, str]] = {
     slug: {**({"WA": "wa_license"} if slug in WA_TRADE_VALUES else {}),
            **({"TX": "tdlr_license"} if slug in TDLR_TRADE_VALUES else {})}
-    for slug in set(WA_TRADE_VALUES) | set(TDLR_TRADE_VALUES)
+    for slug in (set(WA_TRADE_VALUES) | set(TDLR_TRADE_VALUES))
 }
+
+
+def _scout_store() -> ScoutStore | None:
+    """The scout store, or None when its DB file doesn't exist yet.
+
+    The existence check is the point: a machine that never ran the scout
+    must not get ``source_scout.db`` created just because the phones lane
+    imported this module. Construction is direct (never the ``get_store()``
+    singleton — that one binds to the real output path unconditionally,
+    which would create the file the existence check just guarded against).
+    Tests monkeypatch this one seam to inject (or forbid) scout state.
+    """
+    path = _scout_db_path()
+    if not os.path.exists(path):
+        return None
+    return ScoutStore(db_path=path)
+
+
+def _promoted_scout_coverage() -> dict[str, dict[str, str]]:
+    """``{slug: {state: source_id}}`` from PROMOTED scout sources.
+
+    One indexed SQLite read per lookup (the codebase's per-call idiom), so
+    a promotion or circuit-breaker retirement is visible to the very next
+    coverage question — no cache window serving a source that just died.
+    Any read failure degrades to ``{}`` (lead serving never breaks for a
+    scout-store reason).
+    """
+    store = _scout_store()
+    if store is None:
+        return {}
+    coverage: dict[str, dict[str, str]] = {}
+    try:
+        for source_id, payload in store.promoted_payloads().items():
+            state = str(payload.get("state", "") or "").upper()
+            if not state:
+                continue  # a stateless proposal cannot sit on the grid
+            for slug in payload.get("trade_values", {}):
+                coverage.setdefault(slug, {})[state] = source_id
+    except Exception as exc:  # noqa: BLE001 — degrade, never raise
+        logger.warning("scout coverage read failed: %s", exc)
+        return {}
+    return coverage
+
+
+def effective_trade_coverage() -> dict[str, dict[str, str]]:
+    """Hand ``TRADE_COVERAGE`` + promoted scout sources, hand wins.
+
+    This is the coverage the phones lane actually serves from (P9): the
+    hand-verified WA/TDLR connectors keep every (trade, state) they own,
+    and scout sources only fill the pairs nobody hand-wired.
+    """
+    merged: dict[str, dict[str, str]] = {
+        slug: dict(states) for slug, states in TRADE_COVERAGE.items()
+    }
+    for slug, states in _promoted_scout_coverage().items():
+        for state, src in states.items():
+            merged.setdefault(slug, {}).setdefault(state, src)
+    return merged
 
 
 def covered_sources(slug: str, state: str = "") -> list[str]:
@@ -87,7 +159,7 @@ def covered_sources(slug: str, state: str = "") -> list[str]:
     ``state=''`` (any) returns every source covering the trade. An empty
     list is an honest "no phone source covers this yet", never a fake fetch.
     """
-    coverage = TRADE_COVERAGE.get(slug, {})
+    coverage = effective_trade_coverage().get(slug, {})
     if state:
         src = coverage.get(state.upper())
         return [src] if src else []
@@ -100,9 +172,9 @@ def state_sources(state: str) -> list[str]:
     means "some license board stocks this state" — any trade)."""
     st = (state or "").strip().upper()
     if not st:
-        return sorted({src for m in TRADE_COVERAGE.values()
+        return sorted({src for m in effective_trade_coverage().values()
                        for src in m.values()})
-    return sorted({src for m in TRADE_COVERAGE.values()
+    return sorted({src for m in effective_trade_coverage().values()
                    for s, src in m.items() if s == st})
 
 
@@ -195,12 +267,13 @@ def _fetch_page(
             return SourceStatus.SUCCESS, rows, ""
         return result.status, [], result.error or "fetch_failed"
 
-    # Pinned-IP retry (DNS failed on the normal path).
+    # Pinned-IP retry (DNS failed on the normal path). The host is replaced
+    # generically (the --resolve equivalent for whichever portal is pinned).
     try:
         import requests
 
-        pinned = url.replace("data.texas.gov", pinned_ip)
         host = url.split("/")[2]
+        pinned = url.replace(host, pinned_ip)
         logger.warning(
             "SODA fetch to %s failed at the resolver — retrying once against "
             "pinned IP %s (unverified TLS: public read-only data)",
@@ -219,6 +292,113 @@ def _fetch_page(
         return SourceStatus.SUCCESS, rows, ""
     except Exception as exc:  # noqa: BLE001 - degrade, never raise
         return SourceStatus.UNAVAILABLE, [], f"pinned_retry_failed: {exc}"
+
+
+def _scout_promoted_source(source_id: str) -> dict[str, Any] | None:
+    """The PROMOTED scout source row (payload parsed) or None.
+
+    Only promoted sources are servable — everything else in the scout
+    store is quarantine by construction, and asking for it here is the
+    same honest "unknown source" as asking for a source that never existed.
+    """
+    store = _scout_store()
+    if store is None:
+        return None
+    try:
+        row = store.get(source_id)
+    except Exception as exc:  # noqa: BLE001 — degrade, never raise
+        logger.warning("scout lookup for %s failed: %s", source_id, exc)
+        return None
+    if row and row["status"] == STATUS_PROMOTED:
+        return row
+    return None
+
+
+def _parse_scout_row(row: dict[str, Any], payload: dict[str, Any],
+                     source_id: str, endpoint: str) -> dict[str, Any]:
+    """Normalize one raw scout-source row via the PROPOSED column mapping
+    (the same mapping the mechanical verifier proved and agnes judged —
+    the parser never guesses column names on its own)."""
+    status_col = payload.get("status_column", "")
+    business_col = payload.get("business_column", "business_name")
+    city_col = payload.get("city_column", "city")
+    return {
+        "phone": row.get(payload["phone_column"], ""),
+        "person_name": row.get(payload["person_column"], ""),
+        "business_name": row.get(business_col, ""),
+        "trade_category": row.get(payload["trade_column"], ""),
+        "city": row.get(city_col, ""),
+        "state": payload.get("state", ""),
+        "source": source_id,
+        "license_status": row.get(status_col, "") if status_col else "",
+        "source_url": endpoint,
+    }
+
+
+def _record_scout_outcome(source_id: str, ok: bool, detail: str = "") -> None:
+    """Feed the scout's production circuit breaker (3 consecutive fails
+    auto-retire the source). A scout-store hiccup is logged and swallowed —
+    lead serving never breaks for a scout reason."""
+    store = _scout_store()
+    if store is None:
+        return
+    try:
+        from app.source_scout.probation import record_production_outcome
+        record_production_outcome(store, source_id, ok, detail)
+    except Exception as exc:  # noqa: BLE001 — degrade, never raise
+        logger.warning(
+            "scout production outcome for %s not recorded: %s",
+            source_id, exc,
+        )
+
+
+def _fetch_scout_records(
+    source_id: str, slug: str, city: str, limit: int,
+) -> tuple[SourceStatus, list[dict[str, Any]], dict[str, Any]]:
+    """Fetch + normalize one promoted scout source's rows for a trade slug.
+
+    The $where is built from the payload's PROVEN trade_values mapping
+    (verified mechanically + judged on probation) — never re-invented
+    here. Every outcome feeds the circuit breaker.
+    """
+    row = _scout_promoted_source(source_id)
+    if row is None:
+        return (SourceStatus.ERROR, [],
+                {"error": f"unknown_source: {source_id}"})
+    payload = row["payload"]
+    values = payload.get("trade_values", {}).get(slug)
+    if not values:
+        return (SourceStatus.ERROR, [],
+                {"source": source_id,
+                 "error": f"scout source does not cover trade {slug!r}"})
+
+    quoted = ", ".join(f"'{_soql_quote(v)}'" for v in values)
+    where = f"{payload['trade_column']} IN({quoted})"
+    city_col = payload.get("city_column", "")
+    if city and city_col:
+        where += (f" AND {city_col} LIKE "
+                  f"'{_soql_quote(city.strip().upper())}%'")
+    params = {"$where": where, "$limit": str(limit)}
+    status, rows, reason = _fetch_page(
+        row["endpoint"], params,
+        pinned_ip=str(payload.get("pinned_ip", "")),
+    )
+    meta: dict[str, Any] = {"source": source_id, "dataset": "scout"}
+    if status != SourceStatus.SUCCESS:
+        _record_scout_outcome(source_id, False, reason)
+        meta["error"] = reason
+        logger.warning("scout source %s unavailable for %r: %s",
+                       source_id, slug, reason)
+        return status, [], meta
+    records = [
+        _parse_scout_row(r, payload, source_id, row["endpoint"])
+        for r in rows
+    ]
+    meta["rows_fetched"] = len(rows)
+    _record_scout_outcome(source_id, True)
+    logger.info("scout source %s: %d rows for trade slug %r city=%r",
+                source_id, len(rows), slug, city)
+    return status, records, meta
 
 
 def fetch_license_records(
@@ -247,7 +427,9 @@ def fetch_license_records(
         status, rows, reason = _fetch_page(TDLR_DATASET, params, TDLR_PINNED_IP)
         meta = {"source": "tdlr_license", "dataset": "7358-krk7"}
     else:
-        return SourceStatus.ERROR, [], {"error": f"unknown_source: {source_id}"}
+        # P9: anything else must be a PROMOTED scout source — quarantine
+        # and retired sources get the same honest unknown_source refusal.
+        return _fetch_scout_records(source_id, slug, city, limit)
 
     if status == SourceStatus.SUCCESS:
         parse = _parse_wa_row if source_id == "wa_license" else _parse_tdlr_row

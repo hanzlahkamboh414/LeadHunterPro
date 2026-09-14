@@ -3,6 +3,7 @@
 Run (from backend/):
     python scripts/scout_pass.py            # full pass (playbook + verify + probation)
     python scripts/scout_pass.py --no-ai    # mechanical verify of pending only
+    python scripts/scout_pass.py --resurrect SOURCE_ID   # clear a yield drop
 
 Stages, in order (staged trust — a source advances one stage per pass, so
 full promotion takes several runs spaced over time; a pass RATE only means
@@ -22,6 +23,10 @@ something when trials are spread out):
              fetch), auto-promote at >= 70% after 5 trials, auto-retire
              below it. No admin anywhere.
 
+  5. YIELD   the phones lane's source-level yield table (P10): trials /
+             working per (source, segment) and which drops are active.
+             ``--resurrect`` clears one (human-only, never auto-promoted).
+
 Promoted sources are picked up by the phones lane's
 ``soda.effective_trade_coverage()`` on its next lookup — nothing else to
 wire. Honest JSON summaries per stage, nothing silent (CLAUDE.md §6).
@@ -36,6 +41,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from app.harvester.store import HarvesterStore  # noqa: E402
 from app.source_scout import proposals as prop_mod  # noqa: E402
 from app.source_scout import verifier as vf  # noqa: E402
 from app.source_scout import probation as pb  # noqa: E402
@@ -64,6 +70,16 @@ def main() -> int:
         "--no-ai", action="store_true",
         help=("Mechanical verify of pending proposals only — no playbook "
               "generation, no probation checks (zero AI spend)"),
+    )
+    parser.add_argument(
+        "--resurrect", default="", metavar="SOURCE_ID",
+        help=("Clear a phones-lane source-yield drop (P10) so the source is "
+              "retried — HUMAN-ONLY, never auto-promoted"),
+    )
+    parser.add_argument(
+        "--segment", default="",
+        help=("The yield segment to clear with --resurrect "
+              "('trade | ST', default '' = the GLOBAL row)"),
     )
     args = parser.parse_args()
 
@@ -110,6 +126,16 @@ def main() -> int:
         for r in store.list_status("promoted")
     ]
     print("PROMOTED (serving):", json.dumps(live))
+
+    # -- 5. phones-lane source yield (P10) -----------------------------------
+    harvester = HarvesterStore()
+    if args.resurrect:
+        harvester.delete_source_yield(args.resurrect, args.segment)
+        print(f"RESURRECT: cleared yield row "
+              f"{args.resurrect!r} segment={args.segment!r} — the source is "
+              f"retried on the next pick")
+    yield_rows = harvester.source_yield_all()
+    print("PHONE SOURCE YIELD:", json.dumps(yield_rows, sort_keys=True))
     return 0
 
 

@@ -13,11 +13,19 @@ Tables
                   users actually ask for, most-demanded first)
 ``quota_log``     per-day stocked-row counters per vertical (the big-bang
                   quotas: 2,000 emails / 5,000 phones per day)
-``harvest_runs``  one row per lane pass (outcome + stocked count) — the
-                  rotation memory ("this pair was harvested 3h ago") and
-                  the honest telemetry trail
+``harvest_runs``  one row per lane pass (outcome + stocked count + the
+                  SOURCE that served it) — the rotation memory ("this pair
+                  was harvested 3h ago") and the honest telemetry trail
 ``reverify_queue``trade×state pairs whose pool stock has gone stale; the
                   harvester drains this queue when it is otherwise idle
+``source_yield``  P10 source-level yield learning — per (source, segment)
+                  trials/working counters, the Phase G/I dork-learning
+                  pattern mirrored onto the phones lane: a source whose
+                  successful fetches repeatedly stock ZERO new rows is
+                  skipped until the drop re-arms (see SOURCE_MIN_TRIALS).
+                  Attribution is at issue time (a dispatch is a successful
+                  fetch), the reward is stocked rows — never a count of
+                  "fetched something" (dup-only runs earn nothing).
 """
 
 from __future__ import annotations
@@ -89,6 +97,29 @@ def _today() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
+#: Successful fetches before a zero-stock (source, segment) is considered
+#: proven useless — the same MIN_TRIALS as the Phase G/I dork learning.
+#: Only SUCCESSFUL fetches count: a failing source is the scout circuit
+#: breaker's domain, not a yield verdict.
+SOURCE_MIN_TRIALS = 12
+
+
+def source_segment(trade: str, state: str) -> str:
+    """The phones lane's yield segment key: ``"trade | STATE"``.
+
+    Mirrors :func:`app.discovery.yield_learning.segment_key` (stable,
+    whitespace-collapsed, case-normalized) so the same hierarchy rules read
+    the same way: ``''`` is the GLOBAL row (a source's whole-history
+    aggregate), a pair key is the segment a specific pair decides for
+    itself.
+    """
+    t = " ".join((trade or "").strip().lower().split())
+    s = (state or "").strip().upper()[:2]
+    if t and s:
+        return f"{t} | {s}"
+    return t or s
+
+
 class HarvesterStore:
     """SQLite persistence for demand, quotas, run history, re-verify."""
 
@@ -136,9 +167,23 @@ class HarvesterStore:
                     outcome TEXT NOT NULL,
                     stocked INTEGER NOT NULL DEFAULT 0,
                     detail TEXT NOT NULL DEFAULT '',
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    source TEXT NOT NULL DEFAULT ''
                 )
             """)
+            # P10: pre-P10 databases get the source column as an additive
+            # ALTER (the users.category pattern) — every existing run keeps
+            # its row, all with source='' (honest: the attribution was only
+            # buried in the detail string before).
+            runs_cols = {
+                r[1] for r in conn.execute(
+                    "PRAGMA table_info(harvest_runs)").fetchall()
+            }
+            if "source" not in runs_cols:
+                conn.execute(
+                    "ALTER TABLE harvest_runs ADD COLUMN "
+                    "source TEXT NOT NULL DEFAULT ''"
+                )
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS reverify_queue (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -147,6 +192,16 @@ class HarvesterStore:
                     reason TEXT NOT NULL,
                     enqueued_at TEXT NOT NULL,
                     processed_at TEXT NOT NULL DEFAULT ''
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS source_yield (
+                    source_id TEXT NOT NULL,
+                    segment TEXT NOT NULL DEFAULT '',
+                    trials INTEGER NOT NULL DEFAULT 0,
+                    working INTEGER NOT NULL DEFAULT 0,
+                    last_seen TEXT NOT NULL DEFAULT '',
+                    PRIMARY KEY (source_id, segment)
                 )
             """)
             conn.commit()
@@ -228,19 +283,20 @@ class HarvesterStore:
     # -- run history (rotation / backoff) ------------------------------------------
 
     def record_run(self, vertical: str, trade: str, state: str,
-                   outcome: str, stocked: int = 0, detail: str = "") -> None:
+                   outcome: str, stocked: int = 0, detail: str = "",
+                   source: str = "") -> None:
         conn = self._conn()
         try:
             conn.execute(
                 """
                 INSERT INTO harvest_runs
                     (vertical, trade, state, outcome, stocked, detail,
-                     created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                     created_at, source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (vertical, trade.strip().lower(),
                  (state or "").strip().upper()[:2], outcome, int(stocked),
-                 detail[:500], _now()),
+                 detail[:500], _now(), (source or "").strip()),
             )
             conn.commit()
         finally:
@@ -269,15 +325,15 @@ class HarvesterStore:
             rows = conn.execute(
                 """
                 SELECT vertical, trade, state, outcome, stocked, detail,
-                       created_at
+                       created_at, source
                 FROM harvest_runs WHERE vertical = ?
                 ORDER BY id DESC LIMIT ?
                 """,
                 (vertical, limit),
             ).fetchall()
             cols = ("vertical", "trade", "state", "outcome", "stocked",
-                    "detail", "created_at")
-            return [dict(zip(cols, r)) for r in rows]
+                    "detail", "created_at", "source")
+            return [dict(zip(cols, r, strict=False)) for r in rows]
         finally:
             conn.close()
 
@@ -337,6 +393,158 @@ class HarvesterStore:
                 "SELECT COUNT(*) FROM reverify_queue WHERE processed_at = ''"
             ).fetchone()
             return int(row[0])
+        finally:
+            conn.close()
+
+    # -- source-level yield learning (P10 — Phase G/I mirrored) ------------------
+
+    def record_source_dispatch(self, source_id: str, segment: str = "") -> None:
+        """Count one SUCCESSFUL fetch issued for (source, segment).
+
+        The trial is recorded when the fetch actually returned rows to
+        stock — a failing fetch is the scout circuit breaker's domain, never
+        a yield verdict (conflating the two would retire good sources for
+        transient outages).
+        """
+        if not source_id:
+            return
+        conn = self._conn()
+        try:
+            conn.execute(
+                """
+                INSERT INTO source_yield
+                    (source_id, segment, trials, working, last_seen)
+                VALUES (?, ?, 1, 0, ?)
+                ON CONFLICT(source_id, segment) DO UPDATE SET
+                    trials = trials + 1,
+                    last_seen = excluded.last_seen
+                """,
+                (source_id, segment, _now()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def record_source_working(self, source_id: str, segment: str = "") -> None:
+        """Credit one (source, segment) whose fetch stocked >= 1 NEW row.
+
+        Upserts so a credit lands even without a dispatch row — a working
+        stock is never lost for want of a trial row (the Phase G/I
+        contract). Duplicates and dropped-bad-phone rows earn NOTHING: the
+        reward is pool value actually added, not rows fetched.
+        """
+        if not source_id:
+            return
+        conn = self._conn()
+        try:
+            conn.execute(
+                """
+                INSERT INTO source_yield
+                    (source_id, segment, trials, working, last_seen)
+                VALUES (?, ?, 0, 1, ?)
+                ON CONFLICT(source_id, segment) DO UPDATE SET
+                    working = working + 1,
+                    last_seen = excluded.last_seen
+                """,
+                (source_id, segment, _now()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def source_yield_get(self, source_id: str,
+                         segment: str = "") -> dict[str, Any] | None:
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT trials, working, last_seen FROM source_yield "
+                "WHERE source_id = ? AND segment = ?",
+                (source_id, segment),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return None
+        return {"trials": row[0], "working": row[1], "last_seen": row[2]}
+
+    def source_yield_all(self) -> dict[str, dict[str, Any]]:
+        """Every yield row, keyed ``source`` (global) or ``source | segment``."""
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT source_id, segment, trials, working, last_seen "
+                "FROM source_yield"
+            ).fetchall()
+        finally:
+            conn.close()
+        out: dict[str, dict[str, Any]] = {}
+        for sid, seg, trials, working, last_seen in rows:
+            key = sid if not seg else f"{sid} | {seg}"
+            out[key] = {"trials": trials, "working": working,
+                        "last_seen": last_seen}
+        return out
+
+    @staticmethod
+    def _yield_dropped(row: dict[str, Any] | None,
+                       rearm_days: int) -> bool:
+        """A row drops its source only while the proof is FRESH: enough
+        trials, zero working, and the last trial inside the re-arm window.
+
+        The re-arm window is the anti-starvation guard license boards make
+        mandatory: boards issue NEW licenses every week, so a permanent
+        drop would freeze a pair at its first saturation. Once the window
+        passes, ONE exploratory trial is allowed again — it refreshes
+        ``last_seen``, so a still-saturated pair goes back to sleep for
+        another window and a pair with new licenses starts earning again.
+        """
+        if row is None or row["working"] > 0:
+            return False
+        if row["trials"] < SOURCE_MIN_TRIALS:
+            return False
+        try:
+            last = datetime.fromisoformat(row["last_seen"]).replace(
+                tzinfo=timezone.utc)
+        except ValueError:
+            return False
+        age = datetime.now(timezone.utc) - last
+        return age.days < max(0, rearm_days)
+
+    def source_should_skip(self, source_id: str, segment: str = "",
+                           rearm_days: int = 30) -> bool:
+        """True to spend nothing more on this (source, segment) for now.
+
+        Segment hierarchy (the Phase F/G/I rule, unchanged):
+          * a GLOBAL drop is authoritative — never overridden, one-way;
+          * a segment decides for itself only once it has its OWN
+            ``SOURCE_MIN_TRIALS`` (working > 0 = keep);
+          * otherwise it falls back to the global decision (KEEP default).
+        Every drop is time-bounded by ``rearm_days`` (see _yield_dropped).
+        """
+        if not source_id:
+            return False
+        if self._yield_dropped(self.source_yield_get(source_id, ""),
+                               rearm_days):
+            return True  # global DROP — authoritative
+        if segment:
+            seg_row = self.source_yield_get(source_id, segment)
+            if seg_row is not None \
+                    and seg_row["trials"] >= SOURCE_MIN_TRIALS:
+                return self._yield_dropped(seg_row, rearm_days)
+        return False  # KEEP default
+
+    def delete_source_yield(self, source_id: str, segment: str = "") -> None:
+        """Human-only resurrection: clear a yield drop's row so the source
+        is retried (never auto-promoted back — the Phase G/I contract).
+        """
+        if not source_id:
+            return
+        conn = self._conn()
+        try:
+            conn.execute(
+                "DELETE FROM source_yield WHERE source_id = ? AND segment = ?",
+                (source_id, segment),
+            )
+            conn.commit()
         finally:
             conn.close()
 

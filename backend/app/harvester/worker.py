@@ -37,7 +37,11 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from app.discovery.tradefold import trade_label
-from app.harvester.store import HarvesterStore, US_STATE_NAMES
+from app.harvester.store import (
+    HarvesterStore,
+    US_STATE_NAMES,
+    source_segment,
+)
 from app.leads.pipeline import ResearchQuery
 from app.phones.soda import (
     fetch_license_records,
@@ -209,6 +213,14 @@ class HarvesterWorker:
                         and (now - last_dt).total_seconds()
                         < self._pair_cooldown_s):
                     continue
+                # P10 yield learning: a (source, pair) whose successful
+                # fetches repeatedly stocked nothing new is asleep until
+                # the drop re-arms — spend the pass elsewhere.
+                if self._store.source_should_skip(
+                        coverage[slug][state],
+                        source_segment(slug, state),
+                        rearm_days=self._staleness_days):
+                    continue
                 deficit = self._min_pool_floor - self._phone_store.unclaimed_count(
                     slug, state)
                 weight = (demand.get((slug, state), 0.0)
@@ -247,15 +259,36 @@ class HarvesterWorker:
                 slug, state,
             )
             return outcome
+        if self._store.source_should_skip(
+                source_id, source_segment(slug, state),
+                rearm_days=self._staleness_days):
+            # P10: this (source, pair) is yield-asleep — proven zero NEW
+            # rows over enough successful fetches, drop still fresh. An
+            # honest skip + cooldown, never a spend. (The reverify lane is
+            # the explorer: once the re-arm window passes, should_skip
+            # opens and one trial re-arms or re-earns the pair.)
+            self._store.record_run(
+                "phones", slug, state, "source_yield_zero", 0,
+                detail="source proven zero-yield; sleeping until re-arm",
+                source=source_id,
+            )
+            outcome["skipped"] = "source_yield_zero"
+            logger.info(
+                "harvester phones lane: %s/%s yield-asleep (source %s) — "
+                "skipped", slug, state, source_id,
+            )
+            return outcome
         status, records, meta = self._fetch(
             source_id, slug, "", min(self._phone_batch, room),
         )
         if status.value != "success":
             # Honest failure + backoff: the run is recorded, so the pair
-            # cools down instead of being retried every pass.
+            # cools down instead of being retried every pass. NOT a yield
+            # trial — hard failures are the scout circuit breaker's domain.
             self._store.record_run(
                 "phones", slug, state, "source_error", 0,
                 detail=str(meta.get("error", status.value))[:200],
+                source=source_id,
             )
             outcome["skipped"] = "source_error"
             logger.warning(
@@ -263,13 +296,20 @@ class HarvesterWorker:
                 slug, state, source_id, meta.get("error", ""),
             )
             return outcome
+        # P10: a successful fetch is one yield trial for (source, pair);
+        # the working credit lands only if it stocked something NEW.
+        seg = source_segment(slug, state)
+        self._store.record_source_dispatch(source_id, seg)
         counts = self._phone_store.add(records)
+        if counts["inserted"]:
+            self._store.record_source_working(source_id, seg)
         self._store.record_stocked("phones", counts["inserted"])
         self._store.record_run(
             "phones", slug, state, "success", counts["inserted"],
             detail=(f"source={source_id} fetched={len(records)} "
                     f"dup={counts['duplicate']} "
                     f"dropped={counts['dropped_bad_phone']}"),
+            source=source_id,
         )
         outcome["fetched"] = len(records)
         outcome["stocked"] = counts["inserted"]
@@ -375,12 +415,20 @@ class HarvesterWorker:
 
     def _process_reverify(self) -> int:
         """Drain one queued stale pair per idle pass (fresh harvest,
-        cooldown waived, quota still respected)."""
+        cooldown waived, quota still respected). A yield-asleep source
+        skips honestly — the queue item is still consumed (it will requeue
+        on the next staleness pass if still eligible)."""
         harvested = 0
         for item in self._store.take_reverify(1):
             slug, state = item["trade"], item["state"]
             if fetchable_trade_coverage().get(slug, {}).get(state):
-                self._harvest_phone_pair(slug, state)
+                out = self._harvest_phone_pair(slug, state)
+                if out["skipped"]:
+                    logger.info(
+                        "harvester re-verify: %s/%s skipped (%s) — %s",
+                        slug, state, out["skipped"], item["reason"],
+                    )
+                    continue
                 harvested += 1
                 logger.info(
                     "harvester re-verify: re-harvested %s/%s (%s)",
@@ -391,7 +439,8 @@ class HarvesterWorker:
     def _enqueue_stale_pairs(self) -> int:
         """Queue pairs whose last harvest is older than the staleness window
         AND whose pool has fallen below the floor. Idempotent per pending
-        pair (one queue row each)."""
+        pair (one queue row each). Yield-asleep pairs are not queued — a
+        re-fetch of a proven-zero source is a guaranteed no-op."""
         now = self._now()
         enqueued = 0
         coverage = fetchable_trade_coverage()
@@ -405,6 +454,11 @@ class HarvesterWorker:
                 if self._phone_store.unclaimed_count(slug, state) >= \
                         self._min_pool_floor:
                     continue  # still well stocked — not worth a re-fetch
+                if self._store.source_should_skip(
+                        coverage[slug][state],
+                        source_segment(slug, state),
+                        rearm_days=self._staleness_days):
+                    continue  # yield-asleep — re-arming happens at pick time
                 self._store.enqueue_reverify(slug, state, "stale")
                 enqueued += 1
         return enqueued

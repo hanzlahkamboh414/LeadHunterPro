@@ -23,34 +23,36 @@ from app.phones.soda import (
 # ---------------------------------------------------------------------------
 
 def test_coverage_wa_trades():
-    assert covered_sources("gc") == ["wa_license"]
-    assert covered_sources("drywall") == ["wa_license"]
-    assert covered_sources("demolition") == ["wa_license"]
+    assert covered_sources("gc") == ["cslb_portal", "wa_license"]
+    assert covered_sources("drywall") == ["cslb_portal", "wa_license"]
+    assert covered_sources("demolition") == ["cslb_portal", "wa_license"]
 
 
 def test_coverage_tx_trades():
-    assert covered_sources("electrical") == ["tdlr_license"]
+    assert covered_sources("electrical") == ["cslb_portal", "tdlr_license"]
 
 
-def test_coverage_mechanical_spans_both_states():
-    """mechanical (HVAC) is served by WA specialties AND TDLR A/C."""
+def test_coverage_mechanical_spans_three_states():
+    """mechanical (HVAC) is served by WA specialties, TDLR A/C, and the
+    CSLB bulk-sync (C-4/C-20)."""
     assert TRADE_COVERAGE["mechanical"] == {
-        "WA": "wa_license", "TX": "tdlr_license",
+        "WA": "wa_license", "TX": "tdlr_license", "CA": "cslb_portal",
     }
 
 
 def test_coverage_state_filter():
     assert covered_sources("gc", "WA") == ["wa_license"]
     assert covered_sources("gc", "TX") == []  # TX does not license GCs
+    assert covered_sources("gc", "CA") == ["cslb_portal"]
     assert covered_sources("electrical", "WA") == []  # WA: separate program
     assert covered_sources("electrical", "TX") == ["tdlr_license"]
 
 
 def test_coverage_unsold_trades_are_honest_empty():
-    """Trades no license board covers (lumber, finishes, mep...) return NO
-    source — never a fake fetch."""
+    """Trades no license board covers (lumber, mep) return NO source —
+    never a fake fetch. (finishes gained CSLB's C-6 in P8 part 2.)"""
     assert covered_sources("lumber") == []
-    assert covered_sources("finishes") == []
+    assert covered_sources("mep") == []
 
 
 # ---------------------------------------------------------------------------

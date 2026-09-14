@@ -46,6 +46,7 @@ from typing import Any
 
 from app.discovery.sources._http import fetch
 from app.discovery.sources.status import SourceStatus
+from app.phones.cslb import CSLB_CLASSIFICATIONS
 from app.source_scout.store import (
     STATUS_PROMOTED,
     ScoutStore,
@@ -88,11 +89,23 @@ TDLR_TRADE_VALUES: dict[str, list[str]] = {
 }
 
 #: slug -> {state: source_id} — which source can serve which (trade, state).
+#: cslb_portal rows are stocked by the browser bulk-sync (scripts/
+#: sync_cslb.py), NOT by this module's fetch lane — see
+#: BROWSER_SYNCED_SOURCES below for why it is still on the map.
 TRADE_COVERAGE: dict[str, dict[str, str]] = {
     slug: {**({"WA": "wa_license"} if slug in WA_TRADE_VALUES else {}),
-           **({"TX": "tdlr_license"} if slug in TDLR_TRADE_VALUES else {})}
-    for slug in (set(WA_TRADE_VALUES) | set(TDLR_TRADE_VALUES))
+           **({"TX": "tdlr_license"} if slug in TDLR_TRADE_VALUES else {}),
+           **({"CA": "cslb_portal"} if slug in CSLB_CLASSIFICATIONS else {})}
+    for slug in (set(WA_TRADE_VALUES) | set(TDLR_TRADE_VALUES)
+                 | set(CSLB_CLASSIFICATIONS))
 }
+
+#: Sources stocked by a BROWSER bulk-sync, never by fetch_license_records
+#: (CSLB's F5 edge rejects every scripted transport and rate-blocks rapid
+#: sessions). They stay on TRADE_COVERAGE so coverage METADATA is truthful
+#: (a CA search reports what covers it), but the harvester excludes their
+#: pairs from fetch selection — it can never stock them itself.
+BROWSER_SYNCED_SOURCES = frozenset({"cslb_portal"})
 
 
 def _scout_store() -> ScoutStore | None:
@@ -151,6 +164,22 @@ def effective_trade_coverage() -> dict[str, dict[str, str]]:
         for state, src in states.items():
             merged.setdefault(slug, {}).setdefault(state, src)
     return merged
+
+
+def fetchable_trade_coverage() -> dict[str, dict[str, str]]:
+    """Effective coverage minus browser-synced sources — the (trade, state)
+    pairs the harvester can actually STOCK via fetch_license_records.
+
+    The harvester's pair selection and staleness enqueue read this; search
+    coverage metadata reads ``effective_trade_coverage`` (the truthful
+    superset). A browser-synced pair can never be a fetch candidate, so it
+    is never picked, never source-errored, never enqueued for re-verify.
+    """
+    return {
+        slug: {st: src for st, src in states.items()
+               if src not in BROWSER_SYNCED_SOURCES}
+        for slug, states in effective_trade_coverage().items()
+    }
 
 
 def covered_sources(slug: str, state: str = "") -> list[str]:
@@ -426,6 +455,14 @@ def fetch_license_records(
         params = {"$where": where, "$limit": str(limit)}
         status, rows, reason = _fetch_page(TDLR_DATASET, params, TDLR_PINNED_IP)
         meta = {"source": "tdlr_license", "dataset": "7358-krk7"}
+    elif source_id == "cslb_portal":
+        # Browser bulk-sync source (see app.phones.cslb): the F5 edge kills
+        # scripted transports, so this lane must never pretend to fetch it.
+        return (SourceStatus.ERROR, [], {
+            "source": "cslb_portal",
+            "error": "browser-synced source — stock via scripts/sync_cslb.py; "
+                     "the fetch lane never serves it",
+        })
     else:
         # P9: anything else must be a PROMOTED scout source — quarantine
         # and retired sources get the same honest unknown_source refusal.

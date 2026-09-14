@@ -40,8 +40,8 @@ from app.discovery.tradefold import trade_label
 from app.harvester.store import HarvesterStore, US_STATE_NAMES
 from app.leads.pipeline import ResearchQuery
 from app.phones.soda import (
-    effective_trade_coverage,
     fetch_license_records,
+    fetchable_trade_coverage,
 )
 from app.phones.store import PhoneLeadsStore
 
@@ -200,7 +200,7 @@ class HarvesterWorker:
             for d in rows if not d["trade"] and d["state"]
         }
         candidates: list[tuple[float, int, str, str, str]] = []
-        coverage = effective_trade_coverage()
+        coverage = fetchable_trade_coverage()
         for slug in sorted(coverage):
             for state in sorted(coverage[slug]):
                 last = self._store.last_run_at("phones", slug, state)
@@ -233,7 +233,7 @@ class HarvesterWorker:
         if room <= 0:
             outcome["skipped"] = "quota_exhausted"
             return outcome
-        source_id = effective_trade_coverage().get(slug, {}).get(state)
+        source_id = fetchable_trade_coverage().get(slug, {}).get(state)
         if not source_id:
             # Honest skip: the source retired between selection and harvest
             # (scout circuit breaker) — the pair cools down via record_run.
@@ -379,7 +379,7 @@ class HarvesterWorker:
         harvested = 0
         for item in self._store.take_reverify(1):
             slug, state = item["trade"], item["state"]
-            if effective_trade_coverage().get(slug, {}).get(state):
+            if fetchable_trade_coverage().get(slug, {}).get(state):
                 self._harvest_phone_pair(slug, state)
                 harvested += 1
                 logger.info(
@@ -394,7 +394,7 @@ class HarvesterWorker:
         pair (one queue row each)."""
         now = self._now()
         enqueued = 0
-        coverage = effective_trade_coverage()
+        coverage = fetchable_trade_coverage()
         for slug in sorted(coverage):
             for state in sorted(coverage[slug]):
                 last = _parse_ts(self._store.last_run_at("phones", slug, state))

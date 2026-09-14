@@ -59,10 +59,15 @@ def test_trade_less_coverage_is_anything_stocking_the_state(tmp_path):
     out_wa = phone_search(store, trade="", state="WA", city="",
                           target=5, user_id="alice")
     assert out_wa["coverage"] == ["wa_license"]
+    out_ca = phone_search(store, trade="", state="CA", city="",
+                          target=5, user_id="alice")
+    assert out_ca["coverage"] == ["cslb_portal"]
     # No state at all: everything, honestly named.
     out_any = phone_search(store, trade="", state="", city="",
                            target=5, user_id="alice")
-    assert set(out_any["coverage"]) == {"wa_license", "tdlr_license"}
+    assert set(out_any["coverage"]) == {
+        "wa_license", "tdlr_license", "cslb_portal",
+    }
 
 
 def test_trade_less_partial_reason_is_state_level(tmp_path):
@@ -169,7 +174,7 @@ def test_fourth_voicemail_retires_for_good(tmp_path):
     store.add([_rec("5031110001")])
     lead = store.serve("gc", "", "", 10, "alice")[0]
 
-    for n in range(1, MAX_VOICEMAILS):
+    for _n in range(1, MAX_VOICEMAILS):
         out = store.mark_voicemail(lead["id"], "alice")
         assert out["retired"] is False
         # Re-claim after each cooldown so the next voicemail can land.

@@ -204,10 +204,12 @@ def list_inbox_senders(access_token: str, *, after_unix: int,
     """Who wrote to this inbox since ``after_unix`` (epoch seconds).
 
     Reply detection (Phase E4): one ``messages.list`` with an ``in:inbox
-    after:`` query (metadata only — bodies are never fetched), then one
-    metadata GET per message for its From/Subject headers. Replies are
-    matched by the CALLER against addresses this account actually emailed —
-    this function reads nothing else and stores nothing.
+    after:`` query (metadata headers — full bodies are never fetched), then
+    one metadata GET per message for its From/Subject headers and the
+    response's short snippet (needed to read a DSN's failed address; still
+    no body fetch). Replies are matched by the CALLER against addresses
+    this account actually emailed — this function reads nothing else and
+    stores nothing.
 
     A non-2xx raises :class:`requests.HTTPError`; the scheduler treats reply
     detection as best-effort (a failure never pauses a campaign).
@@ -235,5 +237,6 @@ def list_inbox_senders(access_token: str, *, after_unix: int,
         hdrs = {h["name"].lower(): h["value"]
                 for h in r.json().get("payload", {}).get("headers", [])}
         out.append({"from": hdrs.get("from", ""),
-                    "subject": hdrs.get("subject", "")})
+                    "subject": hdrs.get("subject", ""),
+                    "snippet": r.json().get("snippet", "")})
     return out

@@ -403,3 +403,38 @@ def test_serial_path_used_without_cache(monkeypatch):
     # (1 lead) — no drain of surplus, no concurrent consumers.
     assert outcome["working_leads"] == 1
     assert outcome["shortfall"] == 0
+
+# ---------------------------------------------------------------------------
+# P5-Lite dead-on-arrival gate (streaming consumer twin)
+# ---------------------------------------------------------------------------
+
+def test_streaming_doa_lead_marked_dead_not_researched(monkeypatch, tmp_path):
+    """A buffered lead the classifier calls DEAD is marked dead by the
+    consumer instead of researched — no AI call, no result row, and the
+    cache remembers it so no later run re-serves it."""
+    db, store, pending = _stores(tmp_path)
+    calls = _ok_agent(monkeypatch)
+    records = [_record("C-bad", "bad@mailinator.com", "mailinator.com"),
+               _record("C-good", "good@acme.com", "acme.com")]
+    _discover, _ = _discovery_returns(records)
+    monkeypatch.setattr("app.leads.pipeline.run_discovery", _discover)
+
+    dead = {"bad@mailinator.com"}
+
+    def classifier(email):
+        return ({"confidence": "dead", "reasons": ["disposable"]}
+                if email in dead else {"confidence": "medium"})
+
+    query = ResearchQuery(trade="gc", location="Texas", target_emails=2)
+    outcome = run_full(query, store=store, pending_store=pending,
+                       email_classifier=classifier)
+
+    # The dead address was never researched and never shown.
+    assert "bad@mailinator.com" not in {c[0] for c in calls}
+    assert "bad@mailinator.com" not in {
+        e["email"] for e in outcome["results"]}
+    # The good one went through normally.
+    assert "good@acme.com" in {c[0] for c in calls}
+    assert outcome["working_leads"] >= 1
+    # The cache remembers the dead address — never re-served.
+    assert pending.dead_emails() == dead

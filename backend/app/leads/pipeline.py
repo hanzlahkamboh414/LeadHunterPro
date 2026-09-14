@@ -652,6 +652,7 @@ def discover_until_target(
     seen_domains: set[str] | None = None,
     cooldown_seconds: int = 0,
     user_id: str = "",
+    email_classifier: Callable[[str], dict] | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """Run discovery passes until a target of emails is gathered.
 
@@ -696,6 +697,7 @@ def discover_until_target(
     pass_log: list[dict] = []
     from_cache = 0
     stale_purged = 0
+    dead_purged = 0
     # P2 trade routing: the SEARCHED trade, folded once. '' = the search names
     # no canonical trade (admin free text outside the 14) — fail-open, NO gate
     # (a labeling gap must never starve a run). Non-empty = every serve below
@@ -797,6 +799,19 @@ def discover_until_target(
             # run's lead ("ak lead sirf ak user ko"). Drop the stale row.
             if taken_pool is not None and l["email"] in taken_pool:
                 pending_store.remove([l["email"]])
+                continue
+            # P5-LITE DEAD-ON-ARRIVAL (credit saver): a cached lead whose
+            # address is heuristically DEAD — bad syntax, a disposable
+            # domain, an AUTHORITATIVE no-MX (NXDOMAIN / null MX, never a
+            # resolver failure), or a real bounce from our own outreach —
+            # can never become a dossier. Mark it dead and move on instead
+            # of paying AI research on it. The classifier is injected (no
+            # hidden live-DNS call in tests); "unknown" changes nothing.
+            if (email_classifier is not None
+                    and email_classifier(l["email"]).get("confidence")
+                    == "dead"):
+                pending_store.mark_dead([l["email"]])
+                dead_purged += 1
                 continue
             key = (l["email"], l["domain"])
             if key in seen:
@@ -1021,12 +1036,14 @@ def discover_until_target(
             # 15/50 stall). Report it, do not grind.
             break
 
-    if (from_cache or stale_purged) and emit:
+    if (from_cache or stale_purged or dead_purged) and emit:
         emit(
             "discovery", 0, max_passes,
             f"served {from_cache} lead(s) from discovery cache (no search paid)"
-            + (f" — purged {stale_purged} already-researched" if stale_purged else ""),
+            + (f" — purged {stale_purged} already-researched" if stale_purged else "")
+            + (f" — dropped {dead_purged} dead-on-arrival" if dead_purged else ""),
             data={"from_cache": from_cache, "stale_purged": stale_purged,
+                  "dead_purged": dead_purged,
                   "location": query.location},
         )
     return leads[: target], pass_log
@@ -1448,6 +1465,7 @@ def run_full(
     *,
     cooldown_seconds: int | None = None,
     user_id: str = "",
+    email_classifier: Callable[[str], dict] | None = None,
 ) -> dict[str, Any]:
     """Run discovery (looped to target) then AI research, in one call.
 
@@ -1498,6 +1516,7 @@ def run_full(
             seen_pdf_urls=seen_pdf_urls, seen_domains=seen_domains,
             cooldown_seconds=cooldown_seconds,
             user_id=user_id,  # lead exclusivity + delete-suppression pools
+            email_classifier=email_classifier,  # P5-Lite DOA gate
         )
 
     def base_passes() -> int:
@@ -1570,7 +1589,7 @@ def run_full(
         outcome = _run_full_streaming(
             query, emit=emit, cancel=cancel, store=store, paused=paused,
             pending_store=pending_store, cooldown_seconds=cooldown_seconds,
-            user_id=user_id,
+            user_id=user_id, email_classifier=email_classifier,
         )
         if instant:
             # Merge the instant serve back on top: the run's real delivery is
@@ -1675,6 +1694,7 @@ def _run_full_streaming(
     *,
     cooldown_seconds: int | None = None,
     user_id: str = "",
+    email_classifier: Callable[[str], dict] | None = None,
 ) -> dict[str, Any]:
     """Streaming producer/consumer run_full (Phase D).
 
@@ -2285,6 +2305,18 @@ def _run_full_streaming(
                 continue
             email = lead["email"]
             domain = lead["domain"]
+            # P5-LITE DOA gate (streaming twin of the serial Phase-A check):
+            # a heuristically-dead address (bad syntax / disposable /
+            # authoritative no-MX / real bounce) is marked dead here
+            # instead of researched — the AI spend goes to addresses that
+            # can exist. "unknown" (resolver failure) changes nothing.
+            if (email_classifier is not None
+                    and email_classifier(email).get("confidence") == "dead"):
+                with write_lock:
+                    pending_store.mark_dead([email])
+                logger.info("streaming research skip (dead-on-arrival): %s",
+                            email)
+                continue
             t0 = time.monotonic()
             entry = _research_one(
                 email, domain, lead.get("source_url", ""), lead.get("dork", ""), t0,

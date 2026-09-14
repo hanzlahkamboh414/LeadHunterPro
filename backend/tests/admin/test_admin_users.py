@@ -176,7 +176,7 @@ def test_activity_log_records_login_logout_signup_and_search(tmp_path, monkeypat
 
 
 def test_search_submission_records_activity(tmp_path, monkeypatch):
-    def fake(query, emit=None, cancel=None, store=None, paused=None, user_id=""):
+    def fake(query, emit=None, cancel=None, store=None, paused=None, user_id="", email_classifier=None):
         return {"working_leads": 0, "leads_found": 0, "shortfall": 0,
                 "shortfall_reason": "test"}
 
@@ -199,7 +199,7 @@ def test_search_submission_records_activity(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_search_cap_150_for_users_admin_allows_500(tmp_path, monkeypatch):
-    def fake(query, emit=None, cancel=None, store=None, paused=None, user_id=""):
+    def fake(query, emit=None, cancel=None, store=None, paused=None, user_id="", email_classifier=None):
         return {"working_leads": 0, "leads_found": 0, "shortfall": 0,
                 "shortfall_reason": "test"}
 

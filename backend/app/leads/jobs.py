@@ -577,9 +577,18 @@ class JobManager:
 
         try:
             lead_store = LeadResearchStore(db_path=self._store._db_path)
+            # P5-Lite DOA gate: heuristically-dead addresses (disposable /
+            # authoritative no-MX / real bounce) never reach AI research.
+            # Lazy + fail-open — a broken bounce store only loses the gate.
+            try:
+                from app.email.heuristic_verifier import get_email_classifier
+
+                classifier = get_email_classifier()
+            except Exception:  # noqa: BLE001 — best-effort gate
+                classifier = None
             outcome = run_full(
                 query, emit=emit, cancel=cancel, paused=paused, store=lead_store,
-                user_id=job.user_id,
+                user_id=job.user_id, email_classifier=classifier,
             ) or {}
             with self._lock:
                 job = self._store.get(job_id)

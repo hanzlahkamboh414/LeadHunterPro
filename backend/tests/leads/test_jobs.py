@@ -51,7 +51,7 @@ def test_job_store_roundtrip(tmp_path):
 # JobManager lifecycle
 # ---------------------------------------------------------------------------
 
-def _fake_run_full_ok(query, emit=None, cancel=None, store=None, paused=None, user_id=""):
+def _fake_run_full_ok(query, emit=None, cancel=None, store=None, paused=None, user_id="", email_classifier=None):
     if emit:
         emit("discovery", 1, 1, "pass 1", data={"pass": 1, "new_leads": 2, "total_leads": 2})
         emit("research", 1, 2, "lead 1", email="a@x.com",
@@ -81,7 +81,7 @@ def test_job_completes_with_progress(tmp_path, monkeypatch):
 
 
 def test_job_failure_records_error(tmp_path, monkeypatch):
-    def _boom(query, emit=None, cancel=None, store=None, paused=None, user_id=""):
+    def _boom(query, emit=None, cancel=None, store=None, paused=None, user_id="", email_classifier=None):
         raise RuntimeError("pipeline exploded")
 
     monkeypatch.setattr("app.leads.jobs.run_full", _boom)
@@ -93,7 +93,7 @@ def test_job_failure_records_error(tmp_path, monkeypatch):
 
 
 def test_job_cancel_graceful(tmp_path, monkeypatch):
-    def _blocking(query, emit=None, cancel=None, store=None, paused=None, user_id=""):
+    def _blocking(query, emit=None, cancel=None, store=None, paused=None, user_id="", email_classifier=None):
         while not (cancel and cancel()):
             time.sleep(0.005)
         return {"leads_found": 0, "discovery_passes": [], "results": []}
@@ -114,7 +114,7 @@ def test_job_cancel_graceful(tmp_path, monkeypatch):
     assert done.state is JobState.cancelled
 
 
-def _block_on_pause(query, emit=None, cancel=None, store=None, paused=None, user_id=""):
+def _block_on_pause(query, emit=None, cancel=None, store=None, paused=None, user_id="", email_classifier=None):
     """Emit discovery, then hold until the job is paused, then until resumed/cancelled.
 
     Waiting for the pause to actually be requested makes the test deterministic:
@@ -188,7 +188,7 @@ def test_job_resume_failed_orphan_continues_same_id(tmp_path, monkeypatch):
 
 def test_job_resumed_orphan_can_be_cancelled(tmp_path, monkeypatch):
     """A re-launched (continued) worker re-arms cancel: the user can stop it."""
-    def _hold(query, emit=None, cancel=None, store=None, paused=None, user_id=""):
+    def _hold(query, emit=None, cancel=None, store=None, paused=None, user_id="", email_classifier=None):
         while not (cancel and cancel()):
             time.sleep(0.005)
         return {"leads_found": 0, "discovery_passes": [], "results": []}
@@ -305,7 +305,7 @@ def test_sweep_marks_dead_worker_job_failed_on_read(tmp_path):
 
 def test_sweep_leaves_live_worker_jobs_untouched(tmp_path, monkeypatch):
     """A genuinely-running job (worker thread alive) is never swept."""
-    def _hold(query, emit=None, cancel=None, store=None, paused=None, user_id=""):
+    def _hold(query, emit=None, cancel=None, store=None, paused=None, user_id="", email_classifier=None):
         while True:
             time.sleep(0.005)
 
@@ -406,7 +406,7 @@ def test_sweep_dead_worker_persists_real_delivery_counts(tmp_path):
 def test_exception_mid_run_persists_real_delivery_counts(tmp_path, monkeypatch):
     """An exception thrown after research has started must not erase what was
     already delivered — the failed job shows its real partial counts."""
-    def _boom(query, emit=None, cancel=None, paused=None, store=None, user_id=""):
+    def _boom(query, emit=None, cancel=None, paused=None, store=None, user_id="", email_classifier=None):
         emit("research", 1, 1, "lead 1", email="w1@x.com",
              data={"email": "w1@x.com", "recommendation": "contact_now", "working": True})
         raise RuntimeError("simulated mid-run failure")
@@ -447,7 +447,7 @@ def test_admission_control_queues_extra_jobs(tmp_path, monkeypatch):
     release = {t: threading.Event() for t in "abc"}
     started = {t: threading.Event() for t in "abc"}
 
-    def _hold(query, emit=None, cancel=None, store=None, paused=None, user_id=""):
+    def _hold(query, emit=None, cancel=None, store=None, paused=None, user_id="", email_classifier=None):
         started[query.trade].set()
         release[query.trade].wait(timeout=10)
         return {"leads_found": 0, "discovery_passes": [], "results": []}
@@ -484,7 +484,7 @@ def test_admission_cancel_while_queued_never_runs(tmp_path, monkeypatch):
     release = threading.Event()
     ran = {"n": 0}
 
-    def _hold(query, emit=None, cancel=None, store=None, paused=None, user_id=""):
+    def _hold(query, emit=None, cancel=None, store=None, paused=None, user_id="", email_classifier=None):
         ran["n"] += 1
         release.wait(timeout=10)
         return {"leads_found": 0, "discovery_passes": [], "results": []}
@@ -520,7 +520,7 @@ def test_admission_slot_released_on_failure(tmp_path, monkeypatch):
     started_b = threading.Event()
     release_b = threading.Event()
 
-    def _flaky(query, emit=None, cancel=None, store=None, paused=None, user_id=""):
+    def _flaky(query, emit=None, cancel=None, store=None, paused=None, user_id="", email_classifier=None):
         if query.trade == "a":
             raise RuntimeError("pipeline exploded")
         started_b.set()
@@ -550,7 +550,7 @@ def test_admission_disabled_when_zero(tmp_path, monkeypatch):
     started = {t: threading.Event() for t in "abc"}
     release = threading.Event()
 
-    def _hold(query, emit=None, cancel=None, store=None, paused=None, user_id=""):
+    def _hold(query, emit=None, cancel=None, store=None, paused=None, user_id="", email_classifier=None):
         started[query.trade].set()
         release.wait(timeout=10)
         return {"leads_found": 0, "discovery_passes": [], "results": []}
@@ -577,7 +577,7 @@ def test_admission_fifo_first_come_first_served(tmp_path, monkeypatch):
     release = {t: threading.Event() for t in "abc"}
     started = {t: threading.Event() for t in "abc"}
 
-    def _hold(query, emit=None, cancel=None, store=None, paused=None, user_id=""):
+    def _hold(query, emit=None, cancel=None, store=None, paused=None, user_id="", email_classifier=None):
         started[query.trade].set()
         release[query.trade].wait(timeout=10)
         return {"leads_found": 0, "discovery_passes": [], "results": []}

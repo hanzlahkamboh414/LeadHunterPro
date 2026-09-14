@@ -87,6 +87,18 @@ def parse_ts(ts: str) -> datetime | None:
         return None
 
 
+#: Local parts that identify a delivery-status notification (DSN/bounce)
+#: rather than a human sender. RFC 5321 reserves postmaster@; mail systems
+#: send DSNs from mailer-daemon@ of their own domain.
+_DSN_LOCALS = frozenset({"mailer-daemon", "postmaster"})
+
+
+def _is_dsn_sender(addr: str) -> bool:
+    """True when *addr* is a mail system, not a person."""
+    local = (addr or "").split("@", 1)[0].strip().lower()
+    return local in _DSN_LOCALS
+
+
 def ensure_access_token(email_store: EmailAccountStore, *, account_id: int,
                         user_id: str, creds: dict[str, Any],
                         now: datetime) -> str:
@@ -131,6 +143,7 @@ class CampaignScheduler:
         rng: Callable[[int, int], int] = random.randint,
         reply_interval_s: float = REPLY_CHECK_INTERVAL_S,
         ai_ask: Ask | None = None,
+        bounce_store: Any | None = None,
     ) -> None:
         self._store = store
         self._email_store = email_store
@@ -141,6 +154,9 @@ class CampaignScheduler:
         # The AI callable for opening lines (E5). None = build the real
         # gateway lazily on first personalization; tests inject a fake.
         self._ai_ask = ai_ask
+        # P5-Lite bounce learning: real send/reply outcomes recorded as
+        # email ground truth (None = the loop is off; sends unaffected).
+        self._bounce_store = bounce_store
         # Per-account 429 cooldowns (E5): account_id -> send-again-not-before.
         # In-memory on purpose — a cooldown is transient, and a restart at
         # worst re-earns one 429 from Google.
@@ -179,7 +195,7 @@ class CampaignScheduler:
         now = self._clock()
         stats = {"promoted": 0, "resumed_rate_limited": 0,
                  "resumed_account": 0, "sent": 0, "paused": 0,
-                 "replied": 0, "skipped": 0}
+                 "replied": 0, "skipped": 0, "bounced": 0}
 
         for cid in self._store.promote_scheduled(_iso(now)):
             stats["promoted"] += 1
@@ -266,12 +282,43 @@ class CampaignScheduler:
                 addr = google.parse_from(msg.get("from", ""))
                 target = by_email.get(addr)
                 if target is None:
+                    # P5-Lite bounce learning: a delivery-status notification
+                    # from the mail system names the failed address in its
+                    # snippet/subject. A DSN whose target cannot be extracted
+                    # is an honest miss (logged), never a guessed bounce.
+                    if self._bounce_store is not None and _is_dsn_sender(addr):
+                        text = " ".join(
+                            (msg.get("subject") or "", msg.get("snippet") or "")
+                        ).lower()
+                        for sent_addr in by_email:
+                            if sent_addr.lower() in text:
+                                self._bounce_store.record(
+                                    sent_addr, "bounced",
+                                    evidence=f"DSN from {addr}: "
+                                             f"{(msg.get('subject') or '')[:120]}")
+                                stats["bounced"] += 1
+                                logger.info(
+                                    "bounce recorded: %s (DSN from %s)",
+                                    sent_addr, addr)
+                                break
+                        else:
+                            logger.info(
+                                "DSN from %s names none of our %d sent "
+                                "address(es) — no bounce recorded", addr,
+                                len(by_email))
                     continue  # mail from someone we never emailed — not ours
                 subject = (msg.get("subject") or "")[:300]
                 self._store.mark_replied(
                     target["campaign_id"], addr,
                     received_at=_iso(now), subject=subject)
                 stats["replied"] += 1
+                # P5-Lite bounce learning: a reply is the strongest real
+                # deliverability proof there is — the mailbox exists AND
+                # someone reads it. Recorded for the heuristic verifier.
+                if self._bounce_store is not None:
+                    self._bounce_store.record(
+                        addr, "delivered",
+                        evidence=f"reply (subject: {subject[:120]})")
                 logger.info("reply detected: %s answered campaign %d",
                             addr, target["campaign_id"])
                 self._crm_event(
@@ -574,7 +621,18 @@ def get_scheduler() -> CampaignScheduler:
         from app.email_accounts.store import get_email_store
         from app.campaigns.store import get_campaign_store
         from app.api.v1.leads import _store as lead_store
+        # P5-Lite bounce learning (best-effort: a broken store only turns
+        # the learning loop off, sends are unaffected).
+        try:
+            from app.email.bounce_learning import BounceStore
+
+            bounce_store = BounceStore()
+        except Exception:  # noqa: BLE001
+            logger.info("bounce store unavailable — outcome learning off",
+                        exc_info=True)
+            bounce_store = None
         _scheduler = CampaignScheduler(
             get_campaign_store(), get_email_store(), lead_store,
+            bounce_store=bounce_store,
         )
     return _scheduler

@@ -384,12 +384,23 @@ class HarvesterWorker:
         never loses a pair, it just never grinds.
         """
         from app.leads.pipeline import run_full
+        # P5-Lite DOA gate: heuristically-dead addresses (disposable /
+        # authoritative no-MX / real bounce) never reach AI research.
+        # Lazy so a broken bounce store degrades to heuristic-only, never
+        # blocks the lane.
+        try:
+            from app.email.heuristic_verifier import get_email_classifier
+
+            classifier = get_email_classifier()
+        except Exception:  # noqa: BLE001 — the gate is best-effort
+            classifier = None
         return run_full(
             query,
             store=self._lead_store,
             pending_store=self._pending_store,
             user_id="",
             cancel=self._budget_expired,
+            email_classifier=classifier,
         )
 
     def _harvest_emails(self) -> dict[str, Any]:

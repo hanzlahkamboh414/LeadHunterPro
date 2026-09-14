@@ -466,3 +466,94 @@ def test_api_account_scopes_roundtrip(tmp_path, monkeypatch):
     accounts = ctx["client"].get("/api/v1/email-accounts").json()
     assert READONLY in accounts[0]["scopes"]
     assert "access_token" not in accounts[0]
+
+
+# ---------------------------------------------------------------------------
+# P5-Lite bounce learning — real outcomes from the reply check
+# ---------------------------------------------------------------------------
+
+def _bounce_setup(tmp_path, monkeypatch, *, emails=("jane@acme.com",
+                                                    "bob@dead.com")):
+    """The standard _setup plus a wired BounceStore (tmp DB)."""
+    from app.email.bounce_learning import BounceStore
+
+    ctx = _setup(tmp_path, monkeypatch, scopes=READONLY)
+    bounce = BounceStore(db_path=str(tmp_path / "outcomes.db"))
+    ctx["sched"]._bounce_store = bounce
+    ctx["bounce"] = bounce
+    _make_campaign(ctx, emails=emails)
+    monkeypatch.setattr(google, "send_gmail", lambda tok, **kw: {})
+    return ctx
+
+
+def test_reply_is_recorded_as_delivered(tmp_path, monkeypatch):
+    """A human reply is the strongest deliverability proof — the bounce
+    store gets outcome=delivered for that exact address."""
+    ctx = _bounce_setup(tmp_path, monkeypatch)
+    inbox = [{"from": "Jane Smith <jane@acme.com>", "subject": "Re: estimating",
+              "snippet": "Sure, call me"}]
+    monkeypatch.setattr(google, "list_inbox_senders",
+                        lambda tok, **kw: inbox)
+
+    ctx["sched"].run_once()  # send
+    ctx["sched"]._clock.advance(2 * 3600)
+    stats = ctx["sched"].run_once()  # reply check fires
+
+    assert stats["replied"] == 1
+    assert ctx["bounce"].lookup("jane@acme.com") == "delivered"
+    assert ctx["bounce"].counts() == {"delivered": 1}
+
+
+def test_dsn_is_recorded_as_bounce(tmp_path, monkeypatch):
+    """A mailer-daemon DSN naming a sent address is a real bounce — the
+    address is dead from today on (the DOA gate will never research it)."""
+    ctx = _bounce_setup(tmp_path, monkeypatch, emails=("bob@dead.com",))
+    inbox = [{"from": "Mail Delivery Subsystem <mailer-daemon@googlemail.com>",
+              "subject": "Delivery Status Notification (Failure)",
+              "snippet": "The response was: The email account that you "
+                         "tried to reach does not exist (bob@dead.com)"}]
+    monkeypatch.setattr(google, "list_inbox_senders",
+                        lambda tok, **kw: inbox)
+
+    ctx["sched"].run_once()  # send
+    ctx["sched"]._clock.advance(2 * 3600)
+    stats = ctx["sched"].run_once()
+
+    assert stats["bounced"] == 1
+    assert ctx["bounce"].lookup("bob@dead.com") == "bounced"
+    # The DSN was never treated as a reply.
+    assert stats["replied"] == 0
+
+
+def test_dsn_naming_no_sent_address_records_nothing(tmp_path, monkeypatch):
+    """A DSN whose text names none of OUR sent addresses is an honest
+    miss — no guessed bounce, nothing written."""
+    ctx = _bounce_setup(tmp_path, monkeypatch)
+    inbox = [{"from": "Mail Delivery Subsystem <mailer-daemon@googlemail.com>",
+              "subject": "Delivery Status Notification (Failure)",
+              "snippet": "address someone-else@not-ours.com does not exist"}]
+    monkeypatch.setattr(google, "list_inbox_senders",
+                        lambda tok, **kw: inbox)
+
+    ctx["sched"].run_once()
+    ctx["sched"]._clock.advance(2 * 3600)
+    stats = ctx["sched"].run_once()
+
+    assert stats["bounced"] == 0
+    assert ctx["bounce"].counts() == {}
+
+
+def test_bounce_loop_off_by_default_changes_nothing(tmp_path, monkeypatch):
+    """Without a bounce store the scheduler behaves exactly as before —
+    sends, replies, no outcome writes, no errors."""
+    ctx = _bounce_setup(tmp_path, monkeypatch)
+    ctx["sched"]._bounce_store = None  # loop off
+    inbox = [{"from": "Jane Smith <jane@acme.com>", "subject": "Re: estimating",
+              "snippet": "Sure"}]
+    monkeypatch.setattr(google, "list_inbox_senders",
+                        lambda tok, **kw: inbox)
+
+    ctx["sched"].run_once()
+    ctx["sched"]._clock.advance(2 * 3600)
+    stats = ctx["sched"].run_once()
+    assert stats["replied"] == 1 and stats["bounced"] == 0

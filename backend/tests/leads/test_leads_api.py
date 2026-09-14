@@ -158,7 +158,7 @@ def test_recover_orphans_marks_dead_inflight_jobs(tmp_path):
 
 
 def test_create_job_and_poll_progress(tmp_path, monkeypatch):
-    def fake(query, emit=None, cancel=None, store=None, paused=None, user_id=""):
+    def fake(query, emit=None, cancel=None, store=None, paused=None, user_id="", email_classifier=None):
         emit("discovery", 1, 1, "pass 1", data={"pass": 1, "new_leads": 1, "total_leads": 1})
         emit("research", 1, 1, "lead 1", email="a@x.com",
              data={"email": "a@x.com", "score": 8.0, "recommendation": "contact_now"})
@@ -185,7 +185,7 @@ def test_job_completed_surfaces_honest_outcome(tmp_path, monkeypatch):
     run_full's outcome now stamps the job + appends an honest terminal event —
     a 4/500 run never reads as a clean "Completed" again (§6). Run as ADMIN:
     500-target runs are admin-sized (users are capped at 150)."""
-    def fake(query, emit=None, cancel=None, store=None, paused=None, user_id=""):
+    def fake(query, emit=None, cancel=None, store=None, paused=None, user_id="", email_classifier=None):
         return {"working_leads": 4, "leads_found": 17, "shortfall": 496,
                 "shortfall_reason": "discovery_exhausted"}
 
@@ -275,7 +275,7 @@ def test_create_job_carries_search_name_and_folder(tmp_path, monkeypatch):
     pipeline can auto-file leads of THIS run — the Phase C "mix ni hogi" hook."""
     seen = {}
 
-    def fake(query, emit=None, cancel=None, store=None, paused=None, user_id=""):
+    def fake(query, emit=None, cancel=None, store=None, paused=None, user_id="", email_classifier=None):
         seen["query"] = query
         return {}
 
@@ -308,7 +308,7 @@ def test_get_job_404(tmp_path, monkeypatch):
 
 
 def test_cancel_job(tmp_path, monkeypatch):
-    def blocking(query, emit=None, cancel=None, store=None, paused=None, user_id=""):
+    def blocking(query, emit=None, cancel=None, store=None, paused=None, user_id="", email_classifier=None):
         while not (cancel and cancel()):
             time.sleep(0.005)
         return {}
@@ -323,7 +323,7 @@ def test_cancel_job(tmp_path, monkeypatch):
     assert done["state"] == "cancelled"
 
 
-def _pause_blocking(query, emit=None, cancel=None, store=None, paused=None, user_id=""):
+def _pause_blocking(query, emit=None, cancel=None, store=None, paused=None, user_id="", email_classifier=None):
     if emit:
         emit("discovery", 1, 1, "pass 1", data={"pass": 1, "new_leads": 1, "total_leads": 1})
     # Hold until pause is requested (deterministic control point).
@@ -441,7 +441,7 @@ def test_list_leads_skip_filter_reveals_junk_in_discovery_order(tmp_path, monkey
 def test_leads_carry_source_run_and_filter(tmp_path, monkeypatch):
     """Each lead names the query run that produced it, and can be filtered by
     it — a fresh search's leads are separated from older runs (no more mix)."""
-    def fake(query, emit=None, cancel=None, store=None, paused=None, user_id=""):
+    def fake(query, emit=None, cancel=None, store=None, paused=None, user_id="", email_classifier=None):
         # Mirror the real pipeline: persist under the job's user_id so the owner
         # (this test's non-admin user) can see the leads under strict isolation.
         store.save(_dossier("a@x.com", "x.com"), user_id=user_id)

@@ -1932,3 +1932,87 @@ def test_run_full_budget_cancel_is_an_honest_stop(monkeypatch, tmp_path):
     assert outcome["working_leads"] <= 1     # one pass's worth banked at most
     assert outcome["shortfall"] >= 4
     assert outcome["shortfall_reason"] == "harvest_budget_expired"
+
+
+# ---------------------------------------------------------------------------
+# P5-Lite dead-on-arrival gate (heuristic classifier, injected)
+# ---------------------------------------------------------------------------
+
+def _empty_discovery(monkeypatch):
+    """No live discovery in these tests — the pending cache is the source."""
+    def _discover(trade, location, limit, skip_pdfs=None, yield_store=None, candidate_store=None):
+        return SourceStatus.EMPTY, [], {"pdf_urls": []}
+    monkeypatch.setattr("app.leads.pipeline.run_discovery", _discover)
+
+
+def test_doa_cached_lead_is_marked_dead_not_served(tmp_path, monkeypatch):
+    """A cached lead the classifier calls DEAD (disposable / authoritative
+    no-MX / real bounce) is marked dead in the cache and never served —
+    the AI spend goes to addresses that can exist."""
+    from app.lead_research.service import PendingLeadsStore
+
+    _empty_discovery(monkeypatch)
+    pending = PendingLeadsStore(db_path=str(tmp_path / "p.db"))
+    # take() serves location+trade-matched rows only — the rows carry both.
+    pending.add([
+        {"email": "bad@mailinator.com", "domain": "mailinator.com",
+         "company": "X", "person": "", "source_url": "https://x", "dork": "",
+         "location": "Texas", "trade": "gc"},
+        {"email": "good@acme.com", "domain": "acme.com",
+         "company": "Y", "person": "", "source_url": "https://y", "dork": "",
+         "location": "Texas", "trade": "gc"},
+    ])
+    dead = {"bad@mailinator.com"}
+
+    def classifier(email):
+        return ({"confidence": "dead", "reasons": ["disposable"]}
+                if email in dead else {"confidence": "medium"})
+
+    query = ResearchQuery(trade="gc", location="Texas", target_emails=5)
+    leads, _ = discover_until_target(
+        query, pending_store=pending, email_classifier=classifier,
+    )
+    assert [l["email"] for l in leads] == ["good@acme.com"]
+    assert pending.dead_emails() == dead          # marked, never re-served
+
+
+def test_doa_unknown_verdict_changes_nothing(tmp_path, monkeypatch):
+    """A resolver failure is "unknown", never a negative verdict — the
+    cached lead is served exactly as before (honest fail-open)."""
+    from app.lead_research.service import PendingLeadsStore
+
+    _empty_discovery(monkeypatch)
+    pending = PendingLeadsStore(db_path=str(tmp_path / "p.db"))
+    pending.add([
+        {"email": "maybe@acme.com", "domain": "acme.com",
+         "company": "Y", "person": "", "source_url": "https://y", "dork": "",
+         "location": "Texas", "trade": "gc"},
+    ])
+
+    def classifier(email):
+        return {"confidence": "unknown", "reasons": ["mx_unresolvable"]}
+
+    query = ResearchQuery(trade="gc", location="Texas", target_emails=5)
+    leads, _ = discover_until_target(
+        query, pending_store=pending, email_classifier=classifier,
+    )
+    assert [l["email"] for l in leads] == ["maybe@acme.com"]
+    assert pending.dead_emails() == set()
+
+
+def test_doa_gate_is_opt_in(tmp_path, monkeypatch):
+    """Without an injected classifier there is NO gate (and no hidden
+    live-DNS call) — cached leads serve exactly as before."""
+    from app.lead_research.service import PendingLeadsStore
+
+    _empty_discovery(monkeypatch)
+    pending = PendingLeadsStore(db_path=str(tmp_path / "p.db"))
+    pending.add([
+        {"email": "bad@mailinator.com", "domain": "mailinator.com",
+         "company": "X", "person": "", "source_url": "https://x", "dork": "",
+         "location": "Texas", "trade": "gc"},
+    ])
+    query = ResearchQuery(trade="gc", location="Texas", target_emails=5)
+    leads, _ = discover_until_target(query, pending_store=pending)
+    assert [l["email"] for l in leads] == ["bad@mailinator.com"]
+    assert pending.dead_emails() == set()

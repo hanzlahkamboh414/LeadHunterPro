@@ -100,6 +100,10 @@ def main() -> int:
         print("PROPOSE:", json.dumps({
             "proposed": out["proposed"], "rejected": out["rejected"],
             "reason": out["reason"],
+            "catalog": {
+                k: out.get("catalog", {}).get(k)
+                for k in ("candidates", "fresh", "errors")
+            },
         }))
 
     # -- 3. mechanical verify of every pending proposal ---------------------

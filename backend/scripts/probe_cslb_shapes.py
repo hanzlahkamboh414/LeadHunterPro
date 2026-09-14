@@ -10,11 +10,14 @@ BASE = "https://www.cslb.ca.gov/Onlineservices/DataPortal/ListByClassification"
 
 def get_form(s):
     r = s.get(BASE, timeout=30)
-    f = lambda n: (re.search(
-        r'name="' + n + r'"[^>]*value="([^"]*)"', r.text) or [None, ""])[1]
+
+    def field(n: str) -> str:
+        m = re.search(r'name="' + n + r'"[^>]*value="([^"]*)"', r.text)
+        return m.group(1) if m else ""
+
     names = re.findall(
         r'<(?:input|select|textarea)[^>]*name="([^"]+)"', r.text)
-    return r, f, names
+    return r, field, names
 
 
 def try_shape(label, mutate, raw_dollar=False):

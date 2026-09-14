@@ -9,7 +9,9 @@ the truth from job.results and overwrites the stale columns.
 
 Usage:  python scripts/backfill_honest_counts.py
 """
-import sys, os, json
+import sys
+import os
+import json
 
 # --- resolve paths ---
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -81,7 +83,7 @@ def main():
 
     # Verify
     print("\n--- Verification ---")
-    for job, of, ow, nf, nw in updates:
+    for job, _of, _ow, _nf, _nw in updates:
         fresh = store.get(job.id)
         v_found, v_working = honest_counts(fresh.results or [])
         ok = fresh.leads_found == v_found and fresh.working_leads == v_working

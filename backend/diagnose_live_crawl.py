@@ -44,7 +44,7 @@ def main() -> int:
     status, companies, meta = DirectoryCrawlSource().discover(
         industry="Roofing", location="Dallas Texas", limit=20
     )
-    print(f"=== DirectoryCrawlSource.discover ===")
+    print("=== DirectoryCrawlSource.discover ===")
     print(f"status={status.value}  companies={len(companies)}")
     for key in (
         "reason",

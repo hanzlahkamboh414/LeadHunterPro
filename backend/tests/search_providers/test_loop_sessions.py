@@ -106,7 +106,7 @@ def test_dead_loop_entries_pruned_on_next_use():
     s2 = asyncio.run(make())  # loop #2
     # Loop #1's entry was pruned when loop #2 asked: only the live one remains.
     assert len(p._sessions) == 1
-    assert list(p._sessions.values())[0][1] is s2
+    assert next(iter(p._sessions.values()))[1] is s2
 
 
 def test_real_providers_use_the_mixin():

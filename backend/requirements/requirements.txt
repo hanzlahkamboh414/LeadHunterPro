@@ -35,6 +35,22 @@ aiohttp>=3.9.0
 beautifulsoup4>=4.12.0
 lxml>=5.0.0
 #
+# dnspython: the P5 email pattern-inference engine (app/email/
+# pattern_inference.py MX lookups + domain_verifier.py). Imported lazily
+# inside the functions, but the feature is core — a deployment without it
+# degrades every pattern inference to "unreachable" (the local-ISP port-25
+# block already demonstrated that failure mode during P5 testing).
+dnspython>=2.6.0
+#
+# patchright: the HEADED real-browser automation driver for the CSLB bulk
+# sync (scripts/sync_cslb.py). CSLB's F5 edge fingerprints the transport
+# (TLS/JA3 + HTTP/2 frames) and rejects every scripted HTTP client, so the
+# only stocking path is a real Chrome driven via patchright's stealth
+# patch of Playwright (verified live 2026-09-14). Only the machine that
+# RUNS the sync needs it (a headed desktop with Chrome installed) — the
+# EC2 app servers never import it.
+patchright>=1.0.0
+#
 # pdfplumber: the plan-holder / bid-holder / prequalified-contractor LISTS that
 # feed the sourcing pipeline are published as PDFs, and they are TABULAR
 # (Company | Contact | Email | Phone | ...). pdfplumber gives BOTH flat text

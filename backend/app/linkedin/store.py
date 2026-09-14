@@ -211,11 +211,11 @@ class LinkedInLeadsStore:
                 ORDER BY l.id ASC
                 LIMIT ?
                 """,
-                [user_id] + args + [limit],
+                [user_id, *args, limit],
             )
             rows = cur.fetchall()
             cols = [d[0] for d in cur.description]
-            leads = [dict(zip(cols, r)) for r in rows]
+            leads = [dict(zip(cols, r, strict=True)) for r in rows]
             ts = _now()
             for lead in leads:
                 conn.execute(
@@ -263,11 +263,11 @@ class LinkedInLeadsStore:
                 ORDER BY o.created_at DESC, l.id DESC
                 LIMIT ?
                 """,
-                [user_id] + args + [limit],
+                [user_id, *args, limit],
             )
             rows = cur.fetchall()
             cols = [d[0] for d in cur.description]
-            return [dict(zip(cols, r)) for r in rows]
+            return [dict(zip(cols, r, strict=True)) for r in rows]
         finally:
             conn.close()
 

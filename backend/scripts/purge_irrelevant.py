@@ -154,7 +154,7 @@ def main() -> None:
     for email, reason in found:
         print(f"  - {email:<35} {reason}")
     if already_gone:
-        print(f"\nalready deleted by the first purge (kept):")
+        print("\nalready deleted by the first purge (kept):")
         for email, _ in already_gone:
             print(f"  = {email}")
     if missing:

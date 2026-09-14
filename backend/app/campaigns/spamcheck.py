@@ -484,12 +484,13 @@ def _rules_fix(subject: str, body: str) -> tuple[str, str, list[str]]:
     txt, back_txt = _mask_vars(body)
 
     swapped = 0
-    for phrase, _sev, _msg, swap, rx in _PHRASE_RES:
+    for _phrase, _sev, _msg, swap, rx in _PHRASE_RES:
         if not rx.search(subj) and not rx.search(txt):
             continue
-        replacement = swap
-        # Sentence-start swap keeps its capital.
-        def _sub(m: re.Match[str]) -> str:
+        # Sentence-start swap keeps its capital. Bound as a default arg so
+        # the closure takes THIS iteration's replacement (B023), even though
+        # rx.sub runs it synchronously before the next loop turn.
+        def _sub(m: re.Match[str], replacement: str = swap) -> str:
             found = m.group(0)
             if replacement and found[:1].isupper() and m.start() == 0:
                 return replacement[0].upper() + replacement[1:]
@@ -550,8 +551,8 @@ def _complete_structure(body: str) -> tuple[str, list[str]]:
     signoff_idx = next((i for i, ln in enumerate(lines)
                         if _SIGNOFF_LINE.match(ln)), None)
     if signoff_idx is None:
-        lines = body.rstrip().split("\n") + [
-            "", "Best regards,", company or "[Your Name]"]
+        lines = [*body.rstrip().split("\n"),
+                 "", "Best regards,", company or "[Your Name]"]
         body = "\n".join(lines)
         signoff_idx = len(lines) - 2
         notes.append("Added the 'Best regards,' sign-off")
@@ -744,7 +745,7 @@ def improve_script(ask: Ask, subject: str, body: str) -> dict:
         txt, added = _complete_structure(txt)
         return {"subject": subj, "body": txt, "method": "ai",
                 "notes": ["Rewritten by AI with spam triggers removed — "
-                          "review before sending"] + notes + added}
+                          "review before sending", *notes, *added]}
     subj, txt, notes = _rules_fix(subject, body)
     txt, added = _complete_structure(txt)
     return {"subject": subj, "body": txt, "method": "rules",

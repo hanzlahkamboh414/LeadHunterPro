@@ -223,8 +223,8 @@ class TavilySearchProvider(BaseSearchProvider, LoopSessionMixin):
                     logger.warning("Tavily extract HTTP %s", resp.status)
                     return {}
                 data = await resp.json()
-        except Exception as exc:  # translated, never raised (§12)
-            logger.exception("Tavily extract failed: %s", exc)
+        except Exception:  # translated, never raised (§12)
+            logger.exception("Tavily extract failed")
             return {}
 
         out: dict[str, str] = {}

@@ -437,7 +437,7 @@ class PlanHolderSource(BaseSource):
         with ThreadPoolExecutor(max_workers=3) as pool:
             fetched_data = list(pool.map(self._fetch_bytes, targeted))
 
-        for url, data in zip(targeted, fetched_data):
+        for url, data in zip(targeted, fetched_data, strict=True):
             if data is None:
                 fetch_failures += 1
                 continue

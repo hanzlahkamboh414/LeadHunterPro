@@ -191,7 +191,7 @@ class JobStore:
         conn.close()
         if row is None:
             return None
-        d = dict(zip(cols, row))
+        d = dict(zip(cols, row, strict=True))
         return Job(
             id=d["id"],
             query=json.loads(d["query_json"]),
@@ -239,21 +239,21 @@ class JobStore:
             return []
         return [
             Job(
-                id=dict(zip(cols, r))["id"],
-                query=json.loads(dict(zip(cols, r))["query_json"]),
-                state=JobState(dict(zip(cols, r))["state"]),
-                events=[JobEvent.from_dict(e) for e in json.loads(dict(zip(cols, r))["events_json"])],
-                results=json.loads(dict(zip(cols, r))["results_json"]),
-                pass_log=json.loads(dict(zip(cols, r))["pass_log_json"]),
-                error=dict(zip(cols, r))["error"],
-                created_at=dict(zip(cols, r))["created_at"],
-                updated_at=dict(zip(cols, r))["updated_at"],
-                elapsed_s=dict(zip(cols, r))["elapsed_s"],
-                working_leads=int(dict(zip(cols, r)).get("working_leads") or 0),
-                leads_found=int(dict(zip(cols, r)).get("leads_found") or 0),
-                shortfall=int(dict(zip(cols, r)).get("shortfall") or 0),
-                shortfall_reason=dict(zip(cols, r)).get("shortfall_reason", "") or "",
-                user_id=dict(zip(cols, r)).get("user_id", "") or "",
+                id=dict(zip(cols, r, strict=True))["id"],
+                query=json.loads(dict(zip(cols, r, strict=True))["query_json"]),
+                state=JobState(dict(zip(cols, r, strict=True))["state"]),
+                events=[JobEvent.from_dict(e) for e in json.loads(dict(zip(cols, r, strict=True))["events_json"])],
+                results=json.loads(dict(zip(cols, r, strict=True))["results_json"]),
+                pass_log=json.loads(dict(zip(cols, r, strict=True))["pass_log_json"]),
+                error=dict(zip(cols, r, strict=True))["error"],
+                created_at=dict(zip(cols, r, strict=True))["created_at"],
+                updated_at=dict(zip(cols, r, strict=True))["updated_at"],
+                elapsed_s=dict(zip(cols, r, strict=True))["elapsed_s"],
+                working_leads=int(dict(zip(cols, r, strict=True)).get("working_leads") or 0),
+                leads_found=int(dict(zip(cols, r, strict=True)).get("leads_found") or 0),
+                shortfall=int(dict(zip(cols, r, strict=True)).get("shortfall") or 0),
+                shortfall_reason=dict(zip(cols, r, strict=True)).get("shortfall_reason", "") or "",
+                user_id=dict(zip(cols, r, strict=True)).get("user_id", "") or "",
             )
             for r in rows
         ]

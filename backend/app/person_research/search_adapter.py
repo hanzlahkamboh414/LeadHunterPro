@@ -142,7 +142,9 @@ class RegistryIndexedSearch:
         except Exception:  # noqa: BLE001 — a batch failure is not fatal
             return out
 
-        for (idx, q), resp in zip(pending, responses):
+        # gather(return_exceptions=True) returns exactly one response per
+        # pending query — strict=True is the contract, not a hope.
+        for (idx, q), resp in zip(pending, responses, strict=True):
             if isinstance(resp, Exception) or not resp or not getattr(resp, "results", None):
                 continue
             results = [

@@ -58,7 +58,7 @@ def _load_jobs(conn: sqlite3.Connection) -> list[dict]:
         "FROM jobs ORDER BY created_at DESC"
     )
     cols = [d[0] for d in cur.description]
-    return [dict(zip(cols, r)) for r in cur.fetchall()]
+    return [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
 
 
 def _fmt_query(query_json: str) -> str:
@@ -150,7 +150,7 @@ def _deep_dive(job: dict) -> None:
           f"dead-skipped={dead}  scored-skip={skip_scored}  errors={errors}")
     if repeated:
         top = sorted(repeated.items(), key=lambda kv: -kv[1])[:8]
-        print(f"  most-repeated emails this run: "
+        print("  most-repeated emails this run: "
               + ", ".join(f"{em} x{c}" for em, c in top))
 
     # ---- served-from-cache notices -------------------------------------
@@ -161,7 +161,7 @@ def _deep_dive(job: dict) -> None:
         for e in served[:6]:
             print(f"  - {e.get('message','')}")
 
-    print(f"\n  READING:")
+    print("\n  READING:")
     print(f"  rounds={rounds}  passes={len(passes)}  SUMnew={total_new}  "
           f"research_events={len(research)}  distinct_emails={len(distinct)}  "
           f"working={working}")

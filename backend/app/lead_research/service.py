@@ -661,7 +661,7 @@ class LeadResearchStore:
         if cur.rowcount > 0:
             # Purge the sharing junction too — a deleted lead has no owners.
             conn.execute(
-                f"DELETE FROM dossier_owners WHERE email_hash = ?", (eh,)
+                "DELETE FROM dossier_owners WHERE email_hash = ?", (eh,)
             )
             # CRM timeline goes WITH the row (no orphan events). A restored
             # lead honestly restarts at 'researched' — the old stage died
@@ -1145,7 +1145,7 @@ class LeadResearchStore:
                 f"INSERT OR IGNORE INTO dossier_owners (email_hash, user_id) "
                 f"SELECT email_hash, ? FROM dossiers "
                 f"WHERE email_hash IN ({placeholders})",
-                [user_id] + params[2:],
+                [user_id, *params[2:]],
             )
         else:
             conn.execute(
@@ -1348,7 +1348,7 @@ class LeadResearchStore:
             f"SELECT {self._LIST_COLS} FROM dossiers d WHERE {where} "
             "ORDER BY d.rowid ASC "
             "LIMIT ? OFFSET ?",
-            args + [int(limit), int(offset)],
+            [*args, int(limit), int(offset)],
         ).fetchall()
         conn.close()
         return [self._row_to_lead(r) for r in rows], total

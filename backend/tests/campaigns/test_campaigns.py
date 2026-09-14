@@ -202,8 +202,8 @@ def test_store_sent_today_is_per_account(tmp_path):
                       emails=["c@x.com"], start_at=_iso(NOW))
     c3 = store.create("u1", account_id=9, name="c", subject="s", body="b",
                       emails=["d@x.com"], start_at=_iso(NOW))
-    for cid, email in [(c1["id"], "a@x.com"), (c1["id"], "b@x.com"),
-                       (c2["id"], "c@x.com")]:
+    for cid, _email in [(c1["id"], "a@x.com"), (c1["id"], "b@x.com"),
+                        (c2["id"], "c@x.com")]:
         s = store.next_pending(cid)
         store.mark_sent(s["id"], subject="s", sent_at=_iso(NOW))
     assert store.sent_today_for_account(7, _iso(NOW)[:10]) == 3

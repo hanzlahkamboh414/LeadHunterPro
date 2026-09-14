@@ -204,7 +204,9 @@ def test_authorize_302_to_google(tmp_path, monkeypatch):
     assert "gmail.send" in location
     # The state names the user and verifies at the callback.
     from urllib.parse import unquote
-    state = unquote([p for p in location.split("&") if p.startswith("state=")][0].split("=", 1)[1])
+    state = unquote(next(
+        p for p in location.split("&") if p.startswith("state=")
+    ).split("=", 1)[1])
     assert google.verify_state(state) == user.id
 
 

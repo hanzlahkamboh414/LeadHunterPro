@@ -70,7 +70,7 @@ def main() -> None:
     irrelevant: list[tuple] = []  # (email, company, industry, reason)
     working_current = working_proposed = 0
     rec_counts: Counter = Counter()
-    for eh, email, d in dossiers:
+    for _eh, email, d in dossiers:
         cur = regate_recommendation(d)
         rec_counts[cur] += 1
         if cur != "skip":
@@ -82,7 +82,7 @@ def main() -> None:
             else:
                 working_proposed += 1
 
-    print(f"\nrecommendations (CURRENT re-gate): "
+    print("\nrecommendations (CURRENT re-gate): "
           + ", ".join(f"{k}={v}" for k, v in rec_counts.items()))
 
     n = len(irrelevant)
@@ -93,11 +93,11 @@ def main() -> None:
           f"by adding is_non_client() to the re-gate.")
 
     if irrelevant:
-        print(f"\nsample (first 15):")
+        print("\nsample (first 15):")
         by_reason = Counter(r[3] for r in irrelevant)
         for r in sorted(irrelevant, key=lambda x: x[3])[:15]:
             print(f"  [{r[3] or '?':<22}] {r[1] or '-':<28} {r[2]:<40} {r[0]}")
-        print(f"\nreason breakdown: " + ", ".join(f"{k}={v}" for k, v in by_reason.most_common()))
+        print("\nreason breakdown: " + ", ".join(f"{k}={v}" for k, v in by_reason.most_common()))
 
 
 if __name__ == "__main__":

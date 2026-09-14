@@ -35,7 +35,7 @@ def main() -> None:
     from app.lead_research.models import LeadDossier
     want = sys.argv[1] if len(sys.argv) > 1 else ""
     dossiers = []
-    for eh, email, blob in rows:
+    for _eh, email, blob in rows:
         try:
             d = LeadDossier.from_dict(json.loads(blob))
         except Exception:

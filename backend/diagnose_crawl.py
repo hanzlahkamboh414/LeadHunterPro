@@ -321,11 +321,11 @@ def main() -> int:
             print(f"    aiohttp    : HTTP {a['status']} -> {a['final_url']} "
                   f"({a['bytes']} bytes, {a['elapsed']}s) ct={a['content_type'][:30]}")
             if a["is_gzip"]:
-                print(f"                 !! RAW GZIP body detected — production receives unusable "
-                      f"compressed bytes (auto_decompress=False + gzip Accept-Encoding)")
+                print("                 !! RAW GZIP body detected — production receives unusable "
+                      "compressed bytes (auto_decompress=False + gzip Accept-Encoding)")
         else:
             print(f"    aiohttp    : FAILED [{a['error']}] ({a['elapsed']}s)")
-            print(f"                 (pipeline collapses this to status_code=0, successful=False)")
+            print("                 (pipeline collapses this to status_code=0, successful=False)")
         print(f"    aiohttp    : {a['category']}")
 
         b = probe_requests(url)

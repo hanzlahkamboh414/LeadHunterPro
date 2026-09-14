@@ -630,7 +630,7 @@ class PersonResearcherAI:
         if many is not None:
             # search_many returns one result-list per query, same order as input.
             batches = many(q_strs)
-            for lbl, batch in zip(labels, batches):
+            for lbl, batch in zip(labels, batches, strict=True):
                 urls = [r.get("url", "") for r in batch if r.get("url")]
                 if query_planner is not None:
                     query_planner.note(lbl, urls)

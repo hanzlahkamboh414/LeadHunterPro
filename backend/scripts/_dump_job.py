@@ -1,4 +1,6 @@
-import json, sqlite3, sys
+import json
+import sqlite3
+import sys
 
 db = "c:/Users/SHAKIR/Desktop/LeadHunterPro/backend/output/lead_research.db"
 job_id = sys.argv[1] if len(sys.argv) > 1 else "5e9b945962f7"

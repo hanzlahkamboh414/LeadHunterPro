@@ -165,7 +165,7 @@ def test_store_unreplied_sent_and_accounts(tmp_path):
     store = CampaignStore(db_path=str(tmp_path / "c.db"))
     c = store.create("u1", account_id=5, name="n", subject="s", body="b",
                      emails=["a@x.com", "b@x.com"], start_at=_iso(NOW))
-    for e in ("a@x.com", "b@x.com"):
+    for _e in ("a@x.com", "b@x.com"):
         s = store.next_pending(c["id"])
         store.mark_sent(s["id"], subject="s", sent_at=_iso(NOW))
     store.mark_replied(c["id"], "a@x.com", received_at=_iso(NOW), subject="")

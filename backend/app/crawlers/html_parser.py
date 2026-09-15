@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urljoin
 
+from app.email.email_cleaner import is_crawl_artifact
+
 logger = logging.getLogger(__name__)
 
 # Email regex pattern
@@ -189,14 +191,19 @@ class HTMLParser:
 
         # From text content
         text = soup.get_text()
-        emails.update(_EMAIL_PATTERN.findall(text))
+        for hit in _EMAIL_PATTERN.findall(text):
+            # Page source carries machine strings shaped like addresses
+            # (Sentry DSNs, mailing-list ids, example.com placeholders) —
+            # the shared artifact gate keeps them out of lead data.
+            if not is_crawl_artifact(hit):
+                emails.add(hit)
 
         # From mailto: links
         for a_tag in soup.find_all("a", href=True):
             href = a_tag["href"]
             if href.startswith("mailto:"):
                 email = href[7:].split("?")[0].strip().lower()
-                if _EMAIL_PATTERN.match(email):
+                if _EMAIL_PATTERN.match(email) and not is_crawl_artifact(email):
                     emails.add(email)
 
         return sorted(emails)

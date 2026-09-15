@@ -45,14 +45,36 @@ class TestHTMLParser:
         html = """
         <html>
             <body>
-                <a href="mailto:contact@example.com">Contact</a>
+                <a href="mailto:contact@acme-contractors.com">Contact</a>
                 <p>Email: support@test.org</p>
             </body>
         </html>
         """
         emails = parser.extract_emails(html)
-        assert "contact@example.com" in emails
+        assert "contact@acme-contractors.com" in emails
         assert "support@test.org" in emails
+
+    def test_extract_emails_drops_crawl_artifacts(self, parser):
+        """Page-source machine strings (Sentry DSNs, example.com form
+        placeholders) are not contacts — the shared artifact gate keeps
+        them out of crawl results."""
+        html = """
+        <html>
+            <body>
+                <p>Reach us at info@tunnellcontracting.com</p>
+                <script>
+                    Sentry.init({ dsn:
+                        "https://2062d0a4929b45348643784b5cb39c36@sentry.wixpress.com"
+                    });
+                </script>
+                <input placeholder="you@example.com">
+            </body>
+        </html>
+        """
+        emails = parser.extract_emails(html)
+        assert "info@tunnellcontracting.com" in emails
+        assert all(not e.endswith("wixpress.com") for e in emails)
+        assert "you@example.com" not in emails
 
     def test_extract_phones(self, parser):
         """Phone extraction works correctly."""

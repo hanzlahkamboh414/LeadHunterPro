@@ -121,6 +121,32 @@ def test_parse_tdlr_row_active_and_expired():
     assert soda._parse_tdlr_row(garbage)["license_status"] == ""
 
 
+def test_parse_tdlr_row_multiword_city():
+    """Texas cities are multi-word — the state is the token that IS a USPS
+    code (validated, so EL of EL PASO never becomes a state) and the city
+    is everything before it. The old first/second-token split stored
+    city=SAN state=AN out of SAN ANTONIO (observed live 2026-09-15)."""
+    rec = soda._parse_tdlr_row(
+        dict(TDLR_ROW, business_city_state_zip="SAN ANTONIO TX 78204"))
+    assert rec["city"] == "SAN ANTONIO" and rec["state"] == "TX"
+
+    rec = soda._parse_tdlr_row(
+        dict(TDLR_ROW, business_city_state_zip="CORPUS CHRISTI, TX 78401"))
+    assert rec["city"] == "CORPUS CHRISTI" and rec["state"] == "TX"
+
+    rec = soda._parse_tdlr_row(
+        dict(TDLR_ROW, business_city_state_zip="EL PASO TX 79901"))
+    assert rec["city"] == "EL PASO" and rec["state"] == "TX"
+
+    # No state token at all — TDLR is a Texas board; TX is the truth.
+    rec = soda._parse_tdlr_row(
+        dict(TDLR_ROW, business_city_state_zip="AUSTIN 78701"))
+    assert rec["city"] == "AUSTIN" and rec["state"] == "TX"
+
+    rec = soda._parse_tdlr_row(dict(TDLR_ROW, business_city_state_zip=""))
+    assert rec["city"] == "" and rec["state"] == "TX"
+
+
 # ---------------------------------------------------------------------------
 # fetch plumbing (shared _http.fetch faked — hermetic)
 # ---------------------------------------------------------------------------

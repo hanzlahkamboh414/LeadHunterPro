@@ -1900,7 +1900,7 @@ class PendingLeadsStore:
         historical rows; this guard stops NEW free-mail from ever occupying a
         cached surplus slot again (the permanent half of the total fix).
         """
-        from app.email.email_cleaner import is_free_mail_domain
+        from app.email.email_cleaner import is_crawl_artifact, is_free_mail_domain
         from app.company_profile import get_profile
 
         conn = self._conn()
@@ -1910,6 +1910,17 @@ class PendingLeadsStore:
             if "@" not in email:
                 continue
             if is_free_mail_domain(email):
+                continue
+            # Crawl artifacts (Sentry DSNs, example.com placeholders,
+            # mailing-list ids) are machine strings scraped off raw page
+            # source — never a contact, so they never take a pool slot
+            # (observed live 2026-09-15: 17 of 1645 pending rows).
+            if is_crawl_artifact(email):
+                logger.info(
+                    "Pending drop (crawl artifact): %s from %s",
+                    email,
+                    (lead.get("source_url") or "")[:90],
+                )
                 continue
             # Vertical gate (root cause of the off-vertical cache flood): a lead
             # whose company/domain/source is a known non-client never occupies a

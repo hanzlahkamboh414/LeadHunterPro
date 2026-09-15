@@ -251,16 +251,32 @@ def _tdlr_active(expiry_mmddyyyy: str) -> str:
 
 
 def _parse_tdlr_row(row: dict[str, Any]) -> dict[str, Any]:
-    # "BUDA TX 78610-4477" -> city BUDA, state TX
-    city_state = (row.get("business_city_state_zip", "") or "").split()
-    city = city_state[0].upper() if city_state else ""
-    state = city_state[1].upper() if len(city_state) > 1 else "TX"
+    # "SAN ANTONIO TX 78610-4477" -> city SAN ANTONIO, state TX. Texas
+    # cities are often multi-word (SAN ANTONIO, CORPUS CHRISTI, EL PASO),
+    # so the tokens are walked until a REAL 2-letter USPS code (validated
+    # against _US_STATES — "EL" of EL PASO is not a state) or the ZIP;
+    # everything before joins into the city. The old first/second-token
+    # split read state=ANTONIO out of SAN ANTONIO and stored it truncated
+    # ("AN", "CH", "EL" — observed live 2026-09-15 across 40+ rows).
+    from app.engines.verification.location_verifier import _US_STATES
+
+    tokens = (row.get("business_city_state_zip", "") or "").replace(",", " ").split()
+    city_parts: list[str] = []
+    state = "TX"  # TDLR is a Texas board — every row is TX by construction
+    for tok in tokens:
+        up = tok.upper()
+        if up in _US_STATES:
+            state = up
+            break
+        if len(up) >= 5 and up[:5].isdigit():
+            break  # the ZIP — nothing after it is city
+        city_parts.append(up)
     return {
         "phone": row.get("business_telephone", "") or row.get("owner_telephone", ""),
         "person_name": row.get("owner_name", ""),
         "business_name": row.get("business_name", ""),
         "trade_category": row.get("license_type", ""),
-        "city": city,
+        "city": " ".join(city_parts),
         "state": state,
         "source": "tdlr_license",
         "license_status": _tdlr_active(

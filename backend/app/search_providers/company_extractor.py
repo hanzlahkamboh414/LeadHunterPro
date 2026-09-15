@@ -12,6 +12,8 @@ import re
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
+from app.email.email_cleaner import is_crawl_artifact
+
 logger = logging.getLogger(__name__)
 
 # Patterns for identifying business entities
@@ -649,6 +651,10 @@ class CompanyExtractor:
 
         # Email
         emails = _EMAIL_PATTERN.findall(html)
+        # Crawl artifacts first (Sentry DSNs, example.com placeholders,
+        # mailing-list ids — machine strings the regex cannot tell apart
+        # from contacts on raw page source).
+        emails = [e for e in emails if not is_crawl_artifact(e)]
         if emails:
             # Filter out obvious non-business emails
             business_emails = [

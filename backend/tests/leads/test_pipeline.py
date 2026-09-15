@@ -1086,6 +1086,29 @@ def test_pending_add_never_stocks_free_mail(tmp_path):
     assert [l["email"] for l in pending.take(10)] == ["owner@acme.com"]
 
 
+def test_pending_add_never_stocks_crawl_artifacts(tmp_path):
+    """Same guard for page-source machine strings: a Sentry DSN, a form
+    placeholder and a listserv id scraped off raw HTML are not contacts and
+    never take a pool slot (observed live 2026-09-15: 17 of 1645 rows).
+    A real company whose name contains 'sentry' still passes."""
+    from app.lead_research.service import PendingLeadsStore
+
+    db = str(tmp_path / "leads.db")
+    pending = PendingLeadsStore(db_path=db)
+    added = pending.add([
+        {"email": "karl@sentrycontracting.com", "domain": "",
+         "location": "Texas"},
+        {"email": "2062d0a4929b45348643784b5cb39c36@sentry.wixpress.com",
+         "domain": "", "location": "Texas"},
+        {"email": "jane@example.com", "domain": "", "location": "Texas"},
+        {"email": "20260828153349.8061-1-odion@efficios.com", "domain": "",
+         "location": "Texas"},
+    ])
+    assert added == 1
+    assert [l["email"] for l in pending.take(10)] == [
+        "karl@sentrycontracting.com"]
+
+
 def test_run_full_keeps_gathering_until_working_target(monkeypatch, tmp_path):
     """'jitni quantity likho utna working data': dead/refined-out emails never
     count toward the target — run_full tops up with more discovery until N

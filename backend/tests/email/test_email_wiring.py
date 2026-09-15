@@ -35,11 +35,31 @@ class TestFormatHelperContract:
         assert is_valid_email("user@localhost") is False  # no dotted TLD
 
     def test_clean_emails_filters_dedupes_lowercases(self):
-        raw = ["Mix@Example.COM", "mix@example.com", "bad@@example.com", "user@localhost"]
-        assert clean_emails(raw) == ["mix@example.com"]
+        raw = ["Mix@Acme.COM", "mix@acme.com", "bad@@acme.com", "user@localhost"]
+        assert clean_emails(raw) == ["mix@acme.com"]
 
     def test_clean_emails_handles_default_empty(self):
         assert clean_emails([]) == []
+
+    def test_clean_emails_drops_crawl_artifacts(self):
+        """Page-source machine strings (Sentry DSNs, example.com
+        placeholders, mailing-list ids) never survive cleaning — observed
+        live in the pending pool 2026-09-15."""
+        from app.email.email_cleaner import is_crawl_artifact
+
+        raw = [
+            "owner@acme.com",  # real contact — kept
+            "2062d0a4929b45348643784b5cb39c36@sentry.wixpress.com",  # Sentry DSN
+            "460ff4620fa44cba8df530afde949785@sentry.wi",  # crash key
+            "jane@example.com",  # form placeholder
+            "20260828153349.8061-1-odion@efficios.com",  # listserv id
+        ]
+        assert clean_emails(raw) == ["owner@acme.com"]
+
+        # A REAL company whose name contains "sentry" is never swept up —
+        # the artifact shapes are narrow on purpose.
+        assert is_crawl_artifact("karl@sentrycontracting.com") is False
+        assert is_crawl_artifact("j2b@sentrigroup.net") is False
 
 
 class TestWebsiteEngineWiring:
@@ -48,18 +68,18 @@ class TestWebsiteEngineWiring:
     def test_parse_cleans_emails(self):
         html = (
             "<html><head><title>Acme</title></head><body>"
-            "Reach Jane@Example.COM or jane@example.com, but bad@@ stays out"
+            "Reach Jane@Acme.COM or jane@acme.com, but bad@@ stays out"
             "</body></html>"
         )
-        parsed = WebsiteEngine().parse(html, "https://acme.example.com")
-        assert parsed["emails"] == ["jane@example.com"]
+        parsed = WebsiteEngine().parse(html, "https://acme-contractors.com")
+        assert parsed["emails"] == ["jane@acme.com"]
 
     def test_parse_deduplicates_case_variants(self):
         html = (
-            "<html><body>John@Example.COM john@example.com</body></html>"
+            "<html><body>John@Acme.COM john@acme.com</body></html>"
         )
-        parsed = WebsiteEngine().parse(html, "https://acme.example.com")
-        assert parsed["emails"] == ["john@example.com"]
+        parsed = WebsiteEngine().parse(html, "https://acme-contractors.com")
+        assert parsed["emails"] == ["john@acme.com"]
 
 
 class TestEmailDiscoveryWiring:
@@ -68,9 +88,9 @@ class TestEmailDiscoveryWiring:
     def test_discover_returns_uniform_emails(self, monkeypatch):
         html = (
             "<html>"
-            "John@Example.COM john@example.com "
-            'mailto:<a href="mailto:Info@Example.COM?subject=Hi">info</a> '
-            "bad@@example.com user@localhost "
+            "John@Acme.COM john@acme.com "
+            'mailto:<a href="mailto:Info@Acme.COM?subject=Hi">info</a> '
+            "bad@@acme.com user@localhost "
             '<a href="mailto:not-an-email">broken</a>'
             "</html>"
         )
@@ -82,8 +102,8 @@ class TestEmailDiscoveryWiring:
         monkeypatch.setattr(
             "app.email.email_discovery.requests", _FakeRequests()
         )
-        result = EmailDiscovery().discover("https://acme.example.com")
-        assert result["emails"] == ["info@example.com", "john@example.com"]
+        result = EmailDiscovery().discover("https://acme-contractors.com")
+        assert result["emails"] == ["info@acme.com", "john@acme.com"]
         assert result["count"] == 2
 
 
@@ -105,7 +125,7 @@ class TestDemoEnrichWiring:
             def parse(self, html, base_url):
                 return {
                     "title": "Acme",
-                    "emails": ["Mix@Example.COM", "bad@@example.com", "mix@example.com"],
+                    "emails": ["Mix@Acme.COM", "bad@@acme.com", "mix@acme.com"],
                     "phones": [],
                     "linkedin": [],
                 }
@@ -138,4 +158,4 @@ class TestDemoEnrichWiring:
             location="Dallas TX",
         )
         assert enriched == 1
-        assert captured["emails"] == ["mix@example.com"]
+        assert captured["emails"] == ["mix@acme.com"]

@@ -17,6 +17,7 @@ ever runs in tests).
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from email.utils import getaddresses
 from typing import Any
@@ -59,6 +60,31 @@ _DSN_LOCALS = frozenset({"mailer-daemon", "postmaster"})
 #: The export's honest bound: Gmail paged metadata gets beyond this would
 #: make a single click take minutes; the count is reported, never padded.
 _EXPORT_MESSAGE_CAP = 20_000
+
+#: Per-message metadata GETs run this wide. Sequential fetching was fine at
+#: test scale, but a real 1,000+ message inbox turned ONE export into a
+#: 3-minute request that the nginx proxy cut off at 120s (observed on main:
+#: "upstream timed out" while the backend kept scanning — the browser got
+#: nothing). Gmail's per-user quota (250 units/sec; a metadata get is 1
+#: unit) leaves ample headroom at this width.
+_METADATA_WORKERS = 8
+
+
+def _metadata_messages(token: str, ids: list[str],
+                       pool: ThreadPoolExecutor) -> list[dict[str, Any]]:
+    """Metadata for many message ids, fetched in parallel (order preserved).
+
+    Unreadable ids are skipped and logged — one dead message never killed a
+    page or an export.
+    """
+    def _one(mid: str) -> dict[str, Any] | None:
+        try:
+            return google.get_message(token, mid, metadata_only=True)
+        except Exception:  # noqa: BLE001
+            logger.info("inbox: message %s unreadable, skipped", mid)
+            return None
+
+    return [m for m in pool.map(_one, ids) if m is not None]
 
 
 def _account_token(account_id: int, user: User) -> tuple[dict[str, Any], str]:
@@ -127,13 +153,10 @@ def list_messages(
         token, label=_label(folder), q=q.strip(),
         page_token=page_token, limit=limit,
     )
+    with ThreadPoolExecutor(max_workers=_METADATA_WORKERS) as pool:
+        metas = _metadata_messages(token, page["ids"], pool)
     rows = []
-    for mid in page["ids"]:
-        try:
-            m = google.get_message(token, mid, metadata_only=True)
-        except Exception:  # noqa: BLE001 — one dead row must not kill the page
-            logger.info("inbox list: message %s unreadable, skipped", mid)
-            continue
+    for m in metas:
         h = m["headers"]
         rows.append({
             "id": m["id"],
@@ -346,33 +369,30 @@ def export_addresses(
     addresses: set[str] = set()
     scanned = 0
     page_token = ""
-    while scanned < _EXPORT_MESSAGE_CAP:
-        page = google.list_message_ids(
-            token, label="", q=q, page_token=page_token, limit=100,
-        )
-        if not page["ids"]:
-            break
-        for mid in page["ids"]:
-            try:
-                m = google.get_message(token, mid, metadata_only=True)
-            except Exception:  # noqa: BLE001 — one dead row, not a dead export
-                continue
-            h = m["headers"]
-            if source == "sent":
-                pairs = getaddresses([h.get("to", "")]) + \
-                    getaddresses([h.get("cc", "")])
-            else:
-                pairs = getaddresses([h.get("from", "")])
-            for _, addr in pairs:
-                addr = addr.strip().lower()
-                if not addr or "@" not in addr:
-                    continue
-                if source == "sent" or _is_person(addr, creds["email"]):
-                    addresses.add(addr)
-        scanned += len(page["ids"])
-        page_token = page["next_page_token"]
-        if not page_token:
-            break
+    with ThreadPoolExecutor(max_workers=_METADATA_WORKERS) as pool:
+        while scanned < _EXPORT_MESSAGE_CAP:
+            page = google.list_message_ids(
+                token, label="", q=q, page_token=page_token, limit=100,
+            )
+            if not page["ids"]:
+                break
+            for m in _metadata_messages(token, page["ids"], pool):
+                h = m["headers"]
+                if source == "sent":
+                    pairs = getaddresses([h.get("to", "")]) + \
+                        getaddresses([h.get("cc", "")])
+                else:
+                    pairs = getaddresses([h.get("from", "")])
+                for _, addr in pairs:
+                    addr = addr.strip().lower()
+                    if not addr or "@" not in addr:
+                        continue
+                    if source == "sent" or _is_person(addr, creds["email"]):
+                        addresses.add(addr)
+            scanned += len(page["ids"])
+            page_token = page["next_page_token"]
+            if not page_token:
+                break
 
     rows = [[a] for a in sorted(addresses)]
     sheet = "Emails" if source == "sent" else "Persons"

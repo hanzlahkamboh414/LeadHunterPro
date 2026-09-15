@@ -249,7 +249,7 @@ export default function EmailInbox() {
   // ================================================================= render
   if (accounts.isLoading) {
     return (
-      <div className="px-8 py-7 max-w-6xl">
+      <div className="mx-auto flex h-full w-full max-w-6xl flex-col px-8 py-7">
         <PageHeader eyebrow="LeadHunter Pro" title="Email" subtitle="Loading your connected Gmail…" />
       </div>
     );
@@ -259,7 +259,7 @@ export default function EmailInbox() {
   if (!accounts.data || accounts.data.length === 0 || accountId === null) {
     const configured = gmailStatus.data?.configured === true;
     return (
-      <div className="px-8 py-7 max-w-3xl">
+      <div className="mx-auto flex h-full w-full max-w-3xl flex-col px-8 py-7">
         <PageHeader
           eyebrow="LeadHunter Pro"
           title="Email"
@@ -293,16 +293,23 @@ export default function EmailInbox() {
   }
 
   return (
-    <div className="px-8 py-7 max-w-[1400px]">
-      <PageHeader
-        eyebrow="LeadHunter Pro"
-        title="Email"
-        subtitle="Your connected Gmail — browse, reply, and export addresses."
-      />
+    // Full-height auto-adjust layout: the shell's <main> is exactly the
+    // viewport (App.tsx h-screen), so this screen fills it and the
+    // list/reading panes split whatever space is LEFT after the header,
+    // account bar, export panel and folder tabs — no fixed
+    // calc(100vh-…) guesses that break when a panel opens.
+    <div className="mx-auto flex h-full w-full max-w-[1500px] flex-col px-8 py-6">
+      <div className="shrink-0">
+        <PageHeader
+          eyebrow="LeadHunter Pro"
+          title="Email"
+          subtitle="Your connected Gmail — browse, reply, and export addresses."
+        />
+      </div>
 
       {banner && (
         <div
-          className={`mt-4 flex items-start justify-between gap-2.5 rounded-lg border px-4 py-3 text-[13px] ${
+          className={`mt-4 flex shrink-0 items-start justify-between gap-2.5 rounded-lg border px-4 py-3 text-[13px] ${
             banner.ok
               ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-300"
               : "border-rose-500/25 bg-rose-500/10 text-rose-300"
@@ -316,7 +323,7 @@ export default function EmailInbox() {
       )}
 
       {needsReconnect && (
-        <div className="mt-4 flex items-start gap-2.5 rounded-lg border border-amber-500/25 bg-amber-500/10 px-4 py-3 text-[13px] text-amber-300">
+        <div className="mt-4 flex shrink-0 items-start gap-2.5 rounded-lg border border-amber-500/25 bg-amber-500/10 px-4 py-3 text-[13px] text-amber-300">
           <span>
             {account!.email} needs a reconnect —{" "}
             <a className="underline" href={googleAuthorizeUrl()}>connect it again</a>{" "}
@@ -326,7 +333,7 @@ export default function EmailInbox() {
       )}
 
       {/* Account bar + export toggle */}
-      <div className="mt-4 flex flex-wrap items-center gap-3">
+      <div className="mt-4 flex shrink-0 flex-wrap items-center gap-3">
         {accounts.data.length > 1 ? (
           <div className="relative">
             <select
@@ -370,7 +377,7 @@ export default function EmailInbox() {
 
       {/* Export panel — the single-click XLSX of addresses */}
       {exportOpen && (
-        <div className="mt-3 rounded-xl border border-white/5 bg-white/[0.02] p-4">
+        <div className="mt-3 shrink-0 rounded-xl border border-white/5 bg-white/[0.02] p-4">
           <div className="flex flex-wrap items-end gap-4">
             <label className="text-[12px] text-slate-400">
               <span className="block mb-1.5">Source</span>
@@ -447,7 +454,12 @@ export default function EmailInbox() {
               {exportXlsx.isPending ? "Exporting…" : "Download XLSX"}
             </button>
           </div>
-          {exportSource === "received" && (
+          {exportXlsx.isPending && (
+            <p className="mt-3 text-[12px] text-slate-500">
+              Scanning the mailbox — a large inbox can take a minute or two.
+            </p>
+          )}
+          {exportSource === "received" && !exportXlsx.isPending && (
             <p className="mt-3 text-[12px] text-slate-500">
               Received export keeps only senders that look like real persons —
               services like Facebook/Instagram notifications and role addresses
@@ -458,7 +470,7 @@ export default function EmailInbox() {
       )}
 
       {/* Folder tabs + search */}
-      <div className="mt-4 flex flex-wrap items-center gap-2">
+      <div className="mt-4 flex shrink-0 flex-wrap items-center gap-2">
         {FOLDERS.map(({ key, label, icon: Icon }) => (
           <button
             key={key}
@@ -478,7 +490,7 @@ export default function EmailInbox() {
         ))}
 
         <form
-          className="ml-auto flex items-center gap-2"
+          className="ml-auto w-full sm:w-auto"
           onSubmit={(e) => {
             e.preventDefault();
             setSearchQ(searchInput.trim());
@@ -491,16 +503,23 @@ export default function EmailInbox() {
               value={searchInput}
               onChange={(e) => setSearchInput(e.target.value)}
               placeholder="Search — Gmail syntax (from:, has:attachment…)"
-              className="w-72 bg-white/[0.04] border border-white/5 rounded-lg pl-9 pr-3 py-2 text-[13px] text-slate-300 placeholder:text-slate-500 outline-none focus:ring-2 focus:ring-indigo-500/40"
+              className="w-full bg-white/[0.04] border border-white/5 rounded-lg pl-9 pr-3 py-2 text-[13px] text-slate-300 placeholder:text-slate-500 outline-none focus:ring-2 focus:ring-indigo-500/40 sm:w-80"
             />
           </div>
         </form>
       </div>
 
-      {/* List + reading pane */}
-      <div className="mt-4 grid grid-cols-1 lg:grid-cols-[380px_1fr] gap-4">
-        <div className="rounded-xl border border-white/5 bg-white/[0.02] overflow-hidden flex flex-col max-h-[calc(100vh-320px)]">
-          <div ref={listRef} className="overflow-y-auto flex-1 divide-y divide-white/5">
+      {/* List + reading pane — flex-1 min-h-0: the panes auto-adjust to
+          whatever viewport height is left, and each scrolls on its own.
+          Below lg (or whenever a message is open on a narrow screen) the
+          two panes swap: list, or the open message with a Back button. */}
+      <div className="mt-4 grid min-h-0 flex-1 grid-cols-1 gap-4 lg:grid-cols-[minmax(300px,360px)_1fr]">
+        <div
+          className={`min-h-0 overflow-hidden rounded-xl border border-white/5 bg-white/[0.02] ${
+            openId ? "hidden lg:flex" : "flex"
+          } flex-col`}
+        >
+          <div ref={listRef} className="min-h-0 flex-1 divide-y divide-white/5 overflow-y-auto">
             {page.isLoading && (
               <p className="p-4 text-[13px] text-slate-500">Loading messages…</p>
             )}
@@ -566,7 +585,7 @@ export default function EmailInbox() {
           </div>
 
           {/* Token pagination */}
-          <div className="flex items-center justify-between border-t border-white/5 px-4 py-2 text-[12px] text-slate-500">
+          <div className="flex shrink-0 items-center justify-between border-t border-white/5 px-4 py-2 text-[12px] text-slate-500">
             <button
               onClick={goNewer}
               disabled={tokens.length <= 1}
@@ -585,24 +604,41 @@ export default function EmailInbox() {
           </div>
         </div>
 
-        {/* Reading pane */}
-        <div className="rounded-xl border border-white/5 bg-white/[0.02] overflow-y-auto max-h-[calc(100vh-320px)]">
-          {!openId && (
-            <div className="h-full flex flex-col items-center justify-center text-slate-500 p-8">
-              <MailOpen className="w-8 h-8 mb-3 opacity-50" />
-              <p className="text-[13px]">Select a message to read it.</p>
-            </div>
-          )}
-          {openId && message.isLoading && (
-            <p className="p-4 text-[13px] text-slate-500">Loading message…</p>
-          )}
-          {openId && message.isError && (
-            <p className="p-4 text-[13px] text-rose-300">
-              {message.error instanceof ApiError ? message.error.message : "The message could not be read."}
-            </p>
-          )}
-          {message.data && (
-            <div className="p-5">
+        {/* Reading pane — hidden until a message is open below lg; beside
+            the list from lg up. Its inner area scrolls; the pane itself
+            fills the remaining column height. */}
+        <div
+          className={`min-h-0 flex-col overflow-hidden rounded-xl border border-white/5 bg-white/[0.02] ${
+            openId ? "flex" : "hidden lg:flex"
+          }`}
+        >
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            {openId && (
+              <div className="px-5 pt-4">
+                <button
+                  onClick={() => setOpenId(null)}
+                  className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.03] px-3 py-1.5 text-[12.5px] text-slate-300 hover:bg-white/[0.06]"
+                >
+                  <ChevronLeft className="w-3.5 h-3.5" /> Back to list
+                </button>
+              </div>
+            )}
+            {!openId && (
+              <div className="h-full flex flex-col items-center justify-center text-slate-500 p-8">
+                <MailOpen className="w-8 h-8 mb-3 opacity-50" />
+                <p className="text-[13px]">Select a message to read it.</p>
+              </div>
+            )}
+            {openId && message.isLoading && (
+              <p className="p-4 text-[13px] text-slate-500">Loading message…</p>
+            )}
+            {openId && message.isError && (
+              <p className="p-4 text-[13px] text-rose-300">
+                {message.error instanceof ApiError ? message.error.message : "The message could not be read."}
+              </p>
+            )}
+            {message.data && (
+              <div className="p-5">
               {/* Header block */}
               <div className="flex items-start gap-3">
                 <div className="min-w-0 flex-1">
@@ -694,14 +730,17 @@ export default function EmailInbox() {
               </div>
 
               {/* Body — the HTML part in a sandboxed iframe (scripts can never
-                  run: sandbox with no allow-* permissions), else plain text. */}
+                  run: sandbox with no allow-* permissions), else plain text.
+                  The iframe can't auto-size (sandbox blocks reading its
+                  content), so it takes a share of the viewport and the pane
+                  scrolls around it. */}
               <div className="mt-4">
                 {message.data.html ? (
                   <iframe
                     title="Message body"
                     sandbox=""
                     srcDoc={`<!doctype html><meta charset="utf-8"><style>body{font:13px/1.6 system-ui,sans-serif;color:#222;margin:0;padding:2px;word-wrap:break-word}img{max-width:100%}a{color:#4f46e5}</style>${message.data.html}`}
-                    className="w-full min-h-[200px] rounded-lg border border-white/5 bg-white"
+                    className="h-[60vh] min-h-[280px] w-full rounded-lg border border-white/5 bg-white"
                   />
                 ) : (
                   <pre className="whitespace-pre-wrap text-[13px] text-slate-300 font-sans">
@@ -743,13 +782,15 @@ export default function EmailInbox() {
               )}
             </div>
           )}
+          </div>
         </div>
       </div>
 
-      {/* Compose / reply / forward modal */}
+      {/* Compose / reply / forward modal — fits (and scrolls inside) any
+          window height, wide or short. */}
       {draft && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-          <div className="w-full max-w-2xl rounded-xl border border-white/10 bg-[#0D1017] p-5">
+          <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-xl border border-white/10 bg-[#0D1017] p-5">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-[14px] font-semibold text-white">
                 {draft.mode === "reply" ? "Reply" : draft.mode === "forward" ? "Forward" : "New email"}

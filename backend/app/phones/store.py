@@ -427,6 +427,27 @@ class PhoneLeadsStore:
 
     # -- read ------------------------------------------------------------------
 
+    def emailless_leads(self) -> list[dict[str, Any]]:
+        """Every lead with no email yet, id ASC — the Overture backfill's
+        working set (claimed or not: the phone-keyed dataset join is the
+        same ground truth for a shared-pool row as for a claimed one)."""
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                """
+                SELECT id, phone, person_name, business_name, trade, city,
+                       state, source_url
+                FROM phone_leads
+                WHERE email = ''
+                ORDER BY id ASC
+                """
+            )
+            rows = cur.fetchall()
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, r, strict=True)) for r in rows]
+        finally:
+            conn.close()
+
     def list_owned(
         self, user_id: str, trade: str = "", state: str = "", city: str = "",
         limit: int = 200,

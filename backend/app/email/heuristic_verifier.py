@@ -302,7 +302,19 @@ def get_email_classifier() -> Callable[[str], dict[str, Any]]:
             logger.info("bounce store unavailable — heuristic-only "
                         "classification", exc_info=True)
             _store = False  # type: ignore[assignment]
-    lookup = _store.lookup if _store else None
+    raw_lookup = _store.lookup if _store else None
+
+    def lookup(email: str) -> str | None:
+        """Fail-open: a broken bounce store degrades to heuristic-only
+        (outcome_lookup=None), exactly like a store that never built."""
+        if raw_lookup is None:
+            return None
+        try:
+            return raw_lookup(email)
+        except Exception:  # noqa: BLE001 — heuristics never hard-fail
+            logger.info("bounce lookup failed — heuristic-only",
+                        exc_info=True)
+            return None
 
     def classify(email: str) -> dict[str, Any]:
         return classify_email(email, outcome_lookup=lookup)

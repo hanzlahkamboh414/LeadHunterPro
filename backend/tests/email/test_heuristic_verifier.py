@@ -184,6 +184,56 @@ def test_get_email_classifier_degrades_to_heuristic_only(monkeypatch):
     assert v["confidence"] == "dead"
 
 
+def test_bounce_store_cross_thread_lookup(tmp_path):
+    """The cached classifier is used from a NEW thread every run_full pass
+    (observed live 2026-09-15: the consumer thread died with
+    sqlite3.ProgrammingError and every emails-lane pass researched 0 despite
+    discovery succeeding). The shared connection must allow that."""
+    import threading
+
+    import app.email.heuristic_verifier as hv
+    from app.email.bounce_learning import BounceStore
+
+    store = BounceStore(db_path=str(tmp_path / "outcomes.db"))
+    store.record("someone@acme.com", "bounced", "dsn")
+
+    errors: list[str] = []
+
+    def use_from_other_thread() -> None:
+        try:
+            assert store.lookup("someone@acme.com") == "bounced"
+            assert store.lookup("unknown@acme.com") is None
+        except Exception as exc:  # pragma: no cover — the failure report
+            errors.append(repr(exc))
+
+    t = threading.Thread(target=use_from_other_thread)
+    t.start()
+    t.join()
+    assert errors == []
+    store.close()
+
+
+def test_classifier_lookup_failure_degrades_to_none(monkeypatch):
+    """A lookup that RAISES at call time (not build time) must degrade to
+    heuristic-only, never kill the research consumer."""
+    import sqlite3
+
+    import app.email.heuristic_verifier as hv
+
+    monkeypatch.setattr(hv, "_store", None)
+
+    class _ExplodingStore:
+        def lookup(self, email):  # pragma: no cover — the explosion
+            raise sqlite3.ProgrammingError("wrong thread")
+
+    monkeypatch.setattr(
+        "app.email.bounce_learning.BounceStore", lambda *a, **k: _ExplodingStore(),
+    )
+    classify = hv.get_email_classifier()
+    v = classify("jane@mailinator.com")  # disposable: no DNS needed
+    assert v["confidence"] == "dead"
+
+
 # ---------------------------------------------------------------------------
 # mx_status (the real dnspython path, with injected resolver errors)
 # ---------------------------------------------------------------------------

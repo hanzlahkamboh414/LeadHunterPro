@@ -219,3 +219,26 @@ def test_pending_enrichment_claimed_first_and_set_enrichment(tmp_path):
     assert store.pending_enrichment(10) == []
     # claimed_only=False reaches the unclaimed inventory too.
     assert len(store.pending_enrichment(10, claimed_only=False)) == 2
+
+
+def test_emailless_leads_covers_claimed_and_shared(tmp_path):
+    """The Overture backfill's working set: EVERY email-less lead, claimed or
+    not — unlike pending_enrichment's claimed-first queue."""
+    store = PhoneLeadsStore(db_path=str(tmp_path / "phones.db"))
+    store.add([_rec("5031110001"), _rec("5031110002"), _rec("5031110003")])
+    store.serve("gc", "", "", 1, "alice")  # claims exactly one
+
+    rows = store.emailless_leads()
+    assert len(rows) == 3  # claimed or shared, all three lack an email
+    assert {r["phone"] for r in rows} == {"+15031110001", "+15031110002",
+                                          "+15031110003"}  # E.164, as stored
+    # The join keys the backfill needs are present.
+    for r in rows:
+        assert r["id"] and r["business_name"] and "trade" in r
+
+    # A lead that gains an email leaves the working set.
+    store.set_enrichment(
+        rows[0]["id"], email="info@acme.com",
+        email_source="overture", website="https://acme.com",
+    )
+    assert len(store.emailless_leads()) == 2

@@ -53,7 +53,13 @@ class BounceStore:
         self._db_path = db_path
         os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
         self._lock = threading.Lock()
-        self._conn = sqlite3.connect(db_path)
+        # check_same_thread=False + the lock above: the store is cached at
+        # module level (get_email_classifier) and every run_full consumer
+        # thread looks through it — the person_research/search-cache pattern.
+        # Without the flag, any consumer other than the creating thread gets
+        # ProgrammingError and the research pass dies (observed live
+        # 2026-09-15: 87 companies discovered, 0 researched).
+        self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute(
             """

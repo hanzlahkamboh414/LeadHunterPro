@@ -17,6 +17,7 @@ ever runs in tests).
 from __future__ import annotations
 
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from email.utils import getaddresses
@@ -79,12 +80,41 @@ def _metadata_messages(token: str, ids: list[str],
     """
     def _one(mid: str) -> dict[str, Any] | None:
         try:
-            return google.get_message(token, mid, metadata_only=True)
+            return _rate_retry(
+                lambda: google.get_message(token, mid, metadata_only=True))
         except Exception:  # noqa: BLE001
             logger.info("inbox: message %s unreadable, skipped", mid)
             return None
 
     return [m for m in pool.map(_one, ids) if m is not None]
+
+
+#: Backoff before each retry of a rate-limited Gmail call (seconds).
+_RATE_RETRY_DELAYS = (2.0, 5.0, 10.0)
+
+
+def _rate_limited(exc: Exception) -> bool:
+    """Gmail's transient 'slow down' answers (429, and 403
+    userRateLimitExceeded) — as opposed to a real permission failure."""
+    resp = getattr(exc, "response", None)
+    return resp is not None and getattr(resp, "status_code", None) in (403, 429)
+
+
+def _rate_retry(fn):
+    """Run fn, retrying Gmail's rate-limit answers with a short backoff.
+
+    Verified transient on main 2026-09-15: the export's paged messages.list
+    403'd once mid-scan and the exact same call succeeded seconds later —
+    the burst of parallel metadata gets trips the per-user limit. Waiting
+    clears it; anything else re-raises immediately.
+    """
+    for attempt in range(len(_RATE_RETRY_DELAYS) + 1):
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001 — re-raised unless rate-limited
+            if attempt >= len(_RATE_RETRY_DELAYS) or not _rate_limited(exc):
+                raise
+            time.sleep(_RATE_RETRY_DELAYS[attempt])
 
 
 def _account_token(account_id: int, user: User) -> tuple[dict[str, Any], str]:
@@ -149,10 +179,18 @@ def list_messages(
     per-message endpoint when a row is opened."""
     creds, token = _account_token(account_id, user)
     _require_scope(creds, "gmail.readonly")
-    page = google.list_message_ids(
-        token, label=_label(folder), q=q.strip(),
-        page_token=page_token, limit=limit,
-    )
+    label = _label(folder)
+    try:
+        page = _rate_retry(lambda: google.list_message_ids(
+            token, label=label, q=q.strip(),
+            page_token=page_token, limit=limit,
+        ))
+    except Exception as exc:  # noqa: BLE001 — Google's error shapes vary
+        logger.warning("inbox list for %s failed: %s", creds["email"], exc)
+        raise HTTPException(
+            status_code=502,
+            detail="Gmail could not be reached — try again in a moment.",
+        ) from exc
     with ThreadPoolExecutor(max_workers=_METADATA_WORKERS) as pool:
         metas = _metadata_messages(token, page["ids"], pool)
     rows = []
@@ -369,30 +407,46 @@ def export_addresses(
     addresses: set[str] = set()
     scanned = 0
     page_token = ""
-    with ThreadPoolExecutor(max_workers=_METADATA_WORKERS) as pool:
-        while scanned < _EXPORT_MESSAGE_CAP:
-            page = google.list_message_ids(
-                token, label="", q=q, page_token=page_token, limit=100,
-            )
-            if not page["ids"]:
-                break
-            for m in _metadata_messages(token, page["ids"], pool):
-                h = m["headers"]
-                if source == "sent":
-                    pairs = getaddresses([h.get("to", "")]) + \
-                        getaddresses([h.get("cc", "")])
-                else:
-                    pairs = getaddresses([h.get("from", "")])
-                for _, addr in pairs:
-                    addr = addr.strip().lower()
-                    if not addr or "@" not in addr:
-                        continue
-                    if source == "sent" or _is_person(addr, creds["email"]):
-                        addresses.add(addr)
-            scanned += len(page["ids"])
-            page_token = page["next_page_token"]
-            if not page_token:
-                break
+    try:
+        with ThreadPoolExecutor(max_workers=_METADATA_WORKERS) as pool:
+            while scanned < _EXPORT_MESSAGE_CAP:
+                page = _rate_retry(lambda: google.list_message_ids(
+                    token, label="", q=q, page_token=page_token, limit=100,
+                ))
+                if not page["ids"]:
+                    break
+                for m in _metadata_messages(token, page["ids"], pool):
+                    h = m["headers"]
+                    if source == "sent":
+                        pairs = getaddresses([h.get("to", "")]) + \
+                            getaddresses([h.get("cc", "")])
+                    else:
+                        pairs = getaddresses([h.get("from", "")])
+                    for _, addr in pairs:
+                        addr = addr.strip().lower()
+                        if not addr or "@" not in addr:
+                            continue
+                        if source == "sent" or _is_person(addr, creds["email"]):
+                            addresses.add(addr)
+                scanned += len(page["ids"])
+                page_token = page["next_page_token"]
+                if not page_token:
+                    break
+    except Exception as exc:  # noqa: BLE001 — Google's error shapes vary
+        # Log Google's own words too (the reason lives in the response body,
+        # not the status line) — the 2026-09-15 main-server 403 was invisible
+        # until this landed.
+        body = ""
+        resp = getattr(exc, "response", None)
+        if resp is not None:
+            body = (getattr(resp, "text", "") or "")[:300]
+        logger.warning("gmail address export failed for %s: %s %s",
+                       creds["email"], exc, body)
+        raise HTTPException(
+            status_code=502,
+            detail="Gmail rate-limited or refused the export — "
+                   "wait a minute and try again.",
+        ) from exc
 
     rows = [[a] for a in sorted(addresses)]
     sheet = "Emails" if source == "sent" else "Persons"

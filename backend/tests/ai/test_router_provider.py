@@ -49,7 +49,7 @@ _FAKE_MODEL = "test-model-not-real"
 
 # The model default that config.py declares. Recorded here so a silent change to
 # the proven default fails a test instead of quietly changing AI behaviour.
-_PROVEN_DEFAULT_MODEL = "agnes-2.5-flash"
+_PROVEN_DEFAULT_MODEL = "agnes-3-flash"
 
 # The hard per-request AI timeout default. Changes to it are deliberate (they
 # trade bounded latency against a slower/hung provider's completion), so a

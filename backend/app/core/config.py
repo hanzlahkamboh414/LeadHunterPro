@@ -75,10 +75,13 @@ class Settings(BaseSettings):
     # the lift default because the 27B pace makes a 100-lead run impractical).
     # qwen3.8-flash/-max/-alibaba and qwen3.7-flash were all 402/429 out of
     # credit at the time; qwen3.8-27b stays the quality fallback.
+    # agnes-3-flash switched 2026-09-15 by user directive: verified 200 and
+    # returns CLEAN JSON (no markdown fences — 2.5 wrapped output in ```json),
+    # at the cost of 25-40s vs 2.5's 3-7s per call on the same prompt.
     # The real key is loaded at runtime from the gitignored backend/.env;
     # never hardcode one.
     AI_BASE_URL: str = "https://router.bynara.id/v1"
-    AI_MODEL: str = "agnes-2.5-flash"
+    AI_MODEL: str = "agnes-3-flash"
     AI_API_KEY: str = Field(default="", repr=False)  # secret — see note above
     # Second AI key for the deep-research stage. Lets one key carry the main
     # pipeline (screening/refine/person/intent/scoring) while a second key

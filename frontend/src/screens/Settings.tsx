@@ -151,6 +151,14 @@ export default function Settings() {
                             stop when a lead answers)
                           </p>
                         )}
+                      {a.status === "connected" &&
+                        a.scopes.includes("gmail.readonly") &&
+                        !a.scopes.includes("gmail.modify") && (
+                          <p className="mt-0.5 text-[11.5px] text-amber-400/90">
+                            Reconnect to enable star / mark-unread / trash /
+                            archive in the Email screen
+                          </p>
+                        )}
                     </div>
                     <span
                       className={`w-1.5 h-1.5 rounded-full shrink-0 ${

@@ -204,6 +204,27 @@ def test_other_users_account_is_404(tmp_path, monkeypatch):
     assert r.status_code == 404
 
 
+def test_list_messages_skips_unreadable_rows(monkeypatch, tmp_path):
+    """The metadata fetches run in a thread pool — one Google failure inside
+    a worker must skip that row, never kill the page (observed live on main:
+    real inboxes do return the occasional unreadable id)."""
+    def fake_list(token, *, label="", q="", page_token="", limit=50):
+        return {"ids": ["dead", "m2"], "next_page_token": "",
+                "total_estimate": 2}
+
+    def fake_get_message(token, mid, *, metadata_only=False):
+        if mid == "dead":
+            raise RuntimeError("google 500")
+        return _meta(mid, frm="Jane <jane@acme.com>")
+
+    monkeypatch.setattr(gi.google, "list_message_ids", fake_list)
+    monkeypatch.setattr(gi.google, "get_message", fake_get_message)
+    client, acct, _ = _setup(tmp_path, monkeypatch)
+    r = client.get(f"/api/v1/gmail/messages?account_id={acct}&folder=inbox")
+    assert r.status_code == 200
+    assert [m["id"] for m in r.json()["messages"]] == ["m2"]
+
+
 # ---------------------------------------------------------------------------
 # Send + modify
 # ---------------------------------------------------------------------------

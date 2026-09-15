@@ -299,12 +299,56 @@ export default function EmailInbox() {
     // account bar, export panel and folder tabs — no fixed
     // calc(100vh-…) guesses that break when a panel opens.
     <div className="mx-auto flex h-full w-full max-w-[1500px] flex-col px-8 py-6">
-      <div className="shrink-0">
+      {/* Title + account controls share ONE row: the old separate account
+          bar left the whole top-right of the screen empty while the panes
+          below fought for height. */}
+      <div className="flex shrink-0 flex-wrap items-end justify-between gap-x-4 gap-y-3">
         <PageHeader
           eyebrow="LeadHunter Pro"
           title="Email"
           subtitle="Your connected Gmail — browse, reply, and export addresses."
         />
+        <div className="flex flex-wrap items-center gap-3 pb-1">
+          {accounts.data.length > 1 ? (
+            <div className="relative">
+              <select
+                value={accountId}
+                onChange={(e) => {
+                  setAccountId(Number(e.target.value));
+                  resetView();
+                }}
+                className="appearance-none bg-white/[0.04] border border-white/5 rounded-lg pl-3.5 pr-9 py-2 text-[13px] text-slate-300 outline-none focus:ring-2 focus:ring-indigo-500/40"
+              >
+                {accounts.data.map((a) => (
+                  <option key={a.id} value={a.id} className="bg-[#0D1017]">
+                    {a.email}
+                  </option>
+                ))}
+              </select>
+              <ChevronDown className="w-3.5 h-3.5 text-slate-500 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+            </div>
+          ) : (
+            <span className="text-[13px] text-slate-400 flex items-center gap-2">
+              <Mail className="w-4 h-4 text-indigo-400" />
+              {account!.email}
+            </span>
+          )}
+
+          <button
+            onClick={() => setDraft(emptyDraft())}
+            className="rounded-lg bg-indigo-600 px-3.5 py-2 text-[13px] font-semibold text-white hover:bg-indigo-500"
+          >
+            Compose
+          </button>
+
+          <button
+            onClick={() => setExportOpen((v) => !v)}
+            className="flex items-center gap-2 rounded-lg border border-white/10 bg-white/[0.03] px-3.5 py-2 text-[13px] text-slate-300 hover:bg-white/[0.06]"
+          >
+            <FileSpreadsheet className="w-4 h-4 text-emerald-400" />
+            Export addresses
+          </button>
+        </div>
       </div>
 
       {banner && (
@@ -331,49 +375,6 @@ export default function EmailInbox() {
           </span>
         </div>
       )}
-
-      {/* Account bar + export toggle */}
-      <div className="mt-4 flex shrink-0 flex-wrap items-center gap-3">
-        {accounts.data.length > 1 ? (
-          <div className="relative">
-            <select
-              value={accountId}
-              onChange={(e) => {
-                setAccountId(Number(e.target.value));
-                resetView();
-              }}
-              className="appearance-none bg-white/[0.04] border border-white/5 rounded-lg pl-3.5 pr-9 py-2 text-[13px] text-slate-300 outline-none focus:ring-2 focus:ring-indigo-500/40"
-            >
-              {accounts.data.map((a) => (
-                <option key={a.id} value={a.id} className="bg-[#0D1017]">
-                  {a.email}
-                </option>
-              ))}
-            </select>
-            <ChevronDown className="w-3.5 h-3.5 text-slate-500 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-          </div>
-        ) : (
-          <span className="text-[13px] text-slate-400 flex items-center gap-2">
-            <Mail className="w-4 h-4 text-indigo-400" />
-            {account!.email}
-          </span>
-        )}
-
-        <button
-          onClick={() => setDraft(emptyDraft())}
-          className="rounded-lg bg-indigo-600 px-3.5 py-2 text-[13px] font-semibold text-white hover:bg-indigo-500"
-        >
-          Compose
-        </button>
-
-        <button
-          onClick={() => setExportOpen((v) => !v)}
-          className="ml-auto flex items-center gap-2 rounded-lg border border-white/10 bg-white/[0.03] px-3.5 py-2 text-[13px] text-slate-300 hover:bg-white/[0.06]"
-        >
-          <FileSpreadsheet className="w-4 h-4 text-emerald-400" />
-          Export addresses
-        </button>
-      </div>
 
       {/* Export panel — the single-click XLSX of addresses */}
       {exportOpen && (
@@ -470,7 +471,7 @@ export default function EmailInbox() {
       )}
 
       {/* Folder tabs + search */}
-      <div className="mt-4 flex shrink-0 flex-wrap items-center gap-2">
+      <div className="mt-3 flex shrink-0 flex-wrap items-center gap-2">
         {FOLDERS.map(({ key, label, icon: Icon }) => (
           <button
             key={key}
@@ -513,7 +514,7 @@ export default function EmailInbox() {
           whatever viewport height is left, and each scrolls on its own.
           Below lg (or whenever a message is open on a narrow screen) the
           two panes swap: list, or the open message with a Back button. */}
-      <div className="mt-4 grid min-h-0 flex-1 grid-cols-1 gap-4 lg:grid-cols-[minmax(300px,360px)_1fr]">
+      <div className="mt-3 grid min-h-0 flex-1 grid-cols-1 gap-4 lg:grid-cols-[minmax(300px,360px)_1fr]">
         <div
           className={`min-h-0 overflow-hidden rounded-xl border border-white/5 bg-white/[0.02] ${
             openId ? "hidden lg:flex" : "flex"

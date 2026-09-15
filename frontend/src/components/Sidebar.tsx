@@ -9,6 +9,7 @@ import {
   ShieldCheck,
   LogOut,
   Send,
+  Mail,
 } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
 
@@ -21,6 +22,9 @@ const NAV = [
   { to: "/leads", label: "Companies", icon: Building2, end: false, adminOnly: false },
   { to: "/contacts", label: "Contacts", icon: Users, end: false, adminOnly: false },
   { to: "/campaigns", label: "Campaigns", icon: Send, end: false, adminOnly: false },
+  // Phase E7: the connected Gmail's mail inside the app — real backend (the
+  // /gmail API), so it belongs in the nav (CLAUDE.md §1 satisfied).
+  { to: "/email", label: "Email", icon: Mail, end: false, adminOnly: false },
   { to: "/history", label: "Run History", icon: HistoryIcon, end: false, adminOnly: false },
   { to: "/settings", label: "Settings", icon: Settings, end: false, adminOnly: false },
   { to: "/admin", label: "Admin", icon: ShieldCheck, end: false, adminOnly: true },

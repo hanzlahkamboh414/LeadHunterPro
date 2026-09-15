@@ -40,12 +40,14 @@ GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GMAIL_SEND_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
 GMAIL_MESSAGES_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages"
 
-#: gmail.send sends; gmail.readonly reads the INBOX — and nothing else — to
-#: detect replies (Phase E4). openid/email/profile identify the connected
-#: account without any extra consent screen friction.
+#: gmail.send sends; gmail.readonly reads mail (reply detection + the
+#: inbox screen); gmail.modify marks read/unread, stars, trashes — the
+#: "act on a message like the Gmail site" actions. openid/email/profile
+#: identify the connected account without extra consent friction.
 OAUTH_SCOPES = ("openid email profile "
                 "https://www.googleapis.com/auth/gmail.send "
-                "https://www.googleapis.com/auth/gmail.readonly")
+                "https://www.googleapis.com/auth/gmail.readonly "
+                "https://www.googleapis.com/auth/gmail.modify")
 
 #: The signed `state` lifetime — the CSRF window for the OAuth round-trip.
 STATE_TTL_SECONDS = 600
@@ -155,12 +157,19 @@ def decode_id_token(id_token: str) -> dict[str, Any]:
 
 def send_gmail(access_token: str, *, to: str, subject: str, body: str,
                from_email: str,
+               cc: str = "", bcc: str = "",
+               in_reply_to: str = "", references: str = "",
                tracking_url: str = "") -> dict[str, Any]:
     """Send ONE plain-text email via the Gmail API; returns the API response.
 
     The raw message is RFC 2822 MIME base64url — Gmail's send contract. A
     non-2xx raises :class:`requests.HTTPError`; the caller maps 401/403 to a
     revoked/expired account and 429 to the Phase-E3 backoff.
+
+    ``cc``/``bcc`` add the matching headers (the inbox screen's compose).
+    ``in_reply_to``/``references`` thread a REPLY into its conversation the
+    way the Gmail site does (the client's Message-ID/References of the
+    message being answered).
 
     ``tracking_url`` (campaign sends only) switches the message to
     multipart/alternative: the same plain-text body plus an HTML part
@@ -171,6 +180,14 @@ def send_gmail(access_token: str, *, to: str, subject: str, body: str,
     msg["To"] = to
     msg["From"] = from_email
     msg["Subject"] = subject
+    if cc:
+        msg["Cc"] = cc
+    if bcc:
+        msg["Bcc"] = bcc
+    if in_reply_to:
+        msg["In-Reply-To"] = in_reply_to
+    if references:
+        msg["References"] = references
     msg.set_content(body)
     if tracking_url:
         html_body = (
@@ -204,10 +221,12 @@ def list_inbox_senders(access_token: str, *, after_unix: int,
     """Who wrote to this inbox since ``after_unix`` (epoch seconds).
 
     Reply detection (Phase E4): one ``messages.list`` with an ``in:inbox
-    after:`` query (metadata only — bodies are never fetched), then one
-    metadata GET per message for its From/Subject headers. Replies are
-    matched by the CALLER against addresses this account actually emailed —
-    this function reads nothing else and stores nothing.
+    after:`` query (metadata headers — full bodies are never fetched), then
+    one metadata GET per message for its From/Subject headers and the
+    response's short snippet (needed to read a DSN's failed address; still
+    no body fetch). Replies are matched by the CALLER against addresses
+    this account actually emailed — this function reads nothing else and
+    stores nothing.
 
     A non-2xx raises :class:`requests.HTTPError`; the scheduler treats reply
     detection as best-effort (a failure never pauses a campaign).
@@ -235,5 +254,171 @@ def list_inbox_senders(access_token: str, *, after_unix: int,
         hdrs = {h["name"].lower(): h["value"]
                 for h in r.json().get("payload", {}).get("headers", [])}
         out.append({"from": hdrs.get("from", ""),
-                    "subject": hdrs.get("subject", "")})
+                    "subject": hdrs.get("subject", ""),
+                    "snippet": r.json().get("snippet", "")})
     return out
+
+
+# ---------------------------------------------------------------------------
+# Gmail-inbox client (Phase E7) — the connected account's mail, read AND
+# acted on, the way the Gmail site does. Still plain HTTPS + requests; every
+# function stays module-level so tests monkeypatch them.
+# ---------------------------------------------------------------------------
+
+#: The system labels the inbox screen folders map onto.
+FOLDER_LABELS = {
+    "inbox": "INBOX",
+    "sent": "SENT",
+    "starred": "STARRED",
+    "trash": "TRASH",
+}
+
+
+def list_message_ids(access_token: str, *, label: str = "INBOX", q: str = "",
+                     page_token: str = "", limit: int = 50) -> dict[str, Any]:
+    """One page of message ids for a label/search (Gmail ``messages.list``).
+
+    ``q`` is Gmail's own search syntax, passed straight through (the inbox
+    screen's search box is Gmail search). Returns
+    ``{"ids", "next_page_token", "total_estimate"}``.
+    """
+    params: dict[str, Any] = {"maxResults": max(1, min(int(limit), 100))}
+    if label:
+        params["labelIds"] = label
+    if q:
+        params["q"] = q
+    if page_token:
+        params["pageToken"] = page_token
+    resp = requests.get(
+        GMAIL_MESSAGES_URL,
+        headers={"Authorization": f"Bearer {access_token}"},
+        params=params,
+        timeout=15,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    return {
+        "ids": [m["id"] for m in data.get("messages", [])],
+        "next_page_token": data.get("nextPageToken", ""),
+        "total_estimate": int(data.get("resultSizeEstimate", 0)),
+    }
+
+
+def _decode_b64url(data: str) -> str:
+    """Gmail's body data (base64url, padding stripped) -> text."""
+    if not data:
+        return ""
+    padded = data + "=" * (-len(data) % 4)
+    return base64.urlsafe_b64decode(padded).decode("utf-8", "replace")
+
+
+def _walk_parts(payload: dict[str, Any]) -> tuple[str, str, list[dict[str, Any]]]:
+    """(text_body, html_body, attachments) from one ``format=full`` payload.
+
+    Walks multipart trees depth-first; the FIRST text/plain and text/html
+    parts win (Gmail puts the visible body first; later alternatives are
+    quoting cruft). A part with a filename is an attachment whatever its
+    mime type.
+    """
+    text = html_body = ""
+    attachments: list[dict[str, Any]] = []
+    stack = [payload]
+    while stack:
+        part = stack.pop(0)
+        filename = part.get("filename") or ""
+        body = part.get("body", {}) or {}
+        if filename and body.get("attachmentId"):
+            attachments.append({
+                "attachment_id": body["attachmentId"],
+                "filename": filename,
+                "mime_type": part.get("mimeType", "application/octet-stream"),
+                "size": int(body.get("size", 0)),
+            })
+            continue
+        if not text and part.get("mimeType") == "text/plain":
+            text = _decode_b64url(body.get("data", ""))
+        elif not html_body and part.get("mimeType") == "text/html":
+            html_body = _decode_b64url(body.get("data", ""))
+        stack = list(part.get("parts", []) or []) + stack
+    return text, html_body, attachments
+
+
+#: Header names get_message parses (lowercased in the result dict).
+_MESSAGE_HEADERS = ("from", "to", "cc", "subject", "date", "message-id",
+                    "in-reply-to", "references")
+
+
+def get_message(access_token: str, message_id: str,
+                *, metadata_only: bool = False) -> dict[str, Any]:
+    """One message, parsed (Gmail ``messages.get`` ``format=full``).
+
+    Returns ``{"id", "thread_id", "snippet", "headers", "text", "html",
+    "attachments", "labels"}`` — headers lowercased (from/to/cc/subject/
+    date/message-id/in-reply-to/references), body as text/plain with the
+    text/html alternative kept for the sandboxed reader, attachments as
+    ``{attachment_id, filename, mime_type, size}``. ``metadata_only`` skips
+    the body walk (list rows only need headers + snippet).
+    """
+    params = {"format": "metadata",
+              "metadataHeaders": [h.title() for h in _MESSAGE_HEADERS]} \
+        if metadata_only else {"format": "full"}
+    r = requests.get(
+        f"{GMAIL_MESSAGES_URL}/{message_id}",
+        headers={"Authorization": f"Bearer {access_token}"},
+        params=params,
+        timeout=15,
+    )
+    r.raise_for_status()
+    data = r.json()
+    payload = data.get("payload", {}) or {}
+    headers = {h["name"].lower(): h["value"]
+               for h in payload.get("headers", [])}
+    out: dict[str, Any] = {
+        "id": data.get("id", message_id),
+        "thread_id": data.get("threadId", ""),
+        "snippet": data.get("snippet", ""),
+        "headers": {k: headers.get(k, "") for k in _MESSAGE_HEADERS},
+        "labels": data.get("labelIds", []) or [],
+    }
+    if metadata_only:
+        out.update({"text": "", "html": "", "attachments": []})
+        return out
+    text, html_body, attachments = _walk_parts(payload)
+    out.update({"text": text, "html": html_body, "attachments": attachments})
+    return out
+
+
+def get_attachment(access_token: str, message_id: str,
+                   attachment_id: str) -> dict[str, Any]:
+    """One attachment's bytes (Gmail ``attachments.get``) + its filename
+    hint. The caller sets the download response headers."""
+    r = requests.get(
+        f"{GMAIL_MESSAGES_URL}/{message_id}/attachments/{attachment_id}",
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=30,
+    )
+    r.raise_for_status()
+    data = r.json()
+    raw = data.get("data", "")
+    padded = raw + "=" * (-len(raw) % 4)
+    return {
+        "data": base64.urlsafe_b64decode(padded),
+        "size": int(data.get("size", 0)),
+    }
+
+
+def modify_message(access_token: str, message_id: str, *,
+                   add_labels: tuple[str, ...] = (),
+                   remove_labels: tuple[str, ...] = ()) -> dict[str, Any]:
+    """Add/remove labels on one message (Gmail ``messages.modify``) — the
+    mark-read/unread, star, trash and archive actions. Requires the
+    ``gmail.modify`` scope (older connections must reconnect once)."""
+    resp = requests.post(
+        f"{GMAIL_MESSAGES_URL}/{message_id}/modify",
+        headers={"Authorization": f"Bearer {access_token}"},
+        json={"addLabelIds": list(add_labels),
+              "removeLabelIds": list(remove_labels)},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    return resp.json()

@@ -61,6 +61,7 @@ ROLE_LOCALS = frozenset({
     "reception", "frontdesk", "front-desk", "hr", "legal", "pr", "press",
     "media", "shop", "store", "orders", "newsletter", "notices",
     "postmaster", "abuse", "security", "privacy", "feedback",
+    "alerts", "notifications",
 })
 
 #: MX-host suffix -> provider name. Matched against every MX host,

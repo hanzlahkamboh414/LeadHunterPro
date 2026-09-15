@@ -29,6 +29,11 @@ import type {
   EmailAccount,
   FolderCreateOut,
   FoldersOut,
+  GmailExportFilter,
+  GmailMessage,
+  GmailMessagePage,
+  GmailModifyInput,
+  GmailSendInput,
   Job,
   JobQuery,
   JobSummary,
@@ -89,6 +94,19 @@ function authHeaders(init?: RequestInit): Record<string, string> {
     /* ignore private-mode failures */
   }
   return headers;
+}
+
+/** Save a fetched blob as a file download (the Leads screen's CSV pattern,
+ * shared here by the Gmail attachment + address-export downloads). */
+function triggerDownload(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 /** Query-string for the leads list — shared by listLeads / pageLeads so the
@@ -653,6 +671,103 @@ export const api = {
   /** End-to-end proof of one account: a test email from it TO itself. */
   sendTestEmail(id: number): Promise<{ id: number; sent: boolean; to: string }> {
     return request(`/email-accounts/${id}/send-test`, { method: "POST" });
+  },
+
+  // Gmail inbox (Phase E7) — the connected account's mail inside the app.
+  /** One page of message rows for a folder/search. ``q`` is Gmail's own
+   * search syntax, passed straight through to Google. */
+  gmailMessages(filter: {
+    account_id: number;
+    folder?: string;
+    q?: string;
+    page_token?: string;
+    limit?: number;
+  }): Promise<GmailMessagePage> {
+    const params = new URLSearchParams();
+    params.set("account_id", String(filter.account_id));
+    if (filter.folder) params.set("folder", filter.folder);
+    if (filter.q) params.set("q", filter.q);
+    if (filter.page_token) params.set("page_token", filter.page_token);
+    if (filter.limit !== undefined) params.set("limit", String(filter.limit));
+    return request<GmailMessagePage>(`/gmail/messages?${params.toString()}`);
+  },
+
+  /** One full message (auto mark-read server-side, like opening in Gmail). */
+  gmailMessage(account_id: number, messageId: string): Promise<GmailMessage> {
+    return request<GmailMessage>(
+      `/gmail/messages/${encodeURIComponent(messageId)}?account_id=${account_id}`,
+    );
+  },
+
+  /** Authenticated blob download of one attachment (same-origin fetch — a
+   * plain <a href> can't carry the Authorization header). */
+  async gmailAttachment(
+    accountId: number,
+    messageId: string,
+    attachmentId: string,
+    filename: string,
+  ): Promise<void> {
+    const res = await fetch(
+      `${BASE}/gmail/attachment/${encodeURIComponent(messageId)}` +
+        `/${encodeURIComponent(attachmentId)}?account_id=${accountId}`,
+      { headers: authHeaders() },
+    );
+    if (!res.ok) {
+      let detail = res.statusText;
+      try {
+        const body = await res.json();
+        if (typeof body.detail === "string") detail = body.detail;
+      } catch { /* non-JSON error body */ }
+      throw new ApiError(res.status, detail);
+    }
+    triggerDownload(await res.blob(), filename);
+  },
+
+  /** Compose / reply / forward — one email from the connected account. */
+  gmailSend(input: GmailSendInput): Promise<{ id: string; thread_id: string; to: string; sent: boolean }> {
+    return request("/gmail/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+  },
+
+  /** Star/unstar, mark unread, trash, archive — Gmail label changes. */
+  gmailModify(messageId: string, input: GmailModifyInput): Promise<{ id: string; modified: boolean }> {
+    return request(`/gmail/messages/${encodeURIComponent(messageId)}/modify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+  },
+
+  /** The single-click XLSX address export — blob download with auth headers
+   * (the exportCsvData pattern). Sent = everyone you emailed; received =
+   * senders that look like real persons (services filtered server-side). */
+  async gmailExportAddresses(filter: GmailExportFilter): Promise<void> {
+    const params = new URLSearchParams();
+    params.set("account_id", String(filter.account_id));
+    params.set("source", filter.source);
+    if (filter.year !== undefined) params.set("year", String(filter.year));
+    if (filter.from_date) params.set("from_date", filter.from_date);
+    if (filter.to_date) params.set("to_date", filter.to_date);
+    const res = await fetch(
+      `${BASE}/gmail/export/addresses.xlsx?${params.toString()}`,
+      { headers: authHeaders() },
+    );
+    if (!res.ok) {
+      let detail = res.statusText;
+      try {
+        const body = await res.json();
+        if (typeof body.detail === "string") detail = body.detail;
+      } catch { /* non-JSON error body */ }
+      throw new ApiError(res.status, detail);
+    }
+    const stamp = new Date().toISOString().slice(0, 10);
+    triggerDownload(
+      await res.blob(),
+      `addresses-${filter.source}-${stamp}.xlsx`,
+    );
   },
 
   // Campaigns (Phase E3) — outreach runs on a connected Gmail account.

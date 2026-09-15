@@ -11,6 +11,7 @@ from app.api.v1.database import router as database_router
 from app.api.v1.discovery import router as discovery_router
 from app.api.v1.email import router as email_router
 from app.api.v1.email_accounts import router as email_accounts_router
+from app.api.v1.gmail_inbox import router as gmail_inbox_router
 from app.api.v1.health import router as health_router
 from app.api.v1.auth import router as auth_router
 from app.api.v1.admin import router as admin_router
@@ -42,4 +43,5 @@ api_router.include_router(leads_router)
 api_router.include_router(phones_router)
 api_router.include_router(linkedin_router)
 api_router.include_router(email_accounts_router)
+api_router.include_router(gmail_inbox_router)
 api_router.include_router(campaigns_router)

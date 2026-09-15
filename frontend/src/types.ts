@@ -371,9 +371,87 @@ export interface EmailAccount {
   status: string;
   /** Space-separated OAuth scopes this account actually granted. Accounts
    * connected before Phase E4 lack gmail.readonly → reply detection is off
-   * for them until they reconnect. */
+   * for them until they reconnect. Phase E7 added gmail.modify (star /
+   * mark-read / trash) — same one-reconnect rule. */
   scopes: string;
   created_at: string;
+}
+
+// Gmail inbox (Phase E7) — the connected account's mail inside the app.
+
+/** One row of the message list (metadata only; bodies load on open). */
+export interface GmailMessageRow {
+  id: string;
+  thread_id: string;
+  from: string;
+  to: string;
+  subject: string;
+  date: string;
+  snippet: string;
+  unread: boolean;
+  starred: boolean;
+}
+
+export interface GmailMessagePage {
+  messages: GmailMessageRow[];
+  next_page_token: string;
+  total_estimate: number;
+}
+
+export interface GmailAttachment {
+  attachment_id: string;
+  filename: string;
+  mime_type: string;
+  size: number;
+}
+
+/** One full message — the reading pane. */
+export interface GmailMessage {
+  id: string;
+  thread_id: string;
+  snippet: string;
+  headers: {
+    from: string;
+    to: string;
+    cc: string;
+    subject: string;
+    date: string;
+    "message-id": string;
+    "in-reply-to": string;
+    references: string;
+  };
+  labels: string[];
+  text: string;
+  html: string;
+  attachments: GmailAttachment[];
+  unread: boolean;
+  starred: boolean;
+}
+
+export interface GmailSendInput {
+  account_id: number;
+  to: string;
+  cc?: string;
+  bcc?: string;
+  subject: string;
+  body: string;
+  in_reply_to?: string;
+  references?: string;
+}
+
+export interface GmailModifyInput {
+  account_id: number;
+  add_labels: string[];
+  remove_labels: string[];
+}
+
+/** The address-export filters — source plus an optional date window. */
+export interface GmailExportFilter {
+  account_id: number;
+  source: "sent" | "received";
+  year?: number;
+  from_date?: string;
+  to_date?: string;
 }
 
 export interface AdminJobSummary {

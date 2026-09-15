@@ -45,9 +45,11 @@ class RouterProvider(BaseAIProvider):
     time, so the class carries no vendor-specific knowledge at all.
     """
 
-    def __init__(self, api_key: str | None = None) -> None:
+    def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
         # Allow a specific key to be injected (e.g. the second key for deep
-        # research). Falls back to the primary configured key.
+        # research). Falls back to the primary configured key. Likewise an
+        # explicit model (the deep lanes run agnes-3-flash while the main
+        # pipeline stays on the faster AI_MODEL); falls back to AI_MODEL.
         key = api_key if api_key else settings.AI_API_KEY
         self._client = openai.OpenAI(
             api_key=key,
@@ -59,7 +61,7 @@ class RouterProvider(BaseAIProvider):
             # blocking the whole run (stage try/except handles the failure).
             timeout=settings.AI_TIMEOUT_S,
         )
-        self._model = settings.AI_MODEL
+        self._model = model if model else settings.AI_MODEL
         logger.debug(
             "RouterProvider ready: base_url=%s model=%s (key length %d, value never logged)",
             settings.AI_BASE_URL,

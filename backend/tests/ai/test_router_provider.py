@@ -28,7 +28,7 @@ import openai
 import pytest
 
 from app.ai.base import BaseAIProvider
-from app.ai.gateway import AIGateway
+from app.ai.gateway import AIGateway, make_ai_ask
 from app.ai.manager import AIManager
 from app.ai.providers.registry import (
     AIProviderNotFoundError,
@@ -49,7 +49,14 @@ _FAKE_MODEL = "test-model-not-real"
 
 # The model default that config.py declares. Recorded here so a silent change to
 # the proven default fails a test instead of quietly changing AI behaviour.
+# 2026-09-15 per-lane split: the MAIN pipeline is routine research and runs the
+# fast 2.5 (3-7s/call); the deep-thinking lanes run AI_MODEL_DEEP below.
 _PROVEN_DEFAULT_MODEL = "agnes-2.5-flash"
+
+# The deep-lane model default (make_ai_ask callers: the deep-research stage in
+# this trimmed release). agnes-3-flash returns CLEAN JSON (no markdown fences)
+# but takes 25-40s/call, so it is confined to the low-volume deep lanes.
+_PROVEN_DEEP_MODEL = "agnes-3-flash"
 
 # The hard per-request AI timeout default. Changes to it are deliberate (they
 # trade bounded latency against a slower/hung provider's completion), so a
@@ -182,6 +189,77 @@ def test_model_override(monkeypatch, patched_openai) -> None:
 
     monkeypatch.setattr(settings, "AI_MODEL", "configured-override")
     assert RouterProvider()._model == "configured-override"
+
+
+def test_declared_default_deep_model_is_the_proven_one() -> None:
+    """config.py's AI_MODEL_DEEP default is the deep-lane model (2026-09-15
+    per-lane split). The deep lanes need clean JSON and tolerate 25-40s/call;
+    a silent change here silently changes every deep lane at once."""
+    assert Settings.model_fields["AI_MODEL_DEEP"].default == _PROVEN_DEEP_MODEL
+
+
+def test_provider_accepts_explicit_model_override(monkeypatch, patched_openai) -> None:
+    """An explicit model wins over AI_MODEL, without touching global settings.
+
+    This is the seam make_ai_ask uses to put the deep lanes on agnes-3-flash
+    while the main pipeline stays on AI_MODEL.
+    """
+    monkeypatch.setattr(settings, "AI_MODEL", "main-lane-model")
+    provider = RouterProvider(model="deep-lane-model")
+    assert provider._model == "deep-lane-model"
+
+
+def test_make_ai_ask_uses_the_deep_model_by_default(monkeypatch, patched_openai) -> None:
+    """make_ai_ask is the deep-lane constructor: its default model is
+    AI_MODEL_DEEP (agnes-3-flash), NOT the main pipeline's AI_MODEL. Every
+    caller here (the deep-research stage) is a deep-thinking lane."""
+    monkeypatch.setattr(settings, "AI_MODEL", "fast-main-model")
+    monkeypatch.setattr(settings, "AI_MODEL_DEEP", "deep-thinking-model")
+
+    ask = make_ai_ask()
+
+    assert ask.__self__._model == "deep-thinking-model"
+
+
+def test_make_ai_ask_model_falls_back_to_ai_model(monkeypatch, patched_openai) -> None:
+    """An unset AI_MODEL_DEEP falls back to AI_MODEL, so an old .env without
+    the new key keeps working unchanged (same degrade pattern as the key
+    lanes)."""
+    monkeypatch.setattr(settings, "AI_MODEL", "fast-main-model")
+    monkeypatch.setattr(settings, "AI_MODEL_DEEP", "")
+
+    ask = make_ai_ask()
+
+    assert ask.__self__._model == "fast-main-model"
+
+
+def test_make_ai_ask_explicit_model_wins(monkeypatch, patched_openai) -> None:
+    """An explicit model argument overrides both AI_MODEL_DEEP and AI_MODEL."""
+    monkeypatch.setattr(settings, "AI_MODEL", "fast-main-model")
+    monkeypatch.setattr(settings, "AI_MODEL_DEEP", "deep-thinking-model")
+
+    ask = make_ai_ask(model="explicit-model")
+
+    assert ask.__self__._model == "explicit-model"
+
+
+def test_make_ai_ask_key_fallback_unchanged(monkeypatch, patched_openai) -> None:
+    """The key lane contract is untouched by the model split: an explicit key
+    wins, then AI_API_KEY_2, then AI_API_KEY."""
+    monkeypatch.setattr(settings, "AI_API_KEY", "primary-key")
+    monkeypatch.setattr(settings, "AI_API_KEY_2", "second-key")
+    monkeypatch.setattr(settings, "AI_MODEL_DEEP", "deep-thinking-model")
+
+    make_ai_ask()
+    _, kwargs_default = patched_openai.call_args
+    assert kwargs_default["api_key"] == "second-key"
+
+    make_ai_ask(api_key="explicit-key")
+
+    _, kwargs_explicit = patched_openai.call_args
+    assert kwargs_explicit["api_key"] == "explicit-key"
+
+
 
 
 # ---------------------------------------------------------------------------

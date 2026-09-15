@@ -86,6 +86,14 @@ class Settings(BaseSettings):
     # Optional: falls back to AI_API_KEY when unset.
     AI_API_KEY_2: str = Field(default="", repr=False)  # secret
 
+    # Model for the DEEP lanes — every caller of ``make_ai_ask()`` (here that
+    # is the deep-research stage; the discovery/scout lanes are not in this
+    # trimmed release). Deep thinking parses structured JSON, so it runs
+    # agnes-3-flash: verified 200 and returns CLEAN JSON (no markdown fences
+    # — 2.5 wraps output in ```json) at 25-40s/call. Falls back to AI_MODEL
+    # when unset, so an old .env keeps working.
+    AI_MODEL_DEEP: str = "agnes-3-flash"
+
     # Third AI key for the discovery dork/TEMPLATE-GENERATION lane (Phase H,
     # wired into live runs by Sprint2.11). A separate key lets the 3rd AI
     # propose new search angles while the main and deep lanes run, without

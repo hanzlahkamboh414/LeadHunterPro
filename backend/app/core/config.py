@@ -75,19 +75,32 @@ class Settings(BaseSettings):
     # the lift default because the 27B pace makes a 100-lead run impractical).
     # qwen3.8-flash/-max/-alibaba and qwen3.7-flash were all 402/429 out of
     # credit at the time; qwen3.8-27b stays the quality fallback.
-    # agnes-3-flash switched 2026-09-15 by user directive: verified 200 and
-    # returns CLEAN JSON (no markdown fences — 2.5 wrapped output in ```json),
-    # at the cost of 25-40s vs 2.5's 3-7s per call on the same prompt.
+    # 2026-09-15 per-lane split (user directive): the MAIN pipeline (screening,
+    # refine, person, intent, scoring) is routine research and stays on the
+    # fast agnes-2.5-flash (3-7s/call); the deep-thinking lanes moved to
+    # AI_MODEL_DEEP below. agnes-3-flash ran the whole pipeline for a few
+    # hours that day — clean JSON, but 25-40s/call made every lead ~4-5x
+    # slower, which is why it lives on the deep lane only.
     # The real key is loaded at runtime from the gitignored backend/.env;
     # never hardcode one.
     AI_BASE_URL: str = "https://router.bynara.id/v1"
-    AI_MODEL: str = "agnes-3-flash"
+    AI_MODEL: str = "agnes-2.5-flash"
     AI_API_KEY: str = Field(default="", repr=False)  # secret — see note above
     # Second AI key for the deep-research stage. Lets one key carry the main
     # pipeline (screening/refine/person/intent/scoring) while a second key
     # carries the deep-dive growth research, so they do not throttle each other.
     # Optional: falls back to AI_API_KEY when unset.
     AI_API_KEY_2: str = Field(default="", repr=False)  # secret
+
+    # Model for the DEEP lanes — every caller of ``make_ai_ask()`` (the
+    # deep-research stage, discovery query expansion, Phase H template
+    # generation, source-scout proposals/probation). These stages do the deep
+    # thinking and parse structured JSON, so they run agnes-3-flash: verified
+    # 200 and returns CLEAN JSON (no markdown fences — 2.5 wraps output in
+    # ```json) at 25-40s/call. That latency is acceptable here because the
+    # deep lanes are low-volume and never block a lead's main pipeline stages.
+    # Falls back to AI_MODEL when unset, so an old .env keeps working.
+    AI_MODEL_DEEP: str = "agnes-3-flash"
 
     # Third AI key for the discovery dork/TEMPLATE-GENERATION lane (Phase H,
     # wired into live runs by Sprint2.11). A separate key lets the 3rd AI

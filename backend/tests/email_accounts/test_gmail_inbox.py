@@ -382,6 +382,21 @@ def _rate_limit_error():
     return _requests.HTTPError("403 Client Error: Forbidden", response=resp)
 
 
+def _quota_error():
+    """The other 403 flavor: Google's own body says the per-minute QUOTA
+    ran out (observed live on main 2026-09-15 12:52 — the short burst
+    backoff cannot clear it; the minute must roll over)."""
+    import requests as _requests
+    resp = _requests.Response()
+    resp.status_code = 403
+    resp._content = (
+        b'{"error": {"code": 403, "message": "Quota exceeded for quota '
+        b'metric \'Total Query Cost\' and limit \'Units per minute per '
+        b'user\' of service \'gmail.googleapis.com\'."}}'
+    )
+    return _requests.HTTPError("403 Client Error: Forbidden", response=resp)
+
+
 def test_export_retries_gmail_rate_limit(monkeypatch, tmp_path):
     """A mid-export 403 (observed on main 2026-09-15: the parallel metadata
     burst trips Gmail's per-user limit) must back off and retry — not 500
@@ -431,6 +446,63 @@ def test_export_persistent_rate_limit_is_honest_502(monkeypatch, tmp_path):
                    f"?account_id={acct}&source=received")
     assert r.status_code == 502
     assert "try again" in r.json()["detail"].lower()
+
+
+def test_quota_exceeded_uses_window_backoff(monkeypatch, tmp_path):
+    """A quota 403 waits for the per-minute window (30/60/60s — never the
+    short burst delays), and window-length waits are enough: the retry
+    after them succeeds and the export completes 200."""
+    attempts = {"n": 0}
+    sleeps: list[float] = []
+
+    # First two calls raise (quota), third returns the page.
+    def fake_list(token, *, label="", q="", page_token="", limit=100):
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise _quota_error()
+        return {"ids": ["i1"], "next_page_token": "", "total_estimate": 1}
+
+    monkeypatch.setattr(gi.time, "sleep", sleeps.append)
+    monkeypatch.setattr(gi.google, "list_message_ids", fake_list)
+    monkeypatch.setattr(
+        gi.google, "get_message",
+        lambda t, mid, *, metadata_only=False:
+            _meta(mid, frm="Jane <jane@acme.com>"))
+    client, acct, _ = _setup(tmp_path, monkeypatch)
+    r = client.get(f"/api/v1/gmail/export/addresses.xlsx"
+                   f"?account_id={acct}&source=received")
+    assert r.status_code == 200
+    # the waits were WINDOW-length, not burst-length
+    assert sleeps == [30.0, 60.0]
+    rows = _xlsx_rows(r.content)
+    assert [row[0] for row in rows[1:]] == ["jane@acme.com"]
+
+
+def test_quota_vs_burst_counters_are_separate(monkeypatch):
+    """A mixed chain — burst 403s and quota 403s interleaved — never lets
+    one budget eat the other: the quota budget is still there after burst
+    retries ran their course."""
+    order = ["burst", "burst", "burst", "quota", "ok"]
+    calls = {"n": 0}
+
+    def fn():
+        step = order[calls["n"]]
+        calls["n"] += 1
+        if step == "burst":
+            raise _rate_limit_error()
+        if step == "quota":
+            raise _quota_error()
+        return "done"
+
+    monkeypatch.setattr(gi.time, "sleep", lambda s: None)
+    assert gi._rate_retry(fn) == "done"
+
+
+def test_quota_exceeded_flavor_detection():
+    """Only Google's body text separates the two 403s — never the status."""
+    assert gi._quota_exceeded(_quota_error()) is True
+    assert gi._quota_exceeded(_rate_limit_error()) is False
+    assert gi._quota_exceeded(ValueError("no response")) is False
 
 
 # ---------------------------------------------------------------------------

@@ -92,6 +92,15 @@ def _metadata_messages(token: str, ids: list[str],
 #: Backoff before each retry of a rate-limited Gmail call (seconds).
 _RATE_RETRY_DELAYS = (2.0, 5.0, 10.0)
 
+#: Backoff before each retry of a QUOTA-exceeded call. Gmail's quota is
+#: "units per minute per user" — the window only fully resets when the
+#: minute rolls over, so the short delays above cannot clear it (observed
+#: live 2026-09-15 12:52: a mid-scan 403 "Quota exceeded ... Units per
+#: minute per user" outlived the full 17s retry chain and the export died
+#: with 502 while the user was concurrently browsing the inbox). A ~60s
+#: wait rides out the window; two extra rounds absorb back-to-back trips.
+_QUOTA_RETRY_DELAYS = (30.0, 60.0, 60.0)
+
 
 def _rate_limited(exc: Exception) -> bool:
     """Gmail's transient 'slow down' answers (429, and 403
@@ -100,21 +109,50 @@ def _rate_limited(exc: Exception) -> bool:
     return resp is not None and getattr(resp, "status_code", None) in (403, 429)
 
 
+def _quota_exceeded(exc: Exception) -> bool:
+    """True when Google's own words say the per-minute quota ran out.
+
+    Distinguishes the two 403/429 flavors that need different waits: a
+    burst rate-limit clears in seconds (``_RATE_RETRY_DELAYS``), but
+    "Quota exceeded ... 'Units per minute per user'" needs a window
+    rollover (``_QUOTA_RETRY_DELAYS``). Only Google's message text can
+    tell them apart, so it is read verbatim from the response body —
+    never guessed from the status code.
+    """
+    resp = getattr(exc, "response", None)
+    if resp is None or getattr(resp, "status_code", None) not in (403, 429):
+        return False
+    return "quota exceeded" in (getattr(resp, "text", "") or "").lower()
+
+
 def _rate_retry(fn):
     """Run fn, retrying Gmail's rate-limit answers with a short backoff.
 
     Verified transient on main 2026-09-15: the export's paged messages.list
     403'd once mid-scan and the exact same call succeeded seconds later —
     the burst of parallel metadata gets trips the per-user limit. Waiting
-    clears it; anything else re-raises immediately.
+    clears it; anything else re-raises immediately. A quota-exceeded
+    answer waits for the per-minute window to roll over instead (see
+    :data:`_QUOTA_RETRY_DELAYS`); the two counters are separate so a burst
+    retry chain never eats the quota budget.
     """
-    for attempt in range(len(_RATE_RETRY_DELAYS) + 1):
+    bursts = quotas = 0
+    while True:
         try:
             return fn()
         except Exception as exc:  # noqa: BLE001 — re-raised unless rate-limited
-            if attempt >= len(_RATE_RETRY_DELAYS) or not _rate_limited(exc):
+            if not _rate_limited(exc):
                 raise
-            time.sleep(_RATE_RETRY_DELAYS[attempt])
+            if _quota_exceeded(exc):
+                if quotas >= len(_QUOTA_RETRY_DELAYS):
+                    raise
+                time.sleep(_QUOTA_RETRY_DELAYS[quotas])
+                quotas += 1
+            else:
+                if bursts >= len(_RATE_RETRY_DELAYS):
+                    raise
+                time.sleep(_RATE_RETRY_DELAYS[bursts])
+                bursts += 1
 
 
 def _account_token(account_id: int, user: User) -> tuple[dict[str, Any], str]:

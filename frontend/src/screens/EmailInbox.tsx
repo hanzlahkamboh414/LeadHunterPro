@@ -376,6 +376,21 @@ export default function EmailInbox() {
         </div>
       )}
 
+      {/* Connected before gmail.modify existed: reading/replying work, but
+          the label actions (star, trash, archive, mark-unread) honestly
+          can't — say so up front instead of a 409 on the first click. */}
+      {account && account.status === "connected" &&
+        !account.scopes.includes("gmail.modify") && (
+        <div className="mt-3 flex shrink-0 flex-wrap items-center gap-x-1.5 rounded-lg border border-amber-500/25 bg-amber-500/10 px-4 py-2 text-[12.5px] text-amber-300">
+          <span>
+            Star, trash, archive and mark-unread are off for {account.email}
+            (it was connected before those actions existed) —{" "}
+            <a className="underline" href={googleAuthorizeUrl()}>reconnect it once</a>{" "}
+            to enable them. Reading, replying and exports work as they are.
+          </span>
+        </div>
+      )}
+
       {/* Export panel — the single-click XLSX of addresses */}
       {exportOpen && (
         <div className="mt-3 shrink-0 rounded-xl border border-white/5 bg-white/[0.02] p-4">

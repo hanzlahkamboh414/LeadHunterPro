@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Globe, Link2, Mail, Phone, Search, Trash2, Users } from "lucide-react";
 import { api } from "../api/client";
+import { CopyButton } from "../components/CopyButton";
 import { PageHeader } from "../components/PageHeader";
 import { Spinner } from "../components/StatusChip";
 import DeleteReasonDialog, { type DeleteReason } from "../components/DeleteReasonDialog";
@@ -208,19 +209,23 @@ export default function Contacts() {
                     <div className="text-[12px] text-slate-500">{c.company}</div>
                   </td>
                   <td className="px-4 py-3">
-                    <a
-                      href={`mailto:${c.email}`}
-                      className="inline-flex items-center gap-1.5 text-indigo-400 hover:underline break-all"
-                    >
-                      <Mail className="w-3.5 h-3.5 shrink-0" />
-                      {c.email}
-                    </a>
+                    <span className="inline-flex items-center gap-1.5">
+                      <a
+                        href={`mailto:${c.email}`}
+                        className="inline-flex items-center gap-1.5 text-indigo-400 hover:underline break-all"
+                      >
+                        <Mail className="w-3.5 h-3.5 shrink-0" />
+                        {c.email}
+                      </a>
+                      <CopyButton value={c.email} label="email" />
+                    </span>
                   </td>
                   <td className="px-4 py-3 text-slate-300">
                     {c.phone ? (
                       <span className="inline-flex items-center gap-1.5">
                         <Phone className="w-3.5 h-3.5 shrink-0 text-slate-500" />
                         {c.phone}
+                        <CopyButton value={c.phone} label="phone" />
                       </span>
                     ) : (
                       <span className="text-slate-600">—</span>
@@ -228,15 +233,18 @@ export default function Contacts() {
                   </td>
                   <td className="px-4 py-3">
                     {c.linkedin ? (
-                      <a
-                        href={/^https?:\/\//i.test(c.linkedin) ? c.linkedin : `https://${c.linkedin}`}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="inline-flex items-center gap-1.5 text-indigo-400 hover:underline break-all"
-                      >
-                        <Globe className="w-3.5 h-3.5 shrink-0" />
-                        {c.linkedin}
-                      </a>
+                      <span className="inline-flex items-center gap-1.5">
+                        <a
+                          href={/^https?:\/\//i.test(c.linkedin) ? c.linkedin : `https://${c.linkedin}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="inline-flex items-center gap-1.5 text-indigo-400 hover:underline break-all"
+                        >
+                          <Globe className="w-3.5 h-3.5 shrink-0" />
+                          {c.linkedin}
+                        </a>
+                        <CopyButton value={c.linkedin} label="LinkedIn URL" />
+                      </span>
                     ) : (
                       <span className="text-slate-600">—</span>
                     )}

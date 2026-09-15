@@ -20,6 +20,7 @@ import {
   FileSpreadsheet,
 } from "lucide-react";
 import { ApiError, api, googleAuthorizeUrl } from "../api/client";
+import { CopyButton } from "../components/CopyButton";
 import { PageHeader } from "../components/PageHeader";
 import type { EmailAccount, GmailMessage } from "../types";
 
@@ -49,6 +50,16 @@ function fmtDate(raw: string): string {
 function displayAddress(value: string): string {
   const m = /^(.*?)\s*<([^>]+)>\s*$/.exec(value.trim());
   return m ? (m[1].replace(/^"|"$/g, "") || m[2]) : value.trim();
+}
+
+/** Every bare address inside a raw header string, comma-joined — what the
+ * copy buttons copy ("Jane <jane@a.com>, Bob <bob@b.com>" →
+ * "jane@a.com, bob@b.com"). Falls back to the raw string when there is
+ * no recognizable address. */
+function bareAddresses(header: string): string {
+  if (!header) return "";
+  const found = header.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g);
+  return found ? found.join(", ") : header.trim();
 }
 
 function fmtSize(bytes: number): string {
@@ -664,6 +675,10 @@ export default function EmailInbox() {
                   <p className="mt-1 text-[12.5px] text-slate-400">
                     <span className="text-slate-500">From </span>
                     {message.data.headers.from || "(unknown)"}
+                    <CopyButton
+                      value={bareAddresses(message.data.headers.from)}
+                      label="sender address"
+                    />
                   </p>
                   <p className="text-[12.5px] text-slate-400">
                     <span className="text-slate-500">To </span>
@@ -671,6 +686,14 @@ export default function EmailInbox() {
                     {message.data.headers.cc && (
                       <><span className="text-slate-500"> · Cc </span>{message.data.headers.cc}</>
                     )}
+                    <CopyButton
+                      value={bareAddresses(
+                        [message.data.headers.to, message.data.headers.cc]
+                          .filter(Boolean)
+                          .join(", "),
+                      )}
+                      label="recipient addresses"
+                    />
                   </p>
                   <p className="mt-0.5 text-[11.5px] text-slate-500">
                     {fmtDate(message.data.headers.date)}

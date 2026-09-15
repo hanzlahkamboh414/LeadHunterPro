@@ -9,6 +9,7 @@ import {
   Voicemail,
 } from "lucide-react";
 import { api } from "../api/client";
+import { CopyButton } from "../components/CopyButton";
 import { PageHeader } from "../components/PageHeader";
 import { Select } from "../components/Select";
 import { useAuth } from "../contexts/AuthContext";
@@ -415,12 +416,15 @@ export default function Phones() {
                       <td className="px-4 py-2.5 text-slate-200">{l.business_name || "—"}</td>
                       <td className="px-4 py-2.5 text-slate-400 capitalize">{l.trade || "—"}</td>
                       <td className="px-4 py-2.5">
-                        <a
-                          href={`tel:${l.phone}`}
-                          className="text-indigo-300 hover:text-indigo-200"
-                        >
-                          {prettyPhone(l.phone)}
-                        </a>
+                        <span className="inline-flex items-center gap-1.5">
+                          <a
+                            href={`tel:${l.phone}`}
+                            className="text-indigo-300 hover:text-indigo-200"
+                          >
+                            {prettyPhone(l.phone)}
+                          </a>
+                          <CopyButton value={l.phone} label="phone" />
+                        </span>
                       </td>
                       <td className="px-4 py-2.5">
                         {/* The enrichment outcome: only an email literally seen
@@ -430,12 +434,15 @@ export default function Phones() {
                           const live = mineById.get(l.id) ?? l;
                           if (live.email) {
                             return (
-                              <a
-                                href={`mailto:${live.email}`}
-                                className="text-indigo-300 hover:text-indigo-200"
-                              >
-                                {live.email}
-                              </a>
+                              <span className="inline-flex items-center gap-1.5">
+                                <a
+                                  href={`mailto:${live.email}`}
+                                  className="text-indigo-300 hover:text-indigo-200"
+                                >
+                                  {live.email}
+                                </a>
+                                <CopyButton value={live.email} label="email" />
+                              </span>
                             );
                           }
                           if (live.email_status === "pending") {
@@ -547,21 +554,27 @@ export default function Phones() {
                         <td className="px-4 py-2.5 text-slate-200">{s.business_name || "—"}</td>
                         <td className="px-4 py-2.5 text-slate-400 capitalize">{s.trade || "—"}</td>
                         <td className="px-4 py-2.5">
-                          <a
-                            href={`tel:${s.phone}`}
-                            className="text-indigo-300 hover:text-indigo-200"
-                          >
-                            {prettyPhone(s.phone)}
-                          </a>
+                          <span className="inline-flex items-center gap-1.5">
+                            <a
+                              href={`tel:${s.phone}`}
+                              className="text-indigo-300 hover:text-indigo-200"
+                            >
+                              {prettyPhone(s.phone)}
+                            </a>
+                            <CopyButton value={s.phone} label="phone" />
+                          </span>
                         </td>
                         <td className="px-4 py-2.5">
                           {s.email ? (
-                            <a
-                              href={`mailto:${s.email}`}
-                              className="text-indigo-300 hover:text-indigo-200"
-                            >
-                              {s.email}
-                            </a>
+                            <span className="inline-flex items-center gap-1.5">
+                              <a
+                                href={`mailto:${s.email}`}
+                                className="text-indigo-300 hover:text-indigo-200"
+                              >
+                                {s.email}
+                              </a>
+                              <CopyButton value={s.email} label="email" />
+                            </span>
                           ) : (
                             <span className="text-slate-600">—</span>
                           )}

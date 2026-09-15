@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Briefcase as BriefcaseIcon, Search, Download } from "lucide-react";
 import { api } from "../api/client";
+import { CopyButton } from "../components/CopyButton";
 import { PageHeader } from "../components/PageHeader";
 import { Select } from "../components/Select";
 import { CITIES_BY_STATE, TRADES, US_STATE_CODES, US_STATES } from "../data/locations";
@@ -262,14 +263,17 @@ export default function LinkedIn() {
                     </td>
                     <td className="px-4 py-2.5">
                       {l.linkedin_url ? (
-                        <a
-                          href={l.linkedin_url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-indigo-300 hover:text-indigo-200"
-                        >
-                          View profile ↗
-                        </a>
+                        <span className="inline-flex items-center gap-1.5">
+                          <a
+                            href={l.linkedin_url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-indigo-300 hover:text-indigo-200"
+                          >
+                            View profile ↗
+                          </a>
+                          <CopyButton value={l.linkedin_url} label="LinkedIn URL" />
+                        </span>
                       ) : (
                         "—"
                       )}
@@ -278,12 +282,15 @@ export default function LinkedIn() {
                       {/* The email this profile was a byproduct OF — the
                           research breadcrumb, honest about provenance. */}
                       {l.source_email ? (
-                        <a
-                          href={`mailto:${l.source_email}`}
-                          className="text-slate-500 hover:text-slate-300"
-                        >
-                          {l.source_email}
-                        </a>
+                        <span className="inline-flex items-center gap-1.5">
+                          <a
+                            href={`mailto:${l.source_email}`}
+                            className="text-slate-500 hover:text-slate-300"
+                          >
+                            {l.source_email}
+                          </a>
+                          <CopyButton value={l.source_email} label="email" />
+                        </span>
                       ) : (
                         <span className="text-slate-600">—</span>
                       )}

@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft, ExternalLink } from "lucide-react";
 import { api } from "../api/client";
 import type { EvidenceFact } from "../types";
+import { CopyButton } from "../components/CopyButton";
 import { Spinner } from "../components/StatusChip";
 import { recommendationBadge, recommendationLabel, scoreColor } from "../lib/format";
 
@@ -62,7 +63,10 @@ export default function LeadDetail() {
               {recommendationLabel(data.recommendation)}
             </span>
           </div>
-          <p className="text-[13.5px] text-slate-500 mt-1">{data.email}</p>
+          <p className="text-[13.5px] text-slate-500 mt-1 inline-flex items-center gap-1.5">
+            {data.email}
+            <CopyButton value={data.email} label="email" />
+          </p>
           <p className="text-[13.5px] text-slate-500">
             {[data.company.industry, data.company.location].filter(Boolean).join(" · ") || "—"}
           </p>
@@ -236,6 +240,7 @@ function LinkedInLink({ url }: { url: string }) {
       >
         {url} <ExternalLink className="w-3 h-3 shrink-0" />
       </a>
+      <CopyButton value={url} label="LinkedIn URL" />
     </div>
   );
 }

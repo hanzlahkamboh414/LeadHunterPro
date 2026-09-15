@@ -373,6 +373,66 @@ def test_export_bad_source_rejected(tmp_path, monkeypatch):
     assert r.status_code == 422
 
 
+def _rate_limit_error():
+    """A real requests.HTTPError carrying a 403 response — the shape Gmail's
+    userRateLimitExceeded arrives in."""
+    import requests as _requests
+    resp = _requests.Response()
+    resp.status_code = 403
+    return _requests.HTTPError("403 Client Error: Forbidden", response=resp)
+
+
+def test_export_retries_gmail_rate_limit(monkeypatch, tmp_path):
+    """A mid-export 403 (observed on main 2026-09-15: the parallel metadata
+    burst trips Gmail's per-user limit) must back off and retry — not 500
+    the download."""
+    steps = [
+        {"ids": ["i1"], "next_page_token": "MORE", "total_estimate": 1},
+        "RATE",  # page 2 → 403 once
+        {"ids": [], "next_page_token": "", "total_estimate": 0},  # retry → end
+    ]
+    attempts = {"n": 0}
+
+    def fake_list(token, *, label="", q="", page_token="", limit=100):
+        step = steps[attempts["n"]]
+        attempts["n"] += 1
+        if step == "RATE":
+            raise _rate_limit_error()
+        return step
+
+    monkeypatch.setattr(gi.time, "sleep", lambda s: None)  # no real backoff
+    monkeypatch.setattr(gi.google, "list_message_ids", fake_list)
+    monkeypatch.setattr(
+        gi.google, "get_message",
+        lambda t, mid, *, metadata_only=False:
+            _meta(mid, frm="Jane <jane@acme.com>"))
+    client, acct, _ = _setup(tmp_path, monkeypatch)
+    r = client.get(f"/api/v1/gmail/export/addresses.xlsx"
+                   f"?account_id={acct}&source=received")
+    assert r.status_code == 200
+    assert attempts["n"] == 3  # the 403 was retried, not fatal
+    rows = _xlsx_rows(r.content)
+    assert [row[0] for row in rows[1:]] == ["jane@acme.com"]
+
+
+def test_export_persistent_rate_limit_is_honest_502(monkeypatch, tmp_path):
+    """Gmail that keeps saying 403 after the backoffs ends in an honest 502
+    (with the reason logged), never a raw Internal Server Error."""
+
+    def fake_list(token, *, label="", q="", page_token="", limit=100):
+        raise _rate_limit_error()
+
+    monkeypatch.setattr(gi.time, "sleep", lambda s: None)
+    monkeypatch.setattr(gi.google, "list_message_ids", fake_list)
+    monkeypatch.setattr(gi.google, "get_message",
+                        lambda *a, **k: _meta("m"))
+    client, acct, _ = _setup(tmp_path, monkeypatch)
+    r = client.get(f"/api/v1/gmail/export/addresses.xlsx"
+                   f"?account_id={acct}&source=received")
+    assert r.status_code == 502
+    assert "try again" in r.json()["detail"].lower()
+
+
 # ---------------------------------------------------------------------------
 # The query builder (unit)
 # ---------------------------------------------------------------------------

@@ -34,6 +34,7 @@ from app.schemas.admin import (
     AdminDashboardOut,
     AdminDecisionOut,
     AdminDeletedOut,
+    AdminGmailInboxModeIn,
     AdminKeysOut,
     AdminLeadActionOut,
     AdminLeadScopeIn,
@@ -411,6 +412,27 @@ def set_auth_mode(body: AdminAuthModeIn, admin: User = Depends(require_admin)) -
     get_activity().record(admin.id, admin.username, "auth", detail=detail)
     logger.info("POST /admin/auth-mode -> %s (by %s)", detail, admin.username)
     return {"auth_enabled": body.enabled}
+
+
+@router.post("/gmail-inbox-mode")
+def set_gmail_inbox_mode(
+    body: AdminGmailInboxModeIn, admin: User = Depends(require_admin)
+) -> dict:
+    """Turn the Gmail-like inbox interface (browse/read/send) ON/OFF.
+
+    OFF = every /gmail endpoint except the address export and /gmail/mode
+    answers an honest 503; the export keeps working (it is the production
+    feature). The frontend reads /gmail/mode and hides the browsing UI.
+    """
+    from app.auth.settings import get_settings
+
+    get_settings().set_gmail_inbox_enabled(body.enabled)
+    detail = ("Gmail inbox interface ON" if body.enabled
+              else "Gmail inbox interface OFF (address export only)")
+    get_activity().record(admin.id, admin.username, "gmail", detail=detail)
+    logger.info("POST /admin/gmail-inbox-mode -> %s (by %s)",
+                detail, admin.username)
+    return {"inbox_enabled": body.enabled}
 
 
 @router.get("/activity", response_model=AdminActivityOut)

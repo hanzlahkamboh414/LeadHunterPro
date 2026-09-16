@@ -155,3 +155,45 @@ def test_ensure_shared_is_idempotent_and_never_admin(tmp_path):
 
     assert first.id == second.id
     assert first.is_admin is False
+
+
+# ---------------------------------------------------------------------------
+# The Gmail-inbox interface toggle (browse off, export stays on)
+# ---------------------------------------------------------------------------
+
+def test_gmail_inbox_toggle_defaults_on(tmp_path):
+    s = AuthSettings(db_path=str(tmp_path / "users.db"))
+    assert s.gmail_inbox_enabled() is True  # missing row = feature ON
+
+    s.set_gmail_inbox_enabled(False)
+    assert s.gmail_inbox_enabled() is False
+    # A fresh instance reads the persisted value, not the default.
+    assert AuthSettings(db_path=str(tmp_path / "users.db")).gmail_inbox_enabled() is False
+
+
+def test_admin_toggles_gmail_inbox_off_and_on(tmp_path, monkeypatch):
+    admin_client, _, auth_settings, _ = _setup(tmp_path, monkeypatch)
+
+    r = admin_client.post("/api/v1/admin/gmail-inbox-mode",
+                          json={"enabled": False})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"inbox_enabled": False}
+    assert auth_settings.gmail_inbox_enabled() is False
+
+    r = admin_client.post("/api/v1/admin/gmail-inbox-mode",
+                          json={"enabled": True})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"inbox_enabled": True}
+    assert auth_settings.gmail_inbox_enabled() is True
+
+
+def test_gmail_inbox_toggle_requires_admin(tmp_path, monkeypatch):
+    admin_client, user_store, _, _ = _setup(tmp_path, monkeypatch)
+    user = user_store.create("normal", "n@x.com", "pw")
+    token = create_access_token(user.id, user.is_admin, username=user.username)
+    user_client = TestClient(app, headers={"Authorization": f"Bearer {token}"})
+
+    r = user_client.post("/api/v1/admin/gmail-inbox-mode",
+                         json={"enabled": False})
+
+    assert r.status_code == 403  # a normal user can never flip it

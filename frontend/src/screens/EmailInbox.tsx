@@ -118,6 +118,13 @@ export default function EmailInbox() {
     queryKey: ["gmail-status"],
     queryFn: () => api.gmailStatus(),
   });
+  // The admin kill-switch: browse/read/send can be disabled from the admin
+  // panel — then this screen shows the address export only.
+  const mode = useQuery({
+    queryKey: ["gmail-mode"],
+    queryFn: () => api.gmailMode(),
+  });
+  const inboxEnabled = mode.data?.inbox_enabled !== false;
 
   // Auto-select the first connected account once the list lands.
   useEffect(() => {
@@ -149,13 +156,13 @@ export default function EmailInbox() {
         q: searchQ,
         page_token: pageToken,
       }),
-    enabled: accountId !== null,
+    enabled: inboxEnabled && accountId !== null,
   });
 
   const message = useQuery({
     queryKey: ["gmail-message", accountId, openId],
     queryFn: () => api.gmailMessage(accountId!, openId!),
-    enabled: accountId !== null && openId !== null,
+    enabled: inboxEnabled && accountId !== null && openId !== null,
   });
 
   function goOlder() {
@@ -345,12 +352,14 @@ export default function EmailInbox() {
             </span>
           )}
 
-          <button
-            onClick={() => setDraft(emptyDraft())}
-            className="rounded-lg bg-indigo-600 px-3.5 py-2 text-[13px] font-semibold text-white hover:bg-indigo-500"
-          >
-            Compose
-          </button>
+          {inboxEnabled && (
+            <button
+              onClick={() => setDraft(emptyDraft())}
+              className="rounded-lg bg-indigo-600 px-3.5 py-2 text-[13px] font-semibold text-white hover:bg-indigo-500"
+            >
+              Compose
+            </button>
+          )}
 
           <button
             onClick={() => setExportOpen((v) => !v)}
@@ -496,6 +505,16 @@ export default function EmailInbox() {
         </div>
       )}
 
+      {!inboxEnabled && (
+        <div className="mt-3 shrink-0 rounded-xl border border-white/5 bg-white/[0.02] p-6 text-[13px] text-slate-400">
+          The Gmail inbox interface is currently disabled by the administrator.
+          The address export above still works — use it to download your
+          email addresses.
+        </div>
+      )}
+
+      {inboxEnabled && (
+        <>
       {/* Folder tabs + search */}
       <div className="mt-3 flex shrink-0 flex-wrap items-center gap-2">
         {FOLDERS.map(({ key, label, icon: Icon }) => (
@@ -909,6 +928,8 @@ export default function EmailInbox() {
             </div>
           </div>
         </div>
+      )}
+        </>
       )}
     </div>
   );

@@ -191,6 +191,12 @@ class AdminAuthModeIn(BaseModel):
     enabled: bool
 
 
+class AdminGmailInboxModeIn(BaseModel):
+    """Toggle the Gmail-like browsing interface on/off. The address export
+    always stays on — this only gates browse/read/send."""
+    enabled: bool
+
+
 class AdminActivityRow(BaseModel):
     id: int
     user_id: str

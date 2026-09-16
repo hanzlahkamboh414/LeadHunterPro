@@ -9,6 +9,7 @@ import {
   KeyRound,
   LockKeyhole,
   LockOpen,
+  Mail,
   RefreshCw,
   Share2,
   ShieldCheck,
@@ -788,6 +789,18 @@ function UsersTab({
     onSuccess: () => qc.invalidateQueries({ queryKey: ["auth-mode"] }),
   });
 
+  // Gmail-inbox interface ON/OFF — the Gmail-app-like browse/read/send screen.
+  // OFF means: Email screen shows only the address XLSX export (which always
+  // works); ON brings the full inbox interface back.
+  const gmailMode = useQuery({
+    queryKey: ["gmail-mode"],
+    queryFn: () => api.gmailMode(),
+  });
+  const toggleGmailInbox = useMutation({
+    mutationFn: (enabled: boolean) => api.adminSetGmailInboxMode(enabled),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["gmail-mode"] }),
+  });
+
   function flipAuth() {
     const currentlyOn = authMode.data?.auth_enabled ?? true;
     if (currentlyOn) {
@@ -852,6 +865,52 @@ function UsersTab({
         {toggleAuth.isError && (
           <p className="mt-2 text-[12px] text-rose-300">
             Toggle failed: {(toggleAuth.error as Error).message}
+          </p>
+        )}
+      </section>
+
+      {/* Gmail inbox interface toggle */}
+      <section className={`${cardClass} mt-6`}>
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <div className="flex items-center gap-2">
+            <Mail className="h-4 w-4 text-emerald-400" />
+            <h2 className="text-[16px] font-semibold text-white">Gmail inbox interface</h2>
+            <span
+              className={`rounded-full px-2 py-0.5 text-[11.5px] font-medium ${
+                (gmailMode.data?.inbox_enabled ?? true)
+                  ? "bg-emerald-500/10 text-emerald-300"
+                  : "bg-amber-500/10 text-amber-300"
+              }`}
+            >
+              {(gmailMode.data?.inbox_enabled ?? true)
+                ? "ON — full inbox"
+                : "OFF — address export only"}
+            </span>
+          </div>
+          <button
+            onClick={() => toggleGmailInbox.mutate(!(gmailMode.data?.inbox_enabled ?? true))}
+            disabled={toggleGmailInbox.isPending || gmailMode.isLoading}
+            className={`rounded-lg px-3.5 py-2 text-[12.5px] font-medium disabled:opacity-50 ${
+              (gmailMode.data?.inbox_enabled ?? true)
+                ? "border border-amber-500/40 text-amber-300 hover:bg-amber-500/10"
+                : "bg-emerald-600 text-white hover:bg-emerald-500"
+            }`}
+          >
+            {toggleGmailInbox.isPending
+              ? "Saving…"
+              : (gmailMode.data?.inbox_enabled ?? true)
+                ? "Turn OFF (export only)"
+                : "Turn ON (full inbox)"}
+          </button>
+        </div>
+        <p className="mt-1 text-[12px] text-slate-500">
+          {(gmailMode.data?.inbox_enabled ?? true)
+            ? "Email screen par poora Gmail interface hai — inbox, sent, padhna, reply, compose. OFF karne par sirf email addresses ki XLSX export bachegi (jo hamesha chalti rehti hai)."
+            : "Gmail interface OFF hai — Email screen par sirf email addresses ki XLSX export available hai. ON karne par poora inbox interface wapas aa jayega."}
+        </p>
+        {toggleGmailInbox.isError && (
+          <p className="mt-2 text-[12px] text-rose-300">
+            Toggle failed: {(toggleGmailInbox.error as Error).message}
           </p>
         )}
       </section>

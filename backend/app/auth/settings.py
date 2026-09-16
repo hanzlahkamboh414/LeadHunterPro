@@ -60,6 +60,19 @@ class AuthSettings:
     def set_auth_enabled(self, enabled: bool) -> None:
         self.set("auth_enabled", "1" if enabled else "0")
 
+    def gmail_inbox_enabled(self) -> bool:
+        """The Gmail-inbox app interface (browse/read/send) usable?
+
+        The ADDRESS EXPORT always works — this flag only gates the Gmail-like
+        browsing interface (2026-09-16: disabled while the batch transport is
+        being stabilized under load; the export is the production feature).
+        Default True — missing row = the feature is ON.
+        """
+        return self.get("gmail_inbox_enabled", "1") != "0"
+
+    def set_gmail_inbox_enabled(self, enabled: bool) -> None:
+        self.set("gmail_inbox_enabled", "1" if enabled else "0")
+
 
 _instance: AuthSettings | None = None
 

@@ -243,6 +243,16 @@ export const api = {
     });
   },
 
+  /** Admin toggle: the Gmail-like inbox interface (browse/read/send). The
+   * address export always stays on — this only gates the browsing UI. */
+  adminSetGmailInboxMode(enabled: boolean): Promise<{ inbox_enabled: boolean }> {
+    return request("/admin/gmail-inbox-mode", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    });
+  },
+
   /** Record the logout in the admin activity log (fire-and-forget; the client
    * discards the token right after — the JWT itself is stateless). */
   logout(): Promise<{ success: boolean }> {
@@ -541,6 +551,12 @@ export const api = {
   },
 
   // Gmail inbox (Phase E7) — the connected account's mail inside the app.
+  /** Which parts of the Gmail feature are on. The admin can disable the
+   * browsing interface (the address export always works). */
+  gmailMode(): Promise<{ inbox_enabled: boolean; export_enabled: boolean }> {
+    return request("/gmail/mode");
+  },
+
   /** One page of message rows for a folder/search. ``q`` is Gmail's own
    * search syntax, passed straight through to Google. */
   gmailMessages(filter: {

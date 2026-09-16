@@ -384,3 +384,340 @@ def test_send_test_undecryptable_tokens_409(tmp_path, monkeypatch):
     conn.close()
     resp = client.post(f"/api/v1/email-accounts/{account_id}/send-test")
     assert resp.status_code == 409
+
+
+def _batch_response(parts, boundary="batch_x"):
+    """A Google-style multipart/mixed batch reply: each part is an inner
+    HTTP response. Parts are (status, echoed message id, json payload) —
+    Google echoes the requested id in each part's Content-ID as
+    <response-id:m>, which is how a failed inner answer is mapped back to
+    the id that was asked for."""
+    import requests
+    crlf = "\r\n"
+    body = ""
+    for status, mid, payload in parts:
+        body += ("--" + boundary + crlf
+                 + "Content-Type: application/http" + crlf
+                 + "Content-ID: <response-id:" + mid + ">" + crlf + crlf
+                 + "HTTP/1.1 " + str(status) + " "
+                 + ("OK" if status == 200 else "Error") + crlf
+                 + "Content-Type: application/json; charset=UTF-8" + crlf
+                 + crlf + payload + crlf)
+    body += "--" + boundary + "--" + crlf
+    resp = requests.Response()
+    resp.status_code = 200
+    resp._content = body.encode()
+    resp.headers["Content-Type"] = "multipart/mixed; boundary=" + boundary
+    return resp
+
+
+def _message_json(mid, frm="jane@acme.com"):
+    import json
+    return json.dumps({
+        "id": mid, "threadId": "t" + mid, "snippet": "s",
+        "labelIds": ["INBOX"],
+        "payload": {"headers": [{"name": "From", "value": frm}]},
+    })
+
+
+def test_batch_get_message_metadata_parses_inner_responses(monkeypatch):
+    """The multipart reply is parsed into the same normalized dicts
+    get_message(metadata_only=True) returns — headers, snippet, labels."""
+    captured = {}
+
+    def fake_post(url, *, headers, data, timeout):
+        captured["url"] = url
+        captured["auth"] = headers["Authorization"]
+        return _batch_response([(200, "m1", _message_json("m1")),
+                                (200, "m2",
+                                 _message_json("m2", "bob@acme.com"))])
+
+    monkeypatch.setattr(google.time, "sleep", lambda s: None)
+    monkeypatch.setattr(google.requests, "post", fake_post)
+    out = google.batch_get_message_metadata("tok", ["m1", "m2"])
+
+    assert captured["url"] == google.GMAIL_BATCH_URL
+    assert captured["auth"] == "Bearer tok"
+    assert [m["id"] for m in out] == ["m1", "m2"]
+    assert out[0]["headers"]["from"] == "jane@acme.com"
+    assert out[0]["labels"] == ["INBOX"]
+    assert out[0]["text"] == ""  # metadata-only shape
+
+
+def test_batch_get_message_metadata_skips_dead_inner_ids(monkeypatch):
+    """A 404 inner response (message gone) is skipped WITHOUT a retry —
+    4xx is permanent, only 5xx earns the retry rounds."""
+    posts = []
+    monkeypatch.setattr(google.time, "sleep", lambda s: None)
+
+    def fake_post(url, *, headers, data, timeout):
+        posts.append(data)
+        return _batch_response([(200, "m1", _message_json("m1")),
+                                (404, "gone", '{"error": {}}')])
+
+    monkeypatch.setattr(google.requests, "post", fake_post)
+    out = google.batch_get_message_metadata("tok", ["m1", "gone"])
+    assert [m["id"] for m in out] == ["m1"]
+    assert len(posts) == 1  # the 404 never triggered a retry round
+
+
+def test_batch_get_message_metadata_retries_inner_503s(monkeypatch):
+    """Inner 503 'Backend Error' answers are TRANSIENT (Gmail's batch
+    backend throws them when batches arrive back-to-back — observed live
+    2026-09-15: a whole 100-id page 503'd, the same ids succeeded seconds
+    later). The failed ids are re-requested, never silently dropped."""
+    posts = []
+    sleeps = []
+
+    def fake_post(url, *, headers, data, timeout):
+        posts.append(data)
+        if len(posts) == 1:  # first round: everything 503s
+            return _batch_response([(503, "m1", "{}"),
+                                    (503, "m2", "{}")])
+        return _batch_response([(200, "m1", _message_json("m1")),
+                                (200, "m2", _message_json("m2"))])
+
+    monkeypatch.setattr(google.time, "sleep", sleeps.append)
+    monkeypatch.setattr(google.requests, "post", fake_post)
+    out = google.batch_get_message_metadata("tok", ["m1", "m2"])
+
+    assert [m["id"] for m in out] == ["m1", "m2"]  # both recovered
+    assert len(posts) == 2                          # one retry round
+    assert sleeps == [google.BATCH_RETRY_BACKOFF_S[0]]
+
+
+def _requested_ids(data: str) -> list[str]:
+    """The message ids a batch POST body asks for (Content-ID: <id:m>)."""
+    import re
+    return re.findall(r"Content-ID: <id:([^>]+)>", data)
+
+
+def test_batch_get_message_metadata_gives_up_after_all_rounds(monkeypatch):
+    """Ids STILL 503ing after every retry round are skipped with a warning —
+    honest data loss, never silent."""
+    posts = []
+    monkeypatch.setattr(google.time, "sleep", lambda s: None)
+
+    def fake_post(url, *, headers, data, timeout):
+        posts.append(data)
+        # answer exactly what was asked: m1 succeeds, m2 always 503s
+        return _batch_response(
+            [(200, "m1", _message_json("m1")) if mid == "m1"
+             else (503, mid, "{}") for mid in _requested_ids(data)])
+
+    monkeypatch.setattr(google.requests, "post", fake_post)
+    out = google.batch_get_message_metadata("tok", ["m1", "m2"])
+
+    assert [m["id"] for m in out] == ["m1"]
+    assert len(posts) == google.BATCH_RETRY_ATTEMPTS  # every round tried
+
+
+def test_batch_get_message_metadata_splits_over_max_inner(monkeypatch):
+    """More than BATCH_MAX_INNER ids become consecutive batch POSTs —
+    Google caps one batch at 100 inner requests, and our own chunk size is
+    smaller still (the burst bucket; see the constant's note)."""
+    posts = []
+
+    def fake_post(url, *, headers, data, timeout):
+        posts.append(data)
+        # answer every requested id with its own 200
+        return _batch_response(
+            [(200, mid, _message_json(mid))
+             for mid in _requested_ids(data)])
+
+    monkeypatch.setattr(google.time, "sleep", lambda s: None)
+    monkeypatch.setattr(google.requests, "post", fake_post)
+    ids = [f"m{i}" for i in range(250)]
+    out = google.batch_get_message_metadata("tok", ids)
+
+    chunks = [len(_requested_ids(p)) for p in posts]
+    assert len(posts) == -(-250 // google.BATCH_MAX_INNER)  # ceil
+    assert chunks[-1] == (250 % google.BATCH_MAX_INNER
+                          or google.BATCH_MAX_INNER)
+    assert all(c <= google.BATCH_MAX_INNER for c in chunks)
+    assert len(out) == 250
+
+
+def test_batch_get_message_metadata_raises_rate_limited_inner(monkeypatch):
+    """An inner 403 that is NOT one of Google's rate-limit reasons (here a
+    bare quota message with no machine-readable reason) raises
+    ``requests.HTTPError`` CARRYING that status and body — so the caller's
+    rate/quota retry logic (which reads resp.text) applies to batched calls
+    exactly as to single ones."""
+    import pytest
+    import requests
+    monkeypatch.setattr(google.requests, "post", lambda *a, **k: _batch_response(
+        [(200, "m1", _message_json("m1")),
+         (403, "m2", '{"error": {"message": "Quota exceeded"}}')]))
+    with pytest.raises(requests.HTTPError) as excinfo:
+        google.batch_get_message_metadata("tok", ["m1", "m2"])
+    assert excinfo.value.response.status_code == 403
+    assert "quota exceeded" in excinfo.value.response.text.lower()
+
+
+def test_batch_get_message_metadata_retries_inner_rate_limit(monkeypatch):
+    """An inner 429 ('rateLimitExceeded') is the per-user THROTTLE, not a
+    failure of the request: only the throttled ids go back for the next
+    round and the wait is Google's own 'Retry after' stamp — observed live
+    2026-09-15, where treating it as fatal 502'd a whole year's export."""
+    import json as _json
+    posts, sleeps = [], []
+
+    def fake_post(url, *, headers, data, timeout):
+        posts.append(data)
+        asked = _requested_ids(data)
+        if len(posts) == 1:
+            return _batch_response([
+                (200, mid, _message_json(mid)) if mid == "m1" else
+                (429, mid, _json.dumps({"error": {
+                    "code": 429, "status": "RESOURCE_EXHAUSTED",
+                    "message": "User-rate limit exceeded.  Retry after "
+                               "2020-01-01T00:00:00.000Z",
+                    "errors": [{"reason": "rateLimitExceeded"}]}}))
+                for mid in asked])
+        return _batch_response([(200, mid, _message_json(mid))
+                                for mid in asked])
+
+    monkeypatch.setattr(google.time, "sleep", sleeps.append)
+    monkeypatch.setattr(google.requests, "post", fake_post)
+    out = google.batch_get_message_metadata("tok", ["m1", "m2"])
+
+    assert [m["id"] for m in out] == ["m1", "m2"]  # both recovered
+    assert len(posts) == 2
+    assert _requested_ids(posts[1]) == ["m2"]      # only the throttled id
+    assert sleeps == [1.0]  # the Retry-after stamp is in the past → floor
+
+
+def test_batch_get_message_metadata_transient_403_reason_is_retried(monkeypatch):
+    """A 403 whose body carries a rate-limit REASON (Google's machine-
+    readable field) is the throttle too — retried, never fatal."""
+    import json as _json
+    posts = []
+
+    def fake_post(url, *, headers, data, timeout):
+        posts.append(data)
+        asked = _requested_ids(data)
+        if len(posts) == 1:
+            return _batch_response([
+                (403, mid, _json.dumps({"error": {
+                    "code": 403, "message": "User-rate limit exceeded",
+                    "errors": [{"reason": "userRateLimitExceeded"}]}}))
+                for mid in asked])
+        return _batch_response([(200, mid, _message_json(mid))
+                                for mid in asked])
+
+    monkeypatch.setattr(google.time, "sleep", lambda s: None)
+    monkeypatch.setattr(google.requests, "post", fake_post)
+    out = google.batch_get_message_metadata("tok", ["m1"])
+
+    assert [m["id"] for m in out] == ["m1"]
+    assert len(posts) == 2
+
+
+def test_batch_get_message_metadata_permanent_403_raises_at_once(monkeypatch):
+    """A real permission 403 (insufficientPermissions) is NOT transient —
+    it raises on the first answer instead of burning retry rounds."""
+    import json as _json
+    import pytest
+    import requests
+    posts = []
+
+    def fake_post(url, *, headers, data, timeout):
+        posts.append(data)
+        return _batch_response([
+            (403, mid, _json.dumps({"error": {
+                "code": 403, "message": "Insufficient Permission",
+                "errors": [{"reason": "insufficientPermissions"}]}}))
+            for mid in _requested_ids(data)])
+
+    monkeypatch.setattr(google.time, "sleep", lambda s: None)
+    monkeypatch.setattr(google.requests, "post", fake_post)
+    with pytest.raises(requests.HTTPError) as excinfo:
+        google.batch_get_message_metadata("tok", ["m1"])
+    assert excinfo.value.response.status_code == 403
+    assert len(posts) == 1  # no retry rounds
+
+
+def test_batch_get_message_metadata_throttle_leftover_raises(monkeypatch):
+    """Ids STILL throttled after every round RAISE — a throttled page means
+    those addresses are unknown, so they are never silently skipped the way
+    a lone flaky 5xx id is."""
+    import json as _json
+    import pytest
+    import requests
+    posts = []
+
+    def fake_post(url, *, headers, data, timeout):
+        posts.append(data)
+        return _batch_response([
+            (200, "m1", _message_json("m1")) if mid == "m1" else
+            (429, mid, _json.dumps({"error": {
+                "code": 429, "message": "User-rate limit exceeded",
+                "errors": [{"reason": "rateLimitExceeded"}]}}))
+            for mid in _requested_ids(data)])
+
+    monkeypatch.setattr(google.time, "sleep", lambda s: None)
+    monkeypatch.setattr(google.requests, "post", fake_post)
+    with pytest.raises(requests.HTTPError) as excinfo:
+        google.batch_get_message_metadata("tok", ["m1", "m2"])
+
+    assert excinfo.value.response.status_code == 429
+    assert "rateLimitExceeded" in excinfo.value.response.text
+    assert len(posts) == google.BATCH_RETRY_ATTEMPTS
+
+
+def test_inner_error_reads_reason_and_retry_after():
+    """The body's machine-readable reason + Google's 'Retry after' stamp are
+    parsed verbatim; an unparseable body yields no claim at all."""
+    from datetime import datetime, timedelta, timezone
+
+    reason, wait = google._inner_error(
+        '{"error": {"code": 429, "message": "User-rate limit exceeded.  '
+        'Retry after 2020-01-01T00:00:00.000Z", '
+        '"errors": [{"reason": "rateLimitExceeded"}]}}')
+    assert reason == "ratelimitexceeded"
+    assert wait == 1.0  # that stamp is long past → clamped to the floor
+
+    # A stamp ~2 minutes out is clamped to the 65s ceiling (a clock skew can
+    # never make the export hang on Google's own retry time).
+    soon = (datetime.now(timezone.utc) + timedelta(minutes=2))
+    reason, wait = google._inner_error(
+        '{"error": {"message": "Retry after ' + soon.isoformat() + '", '
+        '"errors": [{"reason": "rateLimitExceeded"}]}}')
+    assert wait == 65.0
+
+    # No errors[] list → the status field answers.
+    assert google._inner_error(
+        '{"error": {"status": "RESOURCE_EXHAUSTED"}}')[0] == \
+        "resource_exhausted"
+    # Not the JSON error shape → honest empty, never a guess.
+    assert google._inner_error("<html>502</html>") == ("", None)
+
+
+def test_batch_pacing_respects_the_per_second_quota():
+    """Gmail meters 250 quota units per user per SECOND and messages.get
+    costs 5, so one batch spends BATCH_MAX_INNER * 5 units the instant it
+    lands: the chunk must fit the burst bucket and the pause must keep the
+    sustained rate legal. Measured live 2026-09-16 — with 100-id batches
+    most calls came back partly throttled and the 2024 export ground 20
+    minutes through window waits."""
+    units_per_batch = google.BATCH_MAX_INNER * 5
+    assert units_per_batch <= 250                    # fits the burst bucket
+    assert units_per_batch / google.BATCH_PAUSE_S <= 250   # sustained rate
+    assert google.BATCH_PAUSE_MAX_S >= google.BATCH_PAUSE_S
+
+
+def test_batch_get_message_metadata_whole_batch_error_raises(monkeypatch):
+    """A non-2xx on the POST itself (transport/permission) raises through
+    raise_for_status — the caller's retry/502 path handles it."""
+    import pytest
+    import requests
+
+    def fake_post(url, *, headers, data, timeout):
+        resp = requests.Response()
+        resp.status_code = 401
+        return resp
+
+    monkeypatch.setattr(google.requests, "post", fake_post)
+    with pytest.raises(requests.HTTPError):
+        google.batch_get_message_metadata("tok", ["m1"])

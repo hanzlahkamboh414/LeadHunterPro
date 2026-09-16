@@ -25,7 +25,11 @@ import hashlib
 import hmac
 import html
 import json
+import logging
+import re
 import time
+import uuid
+from datetime import datetime, timezone
 from email.message import EmailMessage
 from email.utils import parseaddr
 from typing import Any
@@ -35,10 +39,65 @@ import requests
 
 from app.core.config import settings
 
+logger = logging.getLogger(__name__)
+
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GMAIL_SEND_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
 GMAIL_MESSAGES_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages"
+
+#: Gmail's per-API batch endpoint (the global /batch was retired; the
+#: per-service one lives on). One multipart POST carries up to 100 inner
+#: requests — measured live 2026-09-15: 100 metadata GETs in ONE 1.2s call
+#: vs ~15-30s as 100 parallel single GETs. That difference is what makes a
+#: 6,000-message export finish in ~2 minutes instead of tripping nginx's
+#: 10-minute timeout (the observed 504s on main).
+GMAIL_BATCH_URL = "https://gmail.googleapis.com/batch/gmail/v1"
+
+#: Ids per inner batch request. Gmail allows 100, but the per-user limiter
+#: is a BURST bucket: measured live 2026-09-16, a 100-id batch (500 quota
+#: units at messages.get = 5) had 14-34 ids rejected outright on nearly
+#: every call while a 0.7s pause still let whole pages through — i.e. the
+#: bucket sits well under 500 units, so a full batch can never fit it
+#: however long we wait between calls. 25 ids = 125 units, which clears the
+#: bucket every time; pacing then keeps the sustained rate legal.
+BATCH_MAX_INNER = 25
+
+#: Retry rounds for TRANSIENT inner answers. Two flavors are transient:
+#: 5xx "Backend Error" (Gmail's batch backend throws them when batches
+#: arrive back-to-back — observed live 2026-09-15: a whole 100-id page
+#: 503'd, the same ids succeeded seconds later) and 429/403 rate-limit
+#: answers (the per-user throttle, which Google's own message dates with a
+#: "Retry after <time>" stamp when it knows). Each round re-requests ONLY
+#: the ids that failed, with a growing delay.
+BATCH_RETRY_ATTEMPTS = 4
+BATCH_RETRY_BACKOFF_S = (2.0, 5.0, 15.0, 30.0)
+
+#: Backoff when the round was THROTTLED (429/rate-limit). Different ladder
+#: from the 5xx one on purpose: a throttle is a per-minute budget, so short
+#: waits just burn rounds — 20/45/60s rides a window out inside the batch
+#: call instead of aborting a page's worth of work.
+BATCH_THROTTLE_BACKOFF_S = (20.0, 45.0, 60.0)
+
+#: Inner-batch error reasons Google itself calls transient, read from the
+#: body's ``error.errors[].reason`` — never guessed from the status line.
+#: A 403 carrying anything else (e.g. ``insufficientPermissions``) is a real
+#: permission failure and raises immediately instead of looping.
+_BATCH_TRANSIENT_REASONS = frozenset({
+    "ratelimitexceeded", "userratelimitexceeded", "quotaexceeded",
+    "backenderror", "internalerror",
+})
+
+#: Pause between consecutive batch POSTs: 25 ids = 125 quota units, and the
+#: per-user budget is 250 units/second, so 0.6s keeps the sustained rate
+#: (~208 units/s) inside it with room for call latency. Measured live
+#: 2026-09-16: at 100-id batches the 2024 export crawled 20 minutes through
+#: throttle windows and would have 504'd behind nginx's 10-minute proxy
+#: timeout; 100-id batches also spent most calls partly rejected. When a
+#: batch gets throttled anyway the pause grows toward
+#: :data:`BATCH_PAUSE_MAX_S` — the next chunk must not trip it again.
+BATCH_PAUSE_S = 0.6
+BATCH_PAUSE_MAX_S = 2.0
 
 #: gmail.send sends; gmail.readonly reads mail (reply detection + the
 #: inbox screen); gmail.modify marks read/unread, stars, trashes — the
@@ -385,6 +444,220 @@ def get_message(access_token: str, message_id: str,
         return out
     text, html_body, attachments = _walk_parts(payload)
     out.update({"text": text, "html": html_body, "attachments": attachments})
+    return out
+
+
+#: Google's own "Retry after 2026-09-16T02:12:34.135Z" stamp inside a
+#: throttle message — the authoritative wait, when present.
+_RETRY_AFTER_RE = re.compile(r"retry after\s+([0-9][0-9T:.\-+Z]*)", re.I)
+
+
+def _inner_error(body: str) -> tuple[str, float | None]:
+    """``(reason, retry_after_seconds)`` from an inner batch error body.
+
+    ``reason`` is Google's own machine-readable code (lowercased), read from
+    ``error.errors[].reason`` — falling back to ``error.status`` (e.g.
+    ``RESOURCE_EXHAUSTED``) when the list is absent. The wait is parsed from
+    the human message ("Retry after <ISO time>") and clamped to
+    ``[1, 65]`` seconds: long enough to ride out a per-minute window, short
+    enough that a clock skew can never hang the export. Both are ``""``/
+    ``None`` when the body is not the JSON error shape (never guessed).
+    """
+    try:
+        err = json.loads(body).get("error") or {}
+    except (ValueError, AttributeError):
+        return "", None
+    reasons = [e.get("reason", "") for e in (err.get("errors") or [])]
+    reason = (reasons[0] if reasons and reasons[0] else err.get("status", ""))
+    match = _RETRY_AFTER_RE.search(err.get("message", "") or "")
+    wait: float | None = None
+    if match:
+        try:
+            when = datetime.fromisoformat(match.group(1).replace("Z", "+00:00"))
+            wait = max(1.0, min(
+                (when - datetime.now(timezone.utc)).total_seconds(), 65.0))
+        except ValueError:
+            wait = None
+    return reason.lower(), wait
+
+
+def batch_get_message_metadata(access_token: str,
+                               message_ids: list[str]) -> list[dict[str, Any]]:
+    """Metadata for many messages via ONE batched HTTP call (or a few).
+
+    Same result shape as :func:`get_message` with ``metadata_only=True``,
+    one dict per SUCCESSFUL message id, in request order. Up to
+    :data:`BATCH_MAX_INNER` ids per inner request; more ids are split into
+    consecutive batch POSTs.
+
+    Failure contract (the export's honest-skip vs retry seam):
+      * a whole-batch transport error (non-2xx on the POST itself) RAISES —
+        the caller's retry/backoff handles it;
+      * inner 429 / rate-limit 403 answers are TRANSIENT and re-requested
+        only for the ids that got them, waiting Google's own "Retry after"
+        stamp when it gave one — the per-user throttle answers this way
+        (observed live 2026-09-15: a whole year of sent mail 429'd mid-scan
+        and the export died 502 after the caller's short burst chain).
+        Ids still throttled after every round RAISE, never vanish: a
+        throttled page means the addresses behind them are unknown, and an
+        export that silently drops a few hundred addresses is worse than an
+        honest retryable error;
+      * a 403 that is NOT one of Google's rate-limit reasons (a real
+        permission failure) raises immediately — retrying cannot fix it;
+      * inner 5xx answers are transient too; only ids STILL failing after
+        every round are skipped (and logged), since a lone flaky message
+        must not fail the whole export.
+    """
+    from email.parser import BytesParser
+
+    out: list[dict[str, Any]] = []
+    headers = {"Authorization": f"Bearer {access_token}"}
+    wanted = [h.title() for h in _MESSAGE_HEADERS]
+
+    def _one_batch(chunk: list[str]) -> tuple[list[dict[str, Any]], list[str],
+                                              list[str], float | None]:
+        """One batch POST -> (metas, 5xx ids, throttled ids, wait hint)."""
+        boundary = f"leadhunter-{uuid.uuid4().hex}"
+        parts = [
+            f"--{boundary}\r\n"
+            "Content-Type: application/http\r\n"
+            f"Content-ID: <id:{mid}>\r\n\r\n"
+            f"GET /gmail/v1/users/me/messages/{mid}"
+            "?format=metadata"
+            + "".join(f"&metadataHeaders={h}" for h in wanted)
+            + "\r\n"
+            for mid in chunk
+        ]
+        resp = requests.post(
+            GMAIL_BATCH_URL,
+            headers={**headers,
+                     "Content-Type": f"multipart/mixed; boundary={boundary}"},
+            data="".join(parts) + f"--{boundary}--\r\n",
+            timeout=60,
+        )
+        resp.raise_for_status()
+
+        # Parse the multipart reply as a MIME message; each application/http
+        # part is a full inner HTTP response (status line + JSON body).
+        ctype = resp.headers.get("Content-Type", "")
+        mime = BytesParser().parsebytes(
+            f"Content-Type: {ctype}\r\n\r\n".encode() + resp.content)
+        metas: list[dict[str, Any]] = []
+        retryable: set[str] = set(chunk)      # 5xx — transient, per-id
+        throttled: set[str] = set()           # 429/rate-limit — transient too
+        wait_hint: float | None = None
+        for part in mime.walk():
+            if part.get_content_type() != "application/http":
+                continue
+            # Response parts echo the request's id: <response-id:m>. That
+            # maps a failed inner answer back to the id that was asked for
+            # (the JSON body of an error carries no usable id).
+            cid = (part.get("Content-ID") or "").strip("<>")
+            req_mid = cid.removeprefix("response-id:")
+            inner = part.get_payload(decode=True).decode("utf-8", "replace")
+            # "HTTP/1.1 200 OK\r\n<headers>\r\n\r\n<json>" — split status,
+            # headers and body on the first blank line.
+            head, _, body = inner.partition("\r\n\r\n")
+            lines = head.split("\r\n")
+            try:
+                status = int(lines[0].split()[1])
+            except (IndexError, ValueError):
+                continue  # unparseable part — skip, never fabricate
+            if status in (403, 429):
+                reason, wait = _inner_error(body)
+                if status == 429 or reason in _BATCH_TRANSIENT_REASONS:
+                    # The per-user throttle, not a failure of this request:
+                    # the id goes back for the next round (it stays in
+                    # ``retryable`` only if the id was in this chunk — track
+                    # it separately so a leftover is never silently skipped).
+                    retryable.discard(req_mid)
+                    throttled.add(req_mid)
+                    if wait is not None:
+                        wait_hint = max(wait_hint or 0.0, wait)
+                    continue
+                bad = requests.Response()
+                bad.status_code = status
+                bad._content = body.encode("utf-8", "replace")
+                raise requests.HTTPError(
+                    f"{status} inner batch response for a message",
+                    response=bad)
+            if status != 200:
+                # 4xx (404 = deleted message) is permanent — drop it from
+                # the retry set; 5xx stays for the retry rounds below.
+                if status < 500:
+                    retryable.discard(req_mid)
+                continue
+            try:
+                data = json.loads(body)
+            except ValueError:
+                continue
+            mid = data.get("id", "") or req_mid
+            retryable.discard(mid)
+            payload = data.get("payload", {}) or {}
+            hdrs = {h["name"].lower(): h["value"]
+                    for h in payload.get("headers", [])}
+            metas.append({
+                "id": mid,
+                "thread_id": data.get("threadId", ""),
+                "snippet": data.get("snippet", ""),
+                "headers": {k: hdrs.get(k, "") for k in _MESSAGE_HEADERS},
+                "labels": data.get("labelIds", []) or [],
+                "text": "", "html": "", "attachments": [],
+            })
+        return metas, list(retryable), list(throttled), wait_hint
+
+    pause = BATCH_PAUSE_S
+    for start in range(0, len(message_ids), BATCH_MAX_INNER):
+        if start:
+            time.sleep(pause)
+        chunk = message_ids[start:start + BATCH_MAX_INNER]
+        pending = chunk
+        failed: list[str] = []
+        throttled: list[str] = []
+        throttled_this_chunk = False
+        for attempt in range(BATCH_RETRY_ATTEMPTS):
+            metas, failed, throttled, wait = _one_batch(pending)
+            out.extend(metas)
+            if not failed and not throttled:
+                break
+            throttled_this_chunk = throttled_this_chunk or bool(throttled)
+            ladder = (BATCH_THROTTLE_BACKOFF_S if throttled
+                      else BATCH_RETRY_BACKOFF_S)
+            delay = (wait if wait is not None
+                     else ladder[min(attempt, len(ladder) - 1)])
+            if throttled:
+                logger.warning("gmail batch: %d ids throttled (round %d) — "
+                               "waiting %.0fs", len(throttled), attempt + 1,
+                               delay)
+            time.sleep(delay)
+            pending = failed + throttled
+        if throttled:
+            # Never skip a throttled id: the addresses behind them are simply
+            # unknown. Raise with the inner body so the caller's window-length
+            # retry can wait the per-minute quota out and ask for the page
+            # again (a few duplicate ids cost nothing — the export dedupes).
+            bad = requests.Response()
+            bad.status_code = 429
+            bad._content = json.dumps({
+                "error": {"code": 429, "status": "RESOURCE_EXHAUSTED",
+                          "message": "User-rate limit exceeded — batch "
+                                     "throttled after all retry rounds",
+                          "errors": [{"reason": "rateLimitExceeded"}]},
+            }).encode()
+            raise requests.HTTPError(
+                f"429 inner batch throttle: {len(throttled)} ids still "
+                f"throttled after {BATCH_RETRY_ATTEMPTS} rounds",
+                response=bad)
+        if failed:
+            logger.warning("gmail batch: %d ids still failing after %d "
+                           "rounds, skipped", len(failed),
+                           BATCH_RETRY_ATTEMPTS)
+        if throttled_this_chunk:
+            # A throttled chunk means we are pacing too fast for this
+            # mailbox — slow the NEXT chunk down instead of tripping it
+            # again (a full export is dozens of chunks: one slow chunk
+            # beats 63 retry storms).
+            pause = min(pause + 1.0, BATCH_PAUSE_MAX_S)
     return out
 
 

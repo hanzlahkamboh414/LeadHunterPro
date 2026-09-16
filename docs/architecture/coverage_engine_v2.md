@@ -84,7 +84,7 @@ Committed rows at build: `overture_places`, `common_crawl` (WARC/WAT snapshot vi
 
 ### 2.3 Governance
 
-- Committed data + `tests/source_scout/test_seed_lists.py` — phones: row count ≥ 45, unique state, **unique `priority_rank` covering 1..N**, `trade_scope` ⊆ CANONICAL_TRADES vocabulary; emails: ≥ 3 real named rows, each with `base_url` + `estimated_rows`, **no category-only rows**.
+- Committed data + `tests/source_scout/test_seed_lists.py` — phones: row count ≥ 45, unique state, **unique `priority_rank` covering 1..N**, `trade_scope` ⊆ CANONICAL_TRADES vocabulary; emails: ≥ 2 real named rows committed at Phase 1 (`overture_places`, `common_crawl`), each with `base_url` + `estimated_rows` + `capabilities` claiming email present, **no category-only rows**; 3rd+ named sources are a Phase-5 fill task, not a Phase-1 gate.
 - Seed refinements are PRs, not runtime AI edits.
 
 ---

@@ -56,6 +56,73 @@ STATUS_PROBATION = "probation"
 STATUS_PROMOTED = "promoted"
 STATUS_RETIRED = "retired"
 
+#: V2 coverage-engine states (docs/architecture/coverage_engine_v2.md §7).
+#: The V1 proposal states stay legal until Phase 4 deletes the proposal
+#: stage — V2 rows move through these instead:
+#:     untried ─▶ probing ─▶ adapter_draft ─▶ probation ─▶ promoted
+#:                    │              ▲               │    │         │
+#:                    ▼              └─ schema_mismatch  │    exhausted(30d re-arm)
+#:               blocked (403/429 → next path)           └─▶ dead (404/410 only)
+#: ``dead`` is the ONLY permanent state; ``blocked``/``exhausted`` re-arm
+#: via ``re_arm()`` after ``next_retry_at`` passes.
+STATUS_UNTRIED = "untried"
+STATUS_PROBING = "probing"
+STATUS_ADAPTER_DRAFT = "adapter_draft"
+STATUS_EXHAUSTED = "exhausted"
+STATUS_BLOCKED = "blocked"
+STATUS_DEAD = "dead"
+
+#: V2 legal forward edges (V1 edges live in _TRANSITIONS). Every edge out
+#: of blocked/exhausted is the RE-ARM path; promoted→probing is format rot
+#: (adapter rewrite, never silent retirement); probation→probing is a
+#: validator/schema_mismatch bounce.
+_V2_TRANSITIONS: dict[tuple[str, str], str | None] = {
+    (STATUS_UNTRIED, STATUS_PROBING): None,
+    (STATUS_UNTRIED, STATUS_BLOCKED): "gate_fail_reason",
+    (STATUS_UNTRIED, STATUS_DEAD): "gate_fail_reason",
+    (STATUS_PROBING, STATUS_ADAPTER_DRAFT): None,
+    (STATUS_PROBING, STATUS_BLOCKED): "gate_fail_reason",
+    (STATUS_PROBING, STATUS_DEAD): "gate_fail_reason",
+    (STATUS_ADAPTER_DRAFT, STATUS_PROBATION): None,
+    (STATUS_ADAPTER_DRAFT, STATUS_BLOCKED): "gate_fail_reason",
+    (STATUS_ADAPTER_DRAFT, STATUS_DEAD): "gate_fail_reason",
+    (STATUS_PROBATION, STATUS_PROMOTED): "promoted_at",
+    (STATUS_PROBATION, STATUS_PROBING): "gate_fail_reason",
+    (STATUS_PROBATION, STATUS_EXHAUSTED): "gate_fail_reason",
+    (STATUS_PROMOTED, STATUS_PROBING): "gate_fail_reason",
+    (STATUS_PROMOTED, STATUS_EXHAUSTED): "gate_fail_reason",
+    (STATUS_PROMOTED, STATUS_DEAD): "gate_fail_reason",
+    (STATUS_BLOCKED, STATUS_PROBING): None,
+    (STATUS_EXHAUSTED, STATUS_PROBING): None,
+}
+
+#: The 8 V2 statuses + the legacy proposal set — the full legal vocabulary
+#: any row may hold while the Phase-4 swap is pending.
+ALL_STATUSES = frozenset((
+    STATUS_PROPOSED, STATUS_VERIFIED, STATUS_PROBATION, STATUS_PROMOTED,
+    STATUS_RETIRED, STATUS_UNTRIED, STATUS_PROBING, STATUS_ADAPTER_DRAFT,
+    STATUS_EXHAUSTED, STATUS_BLOCKED, STATUS_DEAD,
+))
+
+#: Registry metadata columns added by the Phase-1 migration (v2). Old DBs
+#: get ALTER TABLE ADD COLUMN; fresh DBs create them in the base CREATE.
+_V2_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("seed_domain", "TEXT NOT NULL DEFAULT ''"),     # phones | emails | both
+    ("state", "TEXT NOT NULL DEFAULT ''"),           # authoritative jurisdiction
+    ("base_url", "TEXT NOT NULL DEFAULT ''"),
+    ("access_path", "TEXT NOT NULL DEFAULT ''"),     # bulk_file|open_data_api|xhr_json|html_form|pdf
+    ("fetch_spec", "TEXT NOT NULL DEFAULT '{}'"),
+    ("field_map", "TEXT NOT NULL DEFAULT '{}'"),
+    ("trade_mapping", "TEXT NOT NULL DEFAULT '{}'"),
+    ("capabilities", "TEXT NOT NULL DEFAULT '{}'"),  # {phone: {present, fill_rate}, ...}
+    ("estimated_rows", "INTEGER NOT NULL DEFAULT 0"),
+    ("rows_consumed", "INTEGER NOT NULL DEFAULT 0"),
+    ("next_retry_at", "TEXT NOT NULL DEFAULT ''"),
+    ("last_fetched_at", "TEXT NOT NULL DEFAULT ''"),
+    ("last_verified_at", "TEXT NOT NULL DEFAULT ''"),
+    ("gate_fail_reason", "TEXT NOT NULL DEFAULT ''"),
+)
+
 #: Every non-retired pre-promotion state — the quarantine proper.
 QUARANTINE_STATUSES = (STATUS_PROPOSED, STATUS_VERIFIED, STATUS_PROBATION)
 
@@ -128,6 +195,7 @@ class ScoutStore:
                     retire_reason TEXT NOT NULL DEFAULT ''
                 )
             """)
+            self._migrate_v2(conn)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS verdicts (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -151,6 +219,231 @@ class ScoutStore:
                 )
             """)
             conn.commit()
+            conn.close()
+
+    def _migrate_v2(self, conn: sqlite3.Connection) -> None:
+        """Phase-1 registry migration — additive, idempotent, non-destructive.
+
+        Adds the V2 columns to an existing V1 DB (fresh DBs baked them
+        into the CREATE). Existing rows keep their status — nothing is
+        rewritten, nothing is retired.
+        """
+        existing = {
+            r[1] for r in conn.execute("PRAGMA table_info(sources)").fetchall()
+        }
+        for col, decl in _V2_COLUMNS:
+            if col not in existing:
+                conn.execute(f"ALTER TABLE sources ADD COLUMN {col} {decl}")
+
+    # -- V2 registry (seeds + status model) ------------------------------------
+
+    def seed_upsert(self, source_id: str, *, seed_domain: str, state: str,
+                    kind: str = "seed", name: str = "", endpoint: str = "",
+                    base_url: str = "", seed_meta: dict[str, Any] | None = None
+                    ) -> None:
+        """Create or refresh a seed row WITHOUT touching its lifecycle.
+
+        Metadata-only upsert: on conflict, every V2 column and payload
+        seed block refreshes, but ``status``/timestamps survive — re-seeding
+        an exhausted source must not resurrect it.
+        """
+        seed_meta = dict(seed_meta or {})
+        existing = self.get(source_id)
+        status = existing.get("status", STATUS_UNTRIED) if existing else STATUS_UNTRIED
+        proposed_at = existing.get("proposed_at") if existing else _now()
+        payload = dict(existing.get("payload", {}) if existing else {})
+        payload["seed"] = seed_meta
+        conn = self._conn()
+        try:
+            conn.execute(
+                """
+                INSERT INTO sources (source_id, kind, name, endpoint,
+                    payload, status, provenance, proposed_at,
+                    seed_domain, state, base_url)
+                VALUES (?, ?, ?, ?, ?, ?, 'seed', ?, ?, ?, ?)
+                ON CONFLICT (source_id) DO UPDATE SET
+                    name = excluded.name,
+                    endpoint = excluded.endpoint,
+                    payload = excluded.payload,
+                    seed_domain = excluded.seed_domain,
+                    state = excluded.state,
+                    base_url = excluded.base_url
+                """,
+                (source_id.strip().lower(), kind, name[:200],
+                 endpoint[:500], json.dumps(payload, sort_keys=True),
+                 status, proposed_at,
+                 seed_domain.strip().lower(), state.strip().upper()[:2],
+                 base_url.strip()[:500]),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _v2_transition(self, source_id: str, to_status: str, *,
+                       reason: str = "", next_retry_at: str = "") -> dict[str, Any]:
+        """Advance one V2 legal edge, then return the fresh row.
+
+        ``reason`` lands in gate_fail_reason (the honest, specific why —
+        dead only on 404/410; blocked carries 403/429/captcha + retry path).
+        V2 edges are checked FIRST so shadowed V1 names can't double-fire.
+        """
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "SELECT status FROM sources WHERE source_id = ?",
+                (source_id.strip().lower(),))
+            row = cur.fetchone()
+            if not row:
+                raise ValueError(f"unknown source_id: {source_id!r}")
+            current = row[0]
+            edge = (current, to_status)
+            if edge in _V2_TRANSITIONS:
+                stamp_col = _V2_TRANSITIONS[edge]
+                sql = "UPDATE sources SET status = ?, gate_fail_reason = ?"
+                args: list[Any] = [to_status, reason[:500]]
+                if stamp_col and stamp_col != "gate_fail_reason":
+                    # a real arrival stamp (promoted_at); gate_fail_reason
+                    # IS the reason column — never overwrite it with a time
+                    sql += f", {stamp_col} = ?"
+                    args.append(_now())
+                if to_status in (STATUS_BLOCKED, STATUS_EXHAUSTED) and stamp_col != "promoted_at":
+                    sql += ", next_retry_at = ?"
+                    args.append(next_retry_at)
+                elif to_status == STATUS_PROBING:
+                    # re-arm: a fresh probe starts with a clean clock
+                    sql += ", next_retry_at = ?"
+                    args.append("")
+                sql += " WHERE source_id = ?"
+                args.append(source_id.strip().lower())
+                conn.execute(sql, args)
+                conn.commit()
+            else:
+                # legacy V1 edge (proposal pipeline still lives until Phase 4)
+                return self._transition(source_id, to_status)
+            conn.close()
+        except Exception:
+            conn.close()
+            raise
+        out = self.get(source_id)
+        assert out is not None
+        return out
+
+    def start_probing(self, source_id: str) -> dict[str, Any]:
+        """untried → probing (the access prober starts walking paths)."""
+        return self._v2_transition(source_id, STATUS_PROBING)
+
+    def mark_adapter_draft(self, source_id: str,
+                           reason: str = "") -> dict[str, Any]:
+        """probing → adapter_draft (prober found a path; AI writes the
+        adapter next — but store-level, the edge is all we enforce here)."""
+        return self._v2_transition(source_id, STATUS_ADAPTER_DRAFT, reason=reason)
+
+    def enter_probation(self, source_id: str) -> dict[str, Any]:
+        """adapter_draft → probation (validator passed; N-row dry run)."""
+        return self._v2_transition(source_id, STATUS_PROBATION)
+
+    def mark_blocked(self, source_id: str, reason: str,
+                     next_retry_at: str = "") -> dict[str, Any]:
+        """Any V2 pre-promotion state → blocked (403/429/captcha).
+
+        Blocked is NEVER dead: the prober re-tries the next access path
+        (or after next_retry_at when every path is exhausted).
+        """
+        return self._v2_transition(
+            source_id, STATUS_BLOCKED, reason=reason, next_retry_at=next_retry_at)
+
+    def mark_dead(self, source_id: str, reason: str) -> dict[str, Any]:
+        """→ dead — 404/410 ONLY, permanent (the one terminal state)."""
+        return self._v2_transition(source_id, STATUS_DEAD, reason=reason)
+
+    def mark_exhausted(self, source_id: str, reason: str,
+                       next_retry_at: str) -> dict[str, Any]:
+        """→ exhausted — dup>90% × 3; re-arms 30 days out."""
+        return self._v2_transition(
+            source_id, STATUS_EXHAUSTED, reason=reason, next_retry_at=next_retry_at)
+
+    def re_arm(self, source_id: str) -> dict[str, Any]:
+        """blocked/exhausted → probing once next_retry_at has passed.
+
+        The caller checks the clock; the store owns the legality of the
+        edge (an early re-arm bounces here).
+        """
+        row = self.get(source_id)
+        assert row is not None
+        if row["status"] not in (STATUS_BLOCKED, STATUS_EXHAUSTED):
+            raise ValueError(
+                f"re_arm only from blocked/exhausted, got {row['status']!r}")
+        return self._v2_transition(source_id, STATUS_PROBING)
+
+    def promoted_for_vertical(self, vertical: str) -> list[dict[str, Any]]:
+        """PROMOTED sources where capabilities[vertical].present is true.
+
+        The router gate (Phase-1 exit criterion): phone demand must never
+        bind to a source whose capabilities.phone.present is false — the
+        TX-mechanical class of waste is prevented at the SELECT, not at
+        fetch time.
+        """
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT source_id, capabilities, access_path, state, "
+                "estimated_rows FROM sources WHERE status = ?",
+                (STATUS_PROMOTED,)).fetchall()
+            out: list[dict[str, Any]] = []
+            for source_id, caps, access_path, state, est in rows:
+                try:
+                    caps = json.loads(caps or "{}")
+                except (TypeError, ValueError):
+                    caps = {}
+                slot = caps.get(vertical, {})
+                if isinstance(slot, dict) and slot.get("present"):
+                    out.append({
+                        "source_id": source_id,
+                        "capabilities": caps,
+                        "access_path": access_path,
+                        "state": state,
+                        "estimated_rows": est,
+                    })
+            return out
+        finally:
+            conn.close()
+
+    def phone_queue(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Seed rows still workable for the phones lane, ranked.
+
+        Terminal (dead) and dormant (exhausted until re-arm, blocked with
+        a future next_retry_at) rows drop out; trade_scope='none' rows
+        (state has no licensing board) never enter the queue at all.
+        Order: priority_rank asc (CBP establishment count — the real
+        quantity lever), the determinism the prober needs.
+        """
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT source_id, payload, state, status, next_retry_at "
+                "FROM sources WHERE seed_domain IN ('phones', 'both')").fetchall()
+            now = _now()
+            workable: list[dict[str, Any]] = []
+            for source_id, payload, state, status, next_retry_at in rows:
+                try:
+                    seed = (json.loads(payload or "{}").get("seed") or {})
+                except (TypeError, ValueError):
+                    seed = {}
+                if seed.get("trade_scope") == "none":
+                    continue
+                if status == STATUS_DEAD:
+                    continue
+                if status == STATUS_BLOCKED and next_retry_at > now:
+                    continue
+                workable.append({
+                    "source_id": source_id, "state": state,
+                    "priority_rank": int(seed.get("priority_rank", 0)),
+                    "trade_scope": seed.get("trade_scope", ""),
+                    "status": status,
+                })
+            workable.sort(key=lambda r: (r["priority_rank"], r["source_id"]))
+            return workable[:limit]
+        finally:
             conn.close()
 
     # -- proposals (quarantine entry) ---------------------------------------

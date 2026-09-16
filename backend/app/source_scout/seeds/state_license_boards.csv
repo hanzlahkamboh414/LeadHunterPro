@@ -1,0 +1,52 @@
+state,agency_code,agency_name,base_url,trade_scope,priority_rank,estab,known_access,notes
+CA,CSLB,Contractors State License Board,https://www.cslb.ca.gov,all_trades,1,86763,bulk_file,"monthly master list ZIP; F5 WAF blocks portal but bulk file reachable"
+FL,DBPR,Dept of Business & Professional Regulation,https://www.myfloridalicense.com,all_trades,2,68008,,"licenses GC/residential/specialty; myfloridalicense lookup; url_unverified"
+TX,TDLR,Dept of Licensing & Regulation,https://www.tdlr.texas.gov,"electrical,mechanical,plumbing",3,56287,open_data_api,"TDLR licenses electrical/AC/plumbing only — no gc/drywall/roofing/painting at state level"
+NY,,none,,none,4,51349,,no state-level contractor license (NYC DOB covers NYC)
+IL,IDFPR,Dept of Financial & Professional Regulation,https://www.idfpr.illinois.gov,roofing,5,29457,,"state licenses roofers; GC is local-only; url_unverified"
+PA,,none,,none,6,28752,,no state-level license; Home Improvement registration via AG
+NC,GLB,Licensing Board for General Contractors,,gc,7,28390,,"NC licenses GC only; url_unverified"
+WA,LNI,Dept of Labor & Industries,https://lni.wa.gov,all_trades,8,27190,open_data_api,"soda m8qx-ubtq verified live; 115k+ records"
+NJ,DCA,Div of Consumer Affairs,https://nj.gov/dca,gc,9,22502,,"Home Improvement Contractor registration, not a GC license"
+GA,SOS-PDB,Office of Secretary of State,https://sos.ga.gov,gc,10,22475,,"Professional Licensing Boards Division licenses GCs"
+MA,,none,,none,11,21631,,no state-level license (local)
+OH,,none,,none,12,21399,,no state-level license (local)
+MI,,none,,none,13,21298,,no state-level license (local)
+VA,,none,,none,14,21118,,no state-level GC license (DPOR covers some trades)
+CO,,none,,none,15,20473,,no state-level license (local)
+MN,DLI,Dept of Labor & Industry,https://www.dli.mn.gov,"gc,electrical,mechanical,plumbing",16,17568,,"residential building contractor + licensed trades; url verification pass pending"
+AZ,ROC,Registrar of Contractors,https://www.azroc.gov,all_trades,17,15551,,
+IN,,none,,none,18,14935,,no state-level license (local)
+OR,CCB,Construction Contractors Board,https://www.oregon.gov/ccb,all_trades,19,14907,open_data_api,"socrata g77e-6bhs verified; already promoted"
+WI,,none,,none,20,14679,,no state-level license (local)
+MO,,none,,none,21,14570,,no state-level license (local)
+MD,DLLR,Div of Labor & Reg,https://www.dllr.maryland.gov,gc,22,14528,,"MHIC — home improvement contracting"
+UT,DOPL,Division of Professional Licensing,https://dopl.utah.gov,"electrical,mechanical,plumbing",23,13022,,"no state GC license"
+TN,BC,Board for Licensing Contractors,https://www.tn.gov/commerce,gc,24,12692,,
+SC,LLR,Dept of Labor Licensing & Reg,https://llr.sc.gov,gc,25,11981,,"GC + residential; specialty licenses exist"
+ID,,none,,none,26,9895,,no state-level contractor license (local)
+IA,,none,,none,27,9067,,no state-level license (local)
+AL,ALBCB,Licensing Board for General Contractors,,gc,28,8982,,"url_unverified"
+OK,CIB,Construction Industries Board,https://ok.gov/cib,"gc,electrical,mechanical,plumbing",29,8966,,
+LA,LSLBC,State Licensing Board for Contractors,https://www.lslbc.louisiana.gov,all_trades,30,8900,,
+KY,DHBC,Dept of Housing Buildings & Construction,https://dhbc.ky.gov,"electrical,mechanical,plumbing",31,8201,,
+CT,DCP,Dept of Consumer Protection,https://portal.ct.gov/DCP,gc,32,8152,,"home improvement contractor"
+KS,,none,,none,33,7398,,no state-level license (local)
+NE,,none,,none,34,6931,,no state-level license (local)
+MT,,none,,none,35,6766,,no state-level license (local)
+AR,ACLB,Contractors Licensing Board,,gc,36,6366,,"url_unverified"
+NV,NSCB,State Contractors Board,https://www.nvcontractorsboard.com,all_trades,37,5975,,
+ME,,none,,none,38,5826,,no state-level license (local)
+NH,,none,,none,39,4949,,no state-level license (local)
+NM,CID,Construction Industries Division,https://www.rld.nm.gov,all_trades,40,4638,,
+MS,MBC,State Board of Contractors,,gc,41,4169,,"url_unverified"
+SD,,none,,none,42,3802,,no state-level license (local)
+RI,DBR,Dept of Business Regulation,https://dbr.ri.gov,gc,43,3528,,"contractor registration"
+WV,,none,,none,44,3149,,no state-level license (local)
+WY,,none,,none,45,2981,,no state-level license (local)
+ND,,none,,none,46,2946,,no state-level license (local)
+HI,DCCA,Contractors License Board,https://cca.hawaii.gov,all_trades,47,2924,,
+VT,OPR,Office of Professional Regulation,https://opr.vermont.gov,all_trades,48,2870,open_data_api,"master ed list verified; already promoted"
+AK,,none,,none,49,2627,,no state-level GC license (local)
+DE,,none,,none,50,2518,,no state-level license (local)
+DC,DCRA,Dept of Consumer & Regulatory Affairs,https://dcra.dc.gov,all_trades,51,506,,"GC + specialty licenses"

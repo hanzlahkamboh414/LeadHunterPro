@@ -187,11 +187,18 @@ gate 2  company_name fill >= 95% — else schema_mismatch (field_map wrong)
 gate 3  per-claimed-capability fill_rate >= 0.30 — else downgrade THAT capability,
         never reject the whole source; the measured fill_rate is STORED in
         capabilities[n].fill_rate — the number §8's quota formula requires
-gate 4  seed state DOMINATES state_field (≥ 90% of rows) — else jurisdiction_error
+gate 4  seed state DOMINATES state_field (≥ 95% of rows) — else jurisdiction_error
         (kills ID phantoms). Refined in Phase 3 from strict equality "≡":
         live CSLB B-2 (2026-09-17) carries 17/1,596 (1.07%) out-of-state
         MAILING addresses on all-CA licences — strict ≡ rejected a correct
         source, while a wrong-jurisdiction source still scores ≈0%.
+        The floor is 95%, not looser: a phantom scores ≈0%, so the number
+        only sets TOLERANCE, and 95% keeps a ~5x margin over the observed
+        1.07% while still bouncing a genuinely MIXED source (a 10% alien
+        share is not mailing noise — it is a multi-state board or an
+        aggregator, and belongs in rework_adapter). Matches gate 2's
+        convention. Too tight costs a re-probe; too loose serves
+        wrong-state rows permanently.
 gate 5  duplicate rate < 20% — else pagination/file dedupe broken
 ```
 

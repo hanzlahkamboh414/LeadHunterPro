@@ -34,9 +34,20 @@ CAPABILITY_FILL = 0.30
 #: rows are really NY. Live CSLB data (2026-09-17, 1,596 B-2 rows) showed
 #: why "≡" cannot be strict equality: 17 rows (1.07%) carry out-of-state
 #: MAILING addresses (NV/AZ/FL/WA/UT/TX/MI) while every row is a CA
-#: licence — a correct source the strict rule rejected. A dominant share
-#: still fails a wrong-jurisdiction source (≈0%) and a mixed one.
-JURISDICTION_SHARE = 0.90
+#: licence — a correct source the strict rule rejected.
+#:
+#: Why 95% and not a looser floor: a phantom source measures ≈0%, so the
+#: threshold's only real job is TOLERANCE, and tolerance should be no
+#: looser than the evidence needs. 95% keeps a ~5x margin over the
+#: observed 1.07% (room for border/metro licence-holders mailing
+#: elsewhere), while a 10% alien share is no longer mailing-address noise
+#: — that is a genuinely MIXED source (a multi-state board, an
+#: aggregator) and belongs in rework_adapter, not promoted with a
+#: single-state badge. The error is asymmetric too: too tight costs a
+#: re-probe (recoverable, and alien_states records why); too loose serves
+#: wrong-state rows to users permanently. 95% also matches gate 2's
+#: existing convention — one number to remember.
+JURISDICTION_SHARE = 0.95
 #: gate 5 — above this duplicate rate the pagination/file dedupe is broken.
 MAX_DUP_RATE = 0.20
 

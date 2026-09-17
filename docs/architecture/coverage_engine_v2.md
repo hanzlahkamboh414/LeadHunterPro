@@ -187,7 +187,11 @@ gate 2  company_name fill >= 95% — else schema_mismatch (field_map wrong)
 gate 3  per-claimed-capability fill_rate >= 0.30 — else downgrade THAT capability,
         never reject the whole source; the measured fill_rate is STORED in
         capabilities[n].fill_rate — the number §8's quota formula requires
-gate 4  state_field ≡ seed state — else jurisdiction_error (kills ID phantoms)
+gate 4  seed state DOMINATES state_field (≥ 90% of rows) — else jurisdiction_error
+        (kills ID phantoms). Refined in Phase 3 from strict equality "≡":
+        live CSLB B-2 (2026-09-17) carries 17/1,596 (1.07%) out-of-state
+        MAILING addresses on all-CA licences — strict ≡ rejected a correct
+        source, while a wrong-jurisdiction source still scores ≈0%.
 gate 5  duplicate rate < 20% — else pagination/file dedupe broken
 ```
 
@@ -283,6 +287,13 @@ Per-state, per-trade, per-source coverage map + `usable_rate` drive every decisi
 | 5 | Queue all 46 states **by `priority_rank`** + email seeds (named, real rows); telemetry (usable_rate, coverage map); outcome-track cols; per-state staleness watch (§7); phone-format validator + role-email down-weight (deferred §6/§9) land here | fresh-state promotion **floor ≥ 1/week = liveness alarm only, not the pace** (real pace ~1-2 states/day via hourly cron + 1-day probation → full US in weeks, not the 11 months that a literal floor reading implies); emails quantity from Overture/CommonCrawl; ceiling dashboard |
 
 **Schedule honesty:** Phases 1–2 are deterministic and ride the 5-day plan comfortably. Phase 3's AI adapter-writer is where schedule slips (bulk file diversity), so it is capped at a 1-state pilot before any flood.
+
+**Phase 3 live findings (2026-09-17, CA CSLB pilot):**
+
+- **The portal IS automatable without a browser.** A plain `httpx` GET returns the real form and a form POST (`__EVENTTARGET=ctl00$MainContent$btnSearch`, classification `B-2`) returns the real 169 KB xlsx (1,596 rows, 98.9% CA, 99.6% phone fill). This supersedes the 2026-09-14 "only a headed browser can do this" conclusion for this flow — `scripts/sync_cslb.py`'s browser driver is now a fallback, not a requirement (changing it is out of Phase-3 scope).
+- **Two access-path lessons, both now enforced in code:** a 404 on a *guessed* candidate URL must never mark a source dead (only the seeded/verified base_url's 404/410 counts), and the captcha classifier must match real challenge signatures — the bare word `cloudflare` false-positived on the CSLB root page, which merely loads a `cdnjs.cloudflare.com` asset.
+- **Contract gate:** every `field_map` value must be a column present in the real sample, capabilities are present-flags only, trade slugs come from the single canonical taxonomy, and a POST spec may only use form controls read off the live page. The AI assembles facts; it never guesses a column, a code or an endpoint.
+- **Pipeline proven on real bytes:** the live CSLB export promotes through contract → 500-row dry run (measured 1,596 rows, phone fill ≥95%) → 5 probation trials → `promoted`, visible to `promoted_for_vertical("phone")`. The live AI-written-adapter run against the production registry is pending API credits (all three AI keys returned 402/429 `insufficient credits` on 2026-09-17).
 
 ---
 

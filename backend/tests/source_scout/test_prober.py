@@ -61,10 +61,25 @@ def test_classify_status_matrix(code, kind):
 
 
 def test_classify_200_with_captcha_markers_is_blocked():
-    assert classify(200, b"<html>Cloudflare challenge</html>")[0] == \
-        KIND_BLOCKED
+    # real challenge signatures only — see the cloudflare-asset test below
+    # for why the bare word was dropped
+    assert classify(200, b'<div id="cf-challenge-running">')[0] == KIND_BLOCKED
     assert classify(200, b"please type the captcha below")[0] == KIND_BLOCKED
     assert classify(200, b"<html>a normal portal page</html>")[0] == KIND_OK
+
+
+def test_classify_ignores_cloudflare_assets_on_a_real_page():
+    """A page that merely LOADS a cloudflare-hosted asset is not a wall —
+    the bare word was an over-broad marker (live false positive on the
+    CSLB root page, 2026-09-17)."""
+    real = (b'<script src="https://cdnjs.cloudflare.com/ajax/libs/'
+            b'bootstrap/5.3.3/bootstrap.min.js"></script>')
+    assert classify(200, real)[0] == KIND_OK
+    interstitial = (b"<title>Just a moment...</title>"
+                    b"<div>Checking your browser before accessing</div>")
+    assert classify(200, interstitial)[0] == KIND_BLOCKED
+    assert classify(200, b"<title>Attention Required! | Cloudflare</title>")[0] \
+        == KIND_BLOCKED
 
 
 def test_fetch_probe_transport_error_is_blocked_never_dead():
@@ -173,6 +188,21 @@ def test_probe_queue_orders_by_rank_and_skips_url_less(tmp_path):
     # the URL-less row stayed untried, visible with the reason
     assert store.get("state_nc_board")["status"] == STATUS_UNTRIED
     assert "no base_url" in store.get("state_nc_board")["gate_fail_reason"]
+
+
+def test_probe_queue_defaults_to_the_shared_store(tmp_path, monkeypatch):
+    """store=None must resolve to get_store() — the import that made that
+    work was missing, so the default path raised NameError."""
+    store = _store(tmp_path)
+    _seed(store, base_url="https://portal/cslb")
+    monkeypatch.setattr("app.source_scout.prober.get_store", lambda: store)
+
+    def handler(request):
+        return httpx.Response(200, content=b"name,phone\n")
+
+    out = probe_queue(limit=5, transport=httpx.MockTransport(handler))
+    assert [o["source_id"] for o in out] == ["state_ca_board"]
+    assert out[0]["probe"] == KIND_OK
 
 
 def test_record_probe_success_rejects_legacy_path_vocabulary(tmp_path):

@@ -28,6 +28,15 @@ COMPANY_NAME_FILL = 0.95
 #: gate 3 — a claimed capability below this measured fill is downgraded
 #: (present: false), never source-fatal.
 CAPABILITY_FILL = 0.30
+#: gate 4 — the seed state must DOMINATE the sample's state column.
+#:
+#: The gate's purpose is killing ID phantoms: a source bound to CA whose
+#: rows are really NY. Live CSLB data (2026-09-17, 1,596 B-2 rows) showed
+#: why "≡" cannot be strict equality: 17 rows (1.07%) carry out-of-state
+#: MAILING addresses (NV/AZ/FL/WA/UT/TX/MI) while every row is a CA
+#: licence — a correct source the strict rule rejected. A dominant share
+#: still fails a wrong-jurisdiction source (≈0%) and a mixed one.
+JURISDICTION_SHARE = 0.90
 #: gate 5 — above this duplicate rate the pagination/file dedupe is broken.
 MAX_DUP_RATE = 0.20
 
@@ -143,7 +152,9 @@ def validate(source_id: str, sample: list[dict[str, Any]], *,
         "downgraded": sorted(downgraded),
     }
 
-    # -- gate 4 — state_field ≡ seed state (kills ID phantoms)
+    # -- gate 4 — the seed state must dominate the state column (kills ID
+    #    phantoms; a minority of out-of-state MAILING addresses is normal
+    #    in a single-state board export — see JURISDICTION_SHARE)
     state_col = field_map.get("state_field", "")
     if not seed_state:
         # email tier: no seeded jurisdiction anchor — not enforceable
@@ -151,16 +162,19 @@ def validate(source_id: str, sample: list[dict[str, Any]], *,
     elif not state_col:
         ok4, reason4 = False, "field_map lacks state_field — jurisdiction_error"
     else:
-        bad = sorted({
-            str(r.get(state_col, "")).strip()
-            for r in sample
-            if str(r.get(state_col, "")).strip()
-            and str(r.get(state_col, "")).strip() != seed_state
-        })
-        ok4 = not bad
+        states = [str(r.get(state_col, "")).strip() for r in sample]
+        known = [s for s in states if s]
+        share = (sum(1 for s in known if s == seed_state) / len(known)
+                 if known else 0.0)
+        alien = sorted({s for s in known if s != seed_state})
+        ok4 = share >= JURISDICTION_SHARE
         reason4 = ("" if ok4
-                   else f"state_field rows {bad[:5]} ≠ seed {seed_state!r} — "
-                        f"jurisdiction_error")
+                   else f"seed state {seed_state} covers only {share:.1%} of "
+                        f"rows (< {JURISDICTION_SHARE:.0%}), aliens "
+                        f"{alien[:5]} — jurisdiction_error")
+        gates["jurisdiction_share"] = {"passed": ok4,
+                                       "seed_share": round(share, 4),
+                                       "alien_states": alien[:20]}
     gates["jurisdiction"] = {"passed": ok4, "reason": reason4}
 
     # -- gate 5 — duplicate rate

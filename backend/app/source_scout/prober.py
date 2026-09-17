@@ -27,6 +27,7 @@ from app.source_scout.store import (
     STATUS_BLOCKED,
     STATUS_UNTRIED,
     ScoutStore,
+    get_store,
 )
 
 #: Probe outcome kinds — the honest four, nothing else.
@@ -35,10 +36,19 @@ KIND_BLOCKED = "blocked"
 KIND_DEAD = "dead"
 
 #: A 200 that is actually a human-verification wall counts as blocked.
+#: These are the REAL challenge signatures — deliberately NOT the bare
+#: word "cloudflare", which appears in any page loading a
+#: cdnjs.cloudflare.com asset (verified live 2026-09-17: the CSLB root
+#: page was misread as a captcha for exactly that reason).
 CAPTCHA_MARKERS = (
     b"captcha",
     b"cf-challenge",
-    b"cloudflare",
+    b"cf_chl_",                  # the challenge script path
+    b"__cf_chl",                 # challenge token cookie/js
+    b"cf-chl-",                  # challenge DOM ids
+    b"just a moment",            # the interstitial title
+    b"checking your browser",    # the interstitial body
+    b"attention required",       # the block page title
     b"are you a human",
 )
 
@@ -51,7 +61,9 @@ _MAX_PROBE_BYTES = 64 * 1024
 
 _TIMEOUT_S = 15.0
 
-_UA = "LeadHunterPro scout prober/2.0 (coverage engine v2)"
+#: One UA for the whole scout — the prober and the fetcher are the same
+#: crawler identity (public so bulk_fetch reuses it, never a second one).
+USER_AGENT = "LeadHunterPro scout prober/2.0 (coverage engine v2)"
 
 
 @dataclass(frozen=True)
@@ -89,7 +101,7 @@ def fetch_probe(url: str, *, transport: httpx.BaseTransport | None = None,
     with httpx.Client(timeout=timeout, follow_redirects=True,
                       transport=transport) as client:
         try:
-            resp = client.get(url, headers={"User-Agent": _UA})
+            resp = client.get(url, headers={"User-Agent": USER_AGENT})
         except httpx.RequestError as exc:
             return Probe(KIND_BLOCKED, 0, f"transport: {type(exc).__name__}")
         body = resp.content[:_MAX_PROBE_BYTES] if resp.content else b""

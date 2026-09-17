@@ -453,6 +453,25 @@ class ScoutStore:
         assert out is not None
         return out
 
+    def record_adapter(self, source_id: str, *, fetch_spec: dict[str, Any],
+                       field_map: dict[str, str],
+                       trade_mapping: dict[str, str],
+                       capabilities: dict[str, Any]) -> dict[str, Any]:
+        """Persist the AI-written adapter contract (§5).
+
+        Capabilities arrive as present-flags ONLY — the fill_rate numbers
+        the quota formula reads are the VALIDATOR's measurement, never the
+        AI's claim, which is why this method cannot accept them.
+        """
+        self._set(source_id,
+                  fetch_spec=json.dumps(fetch_spec, sort_keys=True),
+                  field_map=json.dumps(field_map, sort_keys=True),
+                  trade_mapping=json.dumps(trade_mapping, sort_keys=True),
+                  capabilities=json.dumps(capabilities, sort_keys=True))
+        out = self.get(source_id)
+        assert out is not None
+        return out
+
     def promoted_for_vertical(self, vertical: str) -> list[dict[str, Any]]:
         """PROMOTED sources where capabilities[vertical].present is true.
 

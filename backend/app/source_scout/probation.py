@@ -74,15 +74,23 @@ STAGE_PRODUCTION = "production"
 MAX_ROWS_TO_SHOW_AI = 3
 
 
-def _default_ai_ask() -> Callable[[str], str]:
+def default_ai_ask() -> Callable[[str], str]:
+    """The scout's deep lane (make_ai_ask defaults to AI_MODEL_DEEP).
+
+    Public: adapter writing and probation judgement are the same kind of
+    step on the same key — one seam for the whole scout, never a second.
+    """
     from app.ai.gateway import make_ai_ask
     from app.core.config import settings
 
     return make_ai_ask(api_key=settings.AI_API_KEY_3)
 
 
-def _parse_agnes_reply(reply: str) -> tuple[bool | None, str]:
+def parse_agnes_reply(reply: str) -> tuple[bool | None, str]:
     """(verdict, reason) from an agnes judgement reply.
+
+    Public: every scout lane that asks agnes for a PASS/FAIL judgement
+    (V1 probation, V2 probation) reads the reply the same way.
 
     Accepts the requested "PASS/FAIL + one sentence" shape and tolerates
     case/prefix noise. A reply with neither keyword (or both, equally
@@ -161,7 +169,7 @@ def run_probation_check(
 
     # Mechanical gate passed — agnes may now judge real rows.
     if ai_ask is None:
-        ai_ask = _default_ai_ask()
+        ai_ask = default_ai_ask()
     sample = []
     for r in usable[:MAX_ROWS_TO_SHOW_AI]:
         cols = [payload["phone_column"], payload["person_column"],
@@ -195,7 +203,7 @@ def run_probation_check(
             "status": store.get(source_id)["status"],
         }
 
-    verdict, why = _parse_agnes_reply(reply)
+    verdict, why = parse_agnes_reply(reply)
     if verdict is None:
         logger.info("scout-probation %s: unparseable reply: %.200s",
                     source_id, reply)

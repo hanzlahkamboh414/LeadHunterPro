@@ -113,14 +113,41 @@ def test_gate3_stores_measured_fill_rate_on_pass():
         r.capabilities["email"]
 
 
-def test_gate4_jurisdiction_error_on_alien_state():
+def test_gate4_jurisdiction_error_on_a_wrong_state_source():
     rows = _sample(60)
-    rows[3]["State"] = "NY"
+    for i in range(30):  # half the rows are another jurisdiction
+        rows[i]["State"] = "NY"
     r = validate("s", rows, field_map=FM, adapter_capabilities=CAPS,
                  seed_state="CA")
     assert not r.passed
     assert "jurisdiction_error" in r.gates["jurisdiction"]["reason"]
     assert "NY" in r.gates["jurisdiction"]["reason"]
+    assert r.gates["jurisdiction_share"]["seed_share"] == 0.5
+    assert r.gates["jurisdiction_share"]["alien_states"] == ["NY"]
+
+
+def test_gate4_tolerates_a_minority_of_out_of_state_mailing_addresses():
+    """Live CSLB B-2 (2026-09-17): 17 of 1,596 rows carry out-of-state
+    MAILING addresses while every row is a CA licence — a correct source.
+    Strict equality rejected it; a dominant share does not."""
+    rows = _sample(60)
+    for i in range(3):  # 5% out-of-state mailing addresses
+        rows[i]["State"] = "NV"
+    r = validate("s", rows, field_map=FM, adapter_capabilities=CAPS,
+                 seed_state="CA")
+    assert r.passed
+    assert r.gates["jurisdiction_share"]["seed_share"] == round(57 / 60, 4)
+    assert r.gates["jurisdiction_share"]["alien_states"] == ["NV"]
+
+
+def test_gate4_below_share_floor_is_jurisdiction_error():
+    rows = _sample(60)
+    for i in range(8):  # 86.7% seed share < 90% floor
+        rows[i]["State"] = "AZ"
+    r = validate("s", rows, field_map=FM, adapter_capabilities=CAPS,
+                 seed_state="CA")
+    assert not r.passed
+    assert "covers only 86.7%" in r.gates["jurisdiction"]["reason"]
 
 
 def test_gate4_email_tier_skipped_without_seed_state():

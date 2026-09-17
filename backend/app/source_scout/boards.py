@@ -33,6 +33,7 @@ from typing import Any
 
 from app.discovery.tradefold import CANONICAL_TRADES
 from app.source_scout.store import (
+    PROBER_PATHS,
     ScoutStore,
     get_store,
 )
@@ -49,11 +50,9 @@ SCOPE_ALL = "all_trades"
 SCOPE_NONE = "none"
 SCOPE_SPECIALS = frozenset({SCOPE_ALL, SCOPE_NONE})
 
-#: known_access hint vocabulary (the prober's 5 paths + proven soda routes).
-ACCESS_PATH_HINTS = frozenset({
-    "bulk_file", "open_data_api", "xhr_json", "html_form", "pdf", "soda",
-    "socrata", "",
-})
+#: known_access hint vocabulary — the prober's 5 paths (store.PROBER_PATHS,
+#: one vocabulary) plus the proven legacy soda/socrata routes.
+ACCESS_PATH_HINTS = frozenset((*PROBER_PATHS, "soda", "socrata", ""))
 
 
 class SeedValidationError(ValueError):

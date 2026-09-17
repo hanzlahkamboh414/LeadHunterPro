@@ -72,10 +72,16 @@ STATUS_EXHAUSTED = "exhausted"
 STATUS_BLOCKED = "blocked"
 STATUS_DEAD = "dead"
 
+#: The prober's 5 access paths in priority order (coverage_engine_v2.md
+#: §4) — the vocabulary ``record_probe_success`` validates against.
+#: boards.py's ACCESS_PATH_HINTS is THIS set plus the legacy
+#: soda/socrata hints — one vocabulary, never two.
+PROBER_PATHS = ("bulk_file", "open_data_api", "xhr_json", "html_form", "pdf")
+
 #: V2 legal forward edges (V1 edges live in _TRANSITIONS). Every edge out
 #: of blocked/exhausted is the RE-ARM path; promoted→probing is format rot
-#: (adapter rewrite, never silent retirement); probation→probing is a
-#: validator/schema_mismatch bounce.
+#: (adapter rewrite, never silent retirement); probation→probing and
+#: adapter_draft→probing are the validator/schema_mismatch bounces.
 _V2_TRANSITIONS: dict[tuple[str, str], str | None] = {
     (STATUS_UNTRIED, STATUS_PROBING): None,
     (STATUS_UNTRIED, STATUS_BLOCKED): "gate_fail_reason",
@@ -84,6 +90,7 @@ _V2_TRANSITIONS: dict[tuple[str, str], str | None] = {
     (STATUS_PROBING, STATUS_BLOCKED): "gate_fail_reason",
     (STATUS_PROBING, STATUS_DEAD): "gate_fail_reason",
     (STATUS_ADAPTER_DRAFT, STATUS_PROBATION): None,
+    (STATUS_ADAPTER_DRAFT, STATUS_PROBING): None,
     (STATUS_ADAPTER_DRAFT, STATUS_BLOCKED): "gate_fail_reason",
     (STATUS_ADAPTER_DRAFT, STATUS_DEAD): "gate_fail_reason",
     (STATUS_PROBATION, STATUS_PROMOTED): "promoted_at",
@@ -374,6 +381,77 @@ class ScoutStore:
             raise ValueError(
                 f"re_arm only from blocked/exhausted, got {row['status']!r}")
         return self._v2_transition(source_id, STATUS_PROBING)
+
+    def rework_adapter(self, source_id: str, reason: str) -> dict[str, Any]:
+        """→ probing — the schema_mismatch/format-rot bounce (§7).
+
+        Legal from adapter_draft (validator gate fail), probation
+        (validator re-check) and promoted (fetch error after promotion):
+        the source returns to probing for a fresh adapter + re-validation,
+        never silent retirement.
+        """
+        return self._v2_transition(source_id, STATUS_PROBING, reason=reason)
+
+    def _set(self, source_id: str, **cols: str | int) -> None:
+        """One-row UPDATE of plain columns (feeder helper; column names
+        are literal call-site kwargs only)."""
+        assignments = ", ".join(f"{k} = ?" for k in cols)
+        conn = self._conn()
+        try:
+            conn.execute(
+                f"UPDATE sources SET {assignments} WHERE source_id = ?",
+                (*cols.values(), source_id.strip().lower()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def record_probe_success(self, source_id: str,
+                             access_path: str) -> dict[str, Any]:
+        """The prober found a working path: record it, stamp the fetch,
+        clear any stale failure reason (gate_fail_reason reflects the
+        CURRENT state, never history)."""
+        if access_path not in PROBER_PATHS:
+            raise ValueError(
+                f"unknown access_path {access_path!r} "
+                f"(not one of {PROBER_PATHS})")
+        self._set(source_id, access_path=access_path,
+                  last_fetched_at=_now(), gate_fail_reason="")
+        out = self.get(source_id)
+        assert out is not None
+        return out
+
+    def record_gate_reason(self, source_id: str, reason: str) -> dict[str, Any]:
+        """Record an honest reason WITHOUT a status change — e.g. a seed
+        row that cannot be probed yet (no base_url): it stays in place,
+        visible in the queue, never silently skipped."""
+        self._set(source_id, gate_fail_reason=reason[:500])
+        out = self.get(source_id)
+        assert out is not None
+        return out
+
+    def update_validation(self, source_id: str, *,
+                          capabilities: dict[str, Any] | None = None,
+                          estimated_rows: int | None = None,
+                          gate_fail_reason: str | None = None
+                          ) -> dict[str, Any]:
+        """Persist the validator's measurements (the numbers the quota
+        formula and export priority read), stamped as last verified.
+
+        ``capabilities`` arrives with measured fill_rate per capability —
+        the registry stores {present, fill_rate} at validation time (§3).
+        """
+        cols: dict[str, str | int] = {"last_verified_at": _now()}
+        if capabilities is not None:
+            cols["capabilities"] = json.dumps(capabilities, sort_keys=True)
+        if estimated_rows is not None:
+            cols["estimated_rows"] = int(estimated_rows)
+        if gate_fail_reason is not None:
+            cols["gate_fail_reason"] = gate_fail_reason[:500]
+        self._set(source_id, **cols)
+        out = self.get(source_id)
+        assert out is not None
+        return out
 
     def promoted_for_vertical(self, vertical: str) -> list[dict[str, Any]]:
         """PROMOTED sources where capabilities[vertical].present is true.

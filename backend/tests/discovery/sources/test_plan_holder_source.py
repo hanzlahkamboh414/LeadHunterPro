@@ -10,10 +10,18 @@ parser (already covered by its own 40 tests).
 from __future__ import annotations
 
 import pathlib
+import sys
+import types
 
 import pytest
 
+from app.discovery.pdf_plan_holder_parser import (
+    STATUS_TOO_LARGE,
+    PlanHolderParseReport,
+    PlanHolderParseResult,
+)
 from app.discovery.sources.plan_holder_source import (
+    MAX_PDF_BYTES,
     MAX_PDFS,
     PlanHolderSource,
     _content_out_of_region,
@@ -729,3 +737,172 @@ def test_parser_report_exposes_document_state_codes() -> None:
 
     result = PdfPlanHolderParser().parse(_fixture_bytes(), source_url="x")
     assert result.report.state_codes == ["IA"]
+
+
+# ---------------------------------------------------------------------------
+# MAX_PDF_BYTES — the same bound as the parser's MAX_PAGES, one layer earlier
+#
+# The parser refuses documents past MAX_PAGES, but it can only refuse bytes it
+# was given: without a fetch-side bound a huge body is already fully resident
+# (plain requests GET buffers everything) before any check could run. These
+# tests pin that the refusal happens AT THE SOCKET, not after the fact.
+# ---------------------------------------------------------------------------
+
+
+class _FakeRaw:
+    """Stand-in for urllib3's ``response.raw``, recording what was read."""
+
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+        self.read_amounts: list[int] = []
+
+    def read(self, amount: int, decode_content: bool = False) -> bytes:  # noqa: ARG002
+        self.read_amounts.append(amount)
+        return self._body[:amount]
+
+
+class _FakeResponse:
+    """Stand-in for a ``requests`` response over ``stream=True``."""
+
+    def __init__(self, body: bytes = b"", content_length: str | None = None,
+                 status_error: Exception | None = None) -> None:
+        self.raw = _FakeRaw(body)
+        self.headers = {} if content_length is None else {
+            "Content-Length": content_length
+        }
+        self._status_error = status_error
+        self.closed = False
+
+    def raise_for_status(self) -> None:
+        if self._status_error is not None:
+            raise self._status_error
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _patch_fetch_transport(monkeypatch: pytest.MonkeyPatch,
+                           response: _FakeResponse) -> dict:
+    """Install *response* as what ``requests.get`` returns.
+
+    Also stubs ``doh_resolver``: ``_default_fetch`` imports it and calls
+    ``install()``, which patches ``socket.getaddrinfo`` PROCESS-WIDE. That is
+    fine in production and not fine inside a shared test process, so the fake
+    keeps this test hermetic rather than leaking a global resolver patch.
+    """
+    calls: dict = {}
+
+    def fake_get(url: str, **kwargs: object) -> _FakeResponse:
+        calls["url"] = url
+        calls["kwargs"] = kwargs
+        return response
+
+    monkeypatch.setattr("requests.get", fake_get)
+    monkeypatch.setitem(sys.modules, "doh_resolver",
+                        types.SimpleNamespace(install=lambda: None))
+    return calls
+
+
+def test_declared_oversize_length_is_refused_without_reading_the_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A truthful Content-Length is refused BEFORE a single byte is buffered —
+    that is the entire reason the GET streams."""
+    response = _FakeResponse(
+        body=b"x", content_length=str(MAX_PDF_BYTES + 1)
+    )
+    calls = _patch_fetch_transport(monkeypatch, response)
+
+    with pytest.raises(ValueError, match="MAX_PDF_BYTES"):
+        PlanHolderSource._default_fetch("https://example.test/big.pdf")
+
+    assert response.raw.read_amounts == []  # nothing was ever pulled
+    assert response.closed is True          # and the socket did not leak
+    assert calls["kwargs"]["stream"] is True
+
+
+def test_undeclared_oversize_body_is_refused_mid_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no Content-Length to trust, the read itself is bounded: the request
+    stops one byte past the cap instead of draining an unbounded body."""
+    response = _FakeResponse(body=b"x" * (MAX_PDF_BYTES + 10),
+                             content_length=None)
+    _patch_fetch_transport(monkeypatch, response)
+
+    with pytest.raises(ValueError, match="no usable"):
+        PlanHolderSource._default_fetch("https://example.test/unlabeled.pdf")
+
+    assert response.raw.read_amounts == [MAX_PDF_BYTES + 1]
+
+
+def test_body_within_the_cap_is_returned_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bound must not disturb the normal path — a real list still arrives."""
+    body = b"%PDF-1.4 small plan holder list"
+    response = _FakeResponse(body=body, content_length=str(len(body)))
+    _patch_fetch_transport(monkeypatch, response)
+
+    assert PlanHolderSource._default_fetch(
+        "https://example.test/list.pdf"
+    ) == body
+
+
+def test_refused_body_is_a_failure_for_that_pdf_only(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A refusal is None + an HONEST log line, never an exception up the stack:
+    one oversize PDF must not abort discovery of the others.
+
+    The wording is pinned deliberately. "unreachable" was the old line and it
+    would be a lie here — we reached the host and declined the body — and a
+    misreported cause is exactly what makes a dork that keeps surfacing spec
+    books undiagnosable from the log.
+    """
+    def refusing(url: str) -> bytes:  # noqa: ANN001, ARG001
+        raise ValueError(f"Content-Length past MAX_PDF_BYTES {MAX_PDF_BYTES}")
+
+    monkeypatch.setattr(PlanHolderSource, "_default_fetch",
+                        staticmethod(refusing))
+    source = PlanHolderSource()
+
+    with caplog.at_level("INFO"):
+        assert source._fetch_bytes("https://example.test/spec-book.pdf") is None
+
+    assert "not fetched" in caplog.text
+    assert "unreachable" not in caplog.text
+
+
+class _TooLargeParser:
+    """A parser that reports every document as past MAX_PAGES.
+
+    Injected rather than fed a real 41-page PDF: the parser's refusal is pinned
+    in ``test_pdf_plan_holder_parser``, and what is under test HERE is only that
+    the source keeps this outcome apart from a parse that ran and found nothing.
+    """
+
+    def parse(self, pdf_bytes: bytes, source_url: str = "") -> PlanHolderParseResult:  # noqa: ARG002
+        report = PlanHolderParseReport(parse_status=STATUS_TOO_LARGE, pages=41)
+        report.reasons.append("past the roster bound")
+        return PlanHolderParseResult(report=report)
+
+
+def test_oversize_documents_are_counted_apart_from_unreadable_ones() -> None:
+    """The source's own tally keeps the two facts apart (§6): a dork surfacing
+    spec books must be visible as ``pdfs_too_large``, not buried inside
+    ``pdfs_unreadable`` where it reads as ordinary template drift."""
+    source = PlanHolderSource(
+        search=lambda dorks: [_FakeResult(FIXTURE_URL)],
+        fetch=lambda url: b"%PDF-1.4 anything",  # noqa: ARG005
+        parser=_TooLargeParser(),
+    )
+    status, records, meta = source.discover(
+        industry="R", location="TX", limit=10
+    )
+
+    assert status == SourceStatus.EMPTY
+    assert records == []
+    assert meta["pdfs_too_large"] == 1
+    assert meta["pdfs_unreadable"] == 0

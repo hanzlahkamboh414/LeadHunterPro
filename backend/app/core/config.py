@@ -86,13 +86,22 @@ class Settings(BaseSettings):
     # Optional: falls back to AI_API_KEY when unset.
     AI_API_KEY_2: str = Field(default="", repr=False)  # secret
 
-    # Model for the DEEP lanes — every caller of ``make_ai_ask()`` (here that
-    # is the deep-research stage; the discovery/scout lanes are not in this
-    # trimmed release). Deep thinking parses structured JSON, so it runs
-    # agnes-3-flash: verified 200 and returns CLEAN JSON (no markdown fences
-    # — 2.5 wraps output in ```json) at 25-40s/call. Falls back to AI_MODEL
-    # when unset, so an old .env keeps working.
-    AI_MODEL_DEEP: str = "agnes-3-flash"
+    # Model for the DEEP lanes — every caller of ``make_ai_ask()`` that does not
+    # pin a model (here that is the deep-research stage; the discovery/scout
+    # lanes are not in this trimmed release).
+    # 2026-09-18: switched from agnes-3-flash to agnes-2.5-flash. agnes-3-flash
+    # went 402 "Insufficient credits" — measured live on this key in the same
+    # minute that 2.5 answered 200 — and took every deep lane down with it. The
+    # lanes were dead for want of a model that had credit, not of quality. The
+    # fence caveat that motivated agnes-3 is handled in code now, not by the
+    # model: the deep-research parsers already strip ```json fences
+    # (lead_research/company_research.py, person_research_ai.py,
+    # intent_timing.py), so 2.5's fenced output parses cleanly.
+    # Cost: 2.5 reasons less than 3 on the heavy lanes and is 4-6x faster
+    # (3-7s vs 25-40s/call). Putting agnes-3 back is a one-line change once it
+    # has credit. Falls back to AI_MODEL when unset, so an old .env keeps
+    # working.
+    AI_MODEL_DEEP: str = "agnes-2.5-flash"
 
     # Third AI key for the discovery dork/TEMPLATE-GENERATION lane (Phase H,
     # wired into live runs by Sprint2.11). A separate key lets the 3rd AI

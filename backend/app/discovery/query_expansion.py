@@ -380,7 +380,20 @@ def generate_query_expansion(
         try:
             from app.ai.gateway import make_ai_ask
 
-            ai_ask = make_ai_ask(api_key=settings.AI_API_KEY_3)
+            # The MAIN model on purpose, not make_ai_ask's AI_MODEL_DEEP
+            # default. Expansion is the FIRST AI call of every job, so its cost
+            # is paid on every single run, and the task is breadth, not
+            # reasoning: list alternative wordings of a trade and the separable
+            # markets around a location. That is exactly the shape agnes-2.5
+            # handles in 3-7s. The 2026-09-15 deep-lane switch moved this call
+            # onto agnes-3-flash along with the structured-JSON lanes, where it
+            # bought nothing and spent the most credits; 2026-09-18 moved it
+            # back (see config.AI_MODEL_DEEP for the measured 402 that made the
+            # deep lane fatal here). ``model`` is make_ai_ask's documented
+            # per-lane seam.
+            ai_ask = make_ai_ask(
+                api_key=settings.AI_API_KEY_3, model=settings.AI_MODEL
+            )
         except Exception as exc:  # noqa: BLE001 — a broken lane is honest, not fatal
             logger.warning("query-expansion: AI lane unavailable: %s", exc)
             return {

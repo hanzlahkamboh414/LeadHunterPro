@@ -23,8 +23,11 @@ import pathlib
 import pytest
 
 from app.discovery.pdf_plan_holder_parser import (
+    MAX_PAGES,
     STATUS_NEEDS_OCR,
+    STATUS_NO_TABLE,
     STATUS_OK,
+    STATUS_TOO_LARGE,
     STATUS_UNREADABLE,
     PdfPlanHolderParser,
     PlanHolderParseReport,
@@ -1049,3 +1052,86 @@ def test_real_document_phantom_tables_were_discarded(parsed_fixture) -> None:
 def test_real_document_needs_no_ocr(parsed_fixture) -> None:
     assert parsed_fixture.report.parse_status != STATUS_NEEDS_OCR
     assert parsed_fixture.report.text_chars > 1000
+
+
+# ---------------------------------------------------------------------------
+# The page bound (2026-09-18 production OOM)
+#
+# pdfplumber's cost tracks PAGE COUNT, not byte size: a real 352-page, 1.88 MB
+# Alaska DOT spec peaked at 2,200 MB RSS to yield zero rows, and that is what
+# crash-looped the production backend (4 GB cgroup, MAX_PDFS=10 per pass).
+# These tests pin the refusal — and that the refusal happens BEFORE any page is
+# read, which is the whole point (counting costs 48 MB, extracting costs 2,200).
+# ---------------------------------------------------------------------------
+
+
+def _n_page_pdf(pages: int) -> bytes:
+    """A valid PDF with *pages* empty pages, built by hand.
+
+    Deliberately not a committed fixture: the bound is about page COUNT, so the
+    test needs to choose the count, and a 41-page binary in the repo would be
+    the largest file here for no reason. ~100 bytes per page.
+    """
+    kids = " ".join(f"{3 + i} 0 R" for i in range(pages))
+    bodies = ["<< /Type /Catalog /Pages 2 0 R >>",
+              f"<< /Type /Pages /Kids [{kids}] /Count {pages} >>"]
+    bodies += ["<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>"] * pages
+
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for number, body in enumerate(bodies, start=1):
+        offsets.append(len(out))
+        out += f"{number} 0 obj\n{body}\nendobj\n".encode()
+    xref = len(out)
+    out += f"xref\n0 {len(bodies) + 1}\n0000000000 65535 f \n".encode()
+    for offset in offsets:
+        out += f"{offset:010d} 00000 n \n".encode()
+    out += (
+        f"trailer\n<< /Size {len(bodies) + 1} /Root 1 0 R >>\n"
+        f"startxref\n{xref}\n%%EOF\n"
+    ).encode()
+    return bytes(out)
+
+
+def test_oversize_document_is_refused_and_never_read() -> None:
+    """Past MAX_PAGES the parser refuses — and reports that as its OWN status.
+
+    ``no_table_found`` would be a lie here: refusing to look is a different
+    fact from looking and finding nothing, and an operator reading the log has
+    to be able to tell a dork that keeps surfacing spec books from ordinary
+    template drift.
+    """
+    parser = PdfPlanHolderParser()
+    result = parser.parse(_n_page_pdf(MAX_PAGES + 1))
+
+    assert result.report.parse_status == STATUS_TOO_LARGE
+    assert result.report.parse_status != STATUS_NO_TABLE
+    assert result.report.pages == MAX_PAGES + 1
+    assert result.rows == []
+    assert any(str(MAX_PAGES) in r for r in result.report.reasons)
+
+
+def test_the_refusal_costs_no_page_read() -> None:
+    """The guard's entire value: text_chars / tables_seen stay 0.
+
+    Those two counters are only ever filled by ``_read_document``. If they are
+    non-zero the document WAS read, the bound bought nothing, and the 2,200 MB
+    is back — so this is the assertion that actually protects the cgroup.
+    """
+    parser = PdfPlanHolderParser()
+    report = parser.parse(_n_page_pdf(400)).report
+
+    assert report.parse_status == STATUS_TOO_LARGE
+    assert report.text_chars == 0
+    assert report.tables_seen == 0
+    assert report.tables_used == 0
+
+
+def test_document_exactly_at_the_cap_is_still_read() -> None:
+    """MAX_PAGES is inclusive: the bound separates document CLASSES (a roster
+    from a spec book), so it must not trim a legitimately large roster."""
+    parser = PdfPlanHolderParser()
+    report = parser.parse(_n_page_pdf(MAX_PAGES)).report
+
+    assert report.parse_status != STATUS_TOO_LARGE
+    assert report.pages == MAX_PAGES

@@ -261,3 +261,60 @@ def test_merge_locations_keeps_genuinely_distinct_markets():
         "Fort Bend County TX",
         "Fort Worth TX",
     ]
+
+# ---------------------------------------------------------------------------
+# Which MODEL the default lane runs on
+#
+# Every test above injects an ``ai_ask``, so none of them ever builds the real
+# lane. That left the model choice unpinned, and on 2026-09-15 the deep-lane
+# switch moved this call onto agnes-3-flash along with the structured-JSON
+# lanes — silently, because nothing tested it. This is the FIRST AI call of
+# every job, so that mistake was paid on every single run while buying nothing:
+# the task is breadth (list wordings), not structured reasoning.
+# ---------------------------------------------------------------------------
+
+
+def test_default_lane_asks_for_the_main_model_not_the_deep_one(monkeypatch):
+    """Expansion runs on ``AI_MODEL``; ``make_ai_ask``'s deep default is wrong
+    here and must be overridden explicitly at the call site."""
+    from app.ai import gateway
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "AI_API_KEY_3", "test-key")
+    monkeypatch.setattr(settings, "AI_MODEL", "the-main-model")
+    monkeypatch.setattr(settings, "AI_MODEL_DEEP", "the-deep-model")
+
+    captured: dict = {}
+
+    def fake_make_ai_ask(**kwargs):
+        captured.update(kwargs)
+        return lambda prompt: 'TRADE:\n"x"\nLOCATION:\n"y"'
+
+    monkeypatch.setattr(gateway, "make_ai_ask", fake_make_ai_ask)
+
+    generate_query_expansion(trade="Roofing", location="Tulsa OK")
+
+    assert captured["model"] == "the-main-model"
+    assert captured["model"] != settings.AI_MODEL_DEEP
+    assert captured["api_key"] == "test-key"
+
+
+def test_without_a_key_the_lane_is_never_built(monkeypatch):
+    """No key -> the honest pre-Phase-J fallback, and crucially no provider is
+    constructed with an empty key (which would hit the network pointlessly)."""
+    from app.ai import gateway
+    from app.core.config import settings
+
+    for name in ("AI_API_KEY", "AI_API_KEY_2", "AI_API_KEY_3"):
+        monkeypatch.setattr(settings, name, "")
+
+    def explode(**kwargs):  # noqa: ARG001
+        raise AssertionError("no key must mean no provider construction")
+
+    monkeypatch.setattr(gateway, "make_ai_ask", explode)
+
+    result = generate_query_expansion(trade="Roofing", location="Tulsa OK")
+
+    assert result["trade_variants"] == []
+    assert result["location_variants"] == []
+    assert "no AI key" in result["reason"]

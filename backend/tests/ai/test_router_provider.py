@@ -54,10 +54,12 @@ _FAKE_MODEL = "test-model-not-real"
 _PROVEN_DEFAULT_MODEL = "agnes-2.5-flash"
 
 # The deep-lane model default (every make_ai_ask caller: deep-research,
-# discovery query expansion, template generation, source-scout). agnes-3-flash
-# returns CLEAN JSON (no markdown fences) but takes 25-40s/call, so it is
-# confined to the low-volume deep lanes.
-_PROVEN_DEEP_MODEL = "agnes-3-flash"
+# template generation, source-scout). 2026-09-18: agnes-3-flash went 402
+# "Insufficient credits" and killed every deep lane, so the deep default moved
+# to agnes-2.5-flash — the model that answered 200 on the same key the same
+# minute. Fenced output is tolerated in code (every structured-JSON consumer
+# strips ```json), so clean-JSON-by-model is no longer a requirement here.
+_PROVEN_DEEP_MODEL = "agnes-2.5-flash"
 
 # The hard per-request AI timeout default. Changes to it are deliberate (they
 # trade bounded latency against a slower/hung provider's completion), so a
@@ -193,16 +195,15 @@ def test_model_override(monkeypatch, patched_openai) -> None:
 
 
 def test_declared_default_deep_model_is_the_proven_one() -> None:
-    """config.py's AI_MODEL_DEEP default is the deep-lane model (2026-09-15
-    per-lane split). The deep lanes need clean JSON and tolerate 25-40s/call;
-    a silent change here silently changes every deep lane at once."""
+    """config.py's AI_MODEL_DEEP default is the deep-lane model. A silent change
+    here silently changes every deep lane at once, so it must fail a test."""
     assert Settings.model_fields["AI_MODEL_DEEP"].default == _PROVEN_DEEP_MODEL
 
 
 def test_provider_accepts_explicit_model_override(monkeypatch, patched_openai) -> None:
     """An explicit model wins over AI_MODEL, without touching global settings.
 
-    This is the seam make_ai_ask uses to put the deep lanes on agnes-3-flash
+    This is the seam make_ai_ask uses to put the deep lanes on AI_MODEL_DEEP
     while the main pipeline stays on AI_MODEL.
     """
     monkeypatch.setattr(settings, "AI_MODEL", "main-lane-model")
@@ -212,8 +213,9 @@ def test_provider_accepts_explicit_model_override(monkeypatch, patched_openai) -
 
 def test_make_ai_ask_uses_the_deep_model_by_default(monkeypatch, patched_openai) -> None:
     """make_ai_ask is the deep-lane constructor: its default model is
-    AI_MODEL_DEEP (agnes-3-flash), NOT the main pipeline's AI_MODEL. Every
-    caller (deep-research, discovery, source-scout) is a deep-thinking lane."""
+    AI_MODEL_DEEP, NOT the main pipeline's AI_MODEL. Every caller that does not
+    pin a model (deep-research, template generation, source-scout) is a
+    deep-thinking lane; discovery query expansion pins ``model=AI_MODEL``."""
     monkeypatch.setattr(settings, "AI_MODEL", "fast-main-model")
     monkeypatch.setattr(settings, "AI_MODEL_DEEP", "deep-thinking-model")
 

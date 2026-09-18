@@ -34,10 +34,19 @@ def make_ai_ask(
 
     Used to run a second, parallel AI lane on a separate key (``AI_API_KEY_2``)
     so the main pipeline and the deep-research stage do not share a rate limit.
-    Every current caller is a deep-thinking lane (deep-research, discovery
-    query expansion, Phase H template generation, source-scout), so the default
-    model here is ``AI_MODEL_DEEP`` (agnes-3-flash: clean JSON, slower) while
-    the main pipeline stays on the faster ``AI_MODEL``.
+    The default model here is ``AI_MODEL_DEEP`` because most callers are
+    deep-thinking lanes that must emit structured JSON (deep-research, Phase H
+    template generation, source-scout). Discovery query expansion is the
+    exception: it passes ``model=AI_MODEL`` explicitly, because it is the FIRST
+    AI call of every job and its task is breadth rather than structured
+    reasoning — the ``model`` argument is the seam that keeps the two kinds of
+    lane apart.
+
+    The concrete model behind ``AI_MODEL_DEEP`` is not named here on purpose:
+    2026-09-18 moved it to agnes-2.5-flash after agnes-3-flash went 402
+    "Insufficient credits", and a docstring that repeats the current model is
+    one more place to forget. See ``app/core/config.py`` for the live value and
+    the reasoning.
 
     Args:
         api_key: Override key. Falls back to ``AI_API_KEY_2``, then the

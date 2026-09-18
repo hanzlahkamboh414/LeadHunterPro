@@ -62,6 +62,9 @@ HONEST LIMITS, STATED UP FRONT
   ``Name:`` ("Wisconsin Bid Network") yields NO person — the email stays
   unbound. A person is never inferred from an email username or domain.
 - Scanned/image PDFs are reported as ``needs_ocr``, never as zero rows.
+- A document far past roster length is never parsed at all: cost tracks PAGE
+  COUNT, not byte size, so a spec book a ``filetype:pdf`` dork dragged in is
+  reported as ``too_large`` before a single page is extracted.
 
 Deterministic and fully offline: this module takes BYTES. Fetching is a
 separate concern, which keeps the parser unit-testable without the network.
@@ -218,6 +221,27 @@ _COMPANY_INDICATOR_TOKENS = frozenset(
 #: i.e. it is a scan. Reported as ``needs_ocr`` — OCR is a later increment.
 MIN_TEXT_CHARS_PER_PAGE = 25
 
+#: Hard bound on how many pages this parser will read. Past it the document is
+#: reported ``too_large`` and NOT parsed (not "no table found" — refusing to
+#: look is a different fact from looking and finding nothing).
+#:
+#: WHY A PAGE BOUND AND NOT A BYTE BOUND (measured 2026-09-18, the production
+#: OOM): pdfplumber builds a Python object per character, line and rect, so its
+#: cost tracks PAGE COUNT and text volume, not file size. A real 352-page Alaska
+#: DOT spec — only 1.88 MB on the wire — peaked at 2,200 MB RSS and 75s CPU to
+#: yield zero rows, growing ~6.5 MB per page, linearly. ``page.flush_cache()``
+#: after each page recovered only 31% (2,200 -> 1,519 MB) and the growth stayed
+#: linear, because the residue is pdfminer's document-level object cache, which
+#: neither this module nor pdfplumber's page API releases. Bounding the page
+#: count is therefore the only lever that works: opening the same document and
+#: counting its pages costs a 48 MB peak instead of 2,200 MB.
+#:
+#: WHY 40: a plan-holder list is a roster — the real fixtures run 1-4 pages, and
+#: a large project's list is a few dozen. 40 is ~10x the largest roster seen
+#: while still far below the hundreds of pages an agency spec book runs to, so
+#: the bound separates the two document classes rather than trimming real lists.
+MAX_PAGES = 40
+
 #: Longest plausible person name; anything longer is a mis-split cell.
 MAX_NAME_CHARS = 60
 
@@ -234,6 +258,10 @@ STATUS_NEEDS_OCR = "needs_ocr"
 STATUS_UNREADABLE = "unreadable_pdf"
 STATUS_NO_TABLE = "no_table_found"
 STATUS_COVERAGE_LOW = "coverage_low"
+#: Past ``MAX_PAGES``: deliberately NOT parsed. A distinct status, never
+#: ``no_table_found`` — "we refused to read it" must stay distinguishable from
+#: "we read it and there was no table" (CLAUDE.md §6 honest reporting).
+STATUS_TOO_LARGE = "too_large"
 
 
 @dataclass
@@ -412,6 +440,27 @@ class PdfPlanHolderParser:
             return PlanHolderParseResult(report=report)
 
         try:
+            page_count = self._count_pages(pdf_bytes)
+        except Exception as exc:  # noqa: BLE001 - a bad PDF reports, never crashes
+            report.parse_status = STATUS_UNREADABLE
+            report.reasons.append(f"pdfplumber could not read the document: {exc}")
+            self._log(report, source_url)
+            return PlanHolderParseResult(report=report)
+
+        if page_count > MAX_PAGES:
+            report.parse_status = STATUS_TOO_LARGE
+            report.pages = page_count
+            report.reasons.append(
+                f"{page_count} pages is past the {MAX_PAGES}-page roster bound - "
+                "refusing to parse. pdfplumber's cost tracks page count (~6.5 MB "
+                "peak per page, measured), so a document this long is a different "
+                "kind of file (a spec book or a full bid package), not a "
+                "plan-holder roster"
+            )
+            self._log(report, source_url)
+            return PlanHolderParseResult(report=report)
+
+        try:
             page_texts, tables_by_page = self._read_document(pdf_bytes)
         except Exception as exc:  # noqa: BLE001 - a bad PDF reports, never crashes
             report.parse_status = STATUS_UNREADABLE
@@ -460,6 +509,19 @@ class PdfPlanHolderParser:
         return PlanHolderParseResult(rows=rows, report=report)
 
     # -- document reading --------------------------------------------------
+
+    @staticmethod
+    def _count_pages(pdf_bytes: bytes) -> int:
+        """How many pages the document has — without reading any of them.
+
+        This is the cheap guard the expensive path passes first. Counting does
+        not build the per-character object graph that ``extract_text`` /
+        ``extract_tables`` do, so it costs a fraction of a real read: measured
+        48 MB peak against 2,200 MB on the 352-page document that OOM-killed
+        production on 2026-09-18.
+        """
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            return len(pdf.pages)
 
     def _read_document(
         self, pdf_bytes: bytes

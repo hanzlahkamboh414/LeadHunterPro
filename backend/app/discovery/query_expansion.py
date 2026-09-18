@@ -25,6 +25,12 @@ identical. Nothing new is invented where Phase H already solved the problem.
 HONEST LIMITS:
   * BOUNDED — ONE AI call per job (a couple of credits), never per pass;
     expansion is a per-job template, not a per-search inference loop.
+  * CHEAP LANE — runs on ``AI_MODEL`` (agnes-2.5-flash), NOT the deep model
+    that ``make_ai_ask`` defaults to. Expansion is the first AI call of every
+    job and its task is breadth (list wordings), not structured reasoning, so
+    the deep model bought nothing here while costing the most — the one lane
+    whose per-run cost is unavoidable is the last place to spend the slow
+    model. Moved back 2026-09-18; see the call site for the full reasoning.
   * SANITIZED — every variant is a short, plain phrase; dork/URL/operator
     syntax is rejected (a trade/location wording must never leak a ``filetype:``
     or ``site:`` into the query); dedupe against the base; blanks dropped.
@@ -360,7 +366,8 @@ def generate_query_expansion(
         trade: the user's trade phrase, e.g. "General Contractors".
         location: the user's location phrase, e.g. "San Antonio TX".
         ai_ask: ``(prompt) -> str`` LLM transport. Defaults to the 3rd AI lane
-            (AI_API_KEY_3, falling back to 2 -> main), same as Phase H.
+            (AI_API_KEY_3, falling back to 2 -> main) on the MAIN model
+            (``AI_MODEL``) — see the call site for why this lane is not deep.
     """
     trade = (trade or "").strip()
     location = (location or "").strip()
@@ -380,7 +387,18 @@ def generate_query_expansion(
         try:
             from app.ai.gateway import make_ai_ask
 
-            ai_ask = make_ai_ask(api_key=settings.AI_API_KEY_3)
+            # The MAIN model on purpose, not make_ai_ask's AI_MODEL_DEEP
+            # default. Expansion is the FIRST AI call of every job, so its cost
+            # is paid on every single run, and the task is breadth, not
+            # reasoning: list alternative wordings of a trade and the separable
+            # markets around a location. That is exactly the shape agnes-2.5
+            # handles in 3-7s. The 2026-09-15 deep-lane switch moved this call
+            # onto agnes-3-flash along with the structured-JSON lanes, where it
+            # bought nothing and spent the most credits; 2026-09-18 moved it
+            # back. `model` is make_ai_ask's documented per-lane seam.
+            ai_ask = make_ai_ask(
+                api_key=settings.AI_API_KEY_3, model=settings.AI_MODEL
+            )
         except Exception as exc:  # noqa: BLE001 — a broken lane is honest, not fatal
             logger.warning("query-expansion: AI lane unavailable: %s", exc)
             return {

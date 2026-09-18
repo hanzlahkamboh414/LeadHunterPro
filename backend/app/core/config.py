@@ -92,15 +92,33 @@ class Settings(BaseSettings):
     # Optional: falls back to AI_API_KEY when unset.
     AI_API_KEY_2: str = Field(default="", repr=False)  # secret
 
-    # Model for the DEEP lanes — every caller of ``make_ai_ask()`` (the
-    # deep-research stage, discovery query expansion, Phase H template
-    # generation, source-scout proposals/probation). These stages do the deep
-    # thinking and parse structured JSON, so they run agnes-3-flash: verified
-    # 200 and returns CLEAN JSON (no markdown fences — 2.5 wraps output in
-    # ```json) at 25-40s/call. That latency is acceptable here because the
-    # deep lanes are low-volume and never block a lead's main pipeline stages.
+    # Model for the DEEP lanes — callers of ``make_ai_ask()`` that must emit
+    # structured JSON (the deep-research stage, Phase H template generation,
+    # source-scout proposals/probation). These stages do the deep thinking and
+    # parse structured JSON.
+    #
+    # 2026-09-18: switched from agnes-3-flash to agnes-2.5-flash. agnes-3-flash
+    # went 402 "Insufficient credits" — measured live on this key, same minute
+    # as a 200 from 2.5 — and took every deep lane down with it. The deep lanes
+    # were dead for want of a model that had credit, not for want of quality.
+    #
+    # The fence caveat that originally motivated agnes-3 is handled in CODE
+    # now, not by the model: every structured-JSON consumer already strips
+    # ```json fences (ai/scorer.py, lead_research/company_research.py,
+    # lead_research/person_research_ai.py, lead_research/intent_timing.py,
+    # source_scout/proposals.py, source_scout/adapter_writer.py,
+    # campaigns/spamcheck.py), so 2.5's fenced output parses cleanly.
+    #
+    # Cost of the switch: 2.5 reasons less than 3 on the heavy lanes, and is
+    # 4-6x faster (3-7s vs 25-40s/call). Accepted because a dead lane reasons
+    # not at all — putting agnes-3 back is a one-line change once it has credit.
+    #
+    # NOT every make_ai_ask caller: discovery query expansion passes
+    # ``model=AI_MODEL`` explicitly (2026-09-18). It is the first AI call of
+    # every job and asks for breadth, not JSON, so the deep model bought
+    # nothing there while spending the most credits.
     # Falls back to AI_MODEL when unset, so an old .env keeps working.
-    AI_MODEL_DEEP: str = "agnes-3-flash"
+    AI_MODEL_DEEP: str = "agnes-2.5-flash"
 
     # Third AI key for the discovery dork/TEMPLATE-GENERATION lane (Phase H,
     # wired into live runs by Sprint2.11). A separate key lets the 3rd AI

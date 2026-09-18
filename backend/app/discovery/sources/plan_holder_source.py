@@ -59,6 +59,7 @@ from typing import Any, Callable
 from urllib.parse import urlparse
 
 from app.discovery.pdf_plan_holder_parser import (
+    STATUS_TOO_LARGE,
     PlanHolderRow,
     PdfPlanHolderParser,
 )
@@ -99,6 +100,14 @@ _DORK_TEMPLATES = (
 #: already-parsed PDFs (``skip_pdfs``), so a bigger batch per pass means more
 #: distinct documents get examined before the source honestly reports exhaust.
 MAX_PDFS = 10
+
+#: Largest body worth pulling over the wire. The parser refuses documents past
+#: ``MAX_PAGES``, so this is the same bound applied one layer earlier: stop a
+#: huge response at the socket instead of buffering it into memory to discover
+#: it is huge. Every real plan-holder list parsed so far is far under 2 MB (the
+#: 4-page HR Green fixture is ~100 KB), so 12 MB is ~120x headroom — it exists
+#: to refuse a spec book, not to trim a large roster.
+MAX_PDF_BYTES = 12 * 1024 * 1024
 
 #: Default results asked of each provider per dork. Was 5, raised to 10 with
 #: MAX_PDFS: the lazy loop only ever surfaces unseen PDFs, so a richer result
@@ -418,6 +427,7 @@ class PlanHolderSource(BaseSource):
         fetch_failures = 0
         fetched = 0
         parse_unreadable = 0
+        parse_too_large = 0
         # Galti #2 relevance gate: rows with NO email. A plan-holder row with an
         # email is a contactable company; one without (phone/company-only from a
         # giant spec, RFP attachment, council agenda or newsletter) cannot clear
@@ -453,7 +463,14 @@ class PlanHolderSource(BaseSource):
             else:
                 # A reachable PDF with no usable rows is not a fetch failure —
                 # it is a layout/scan mismatch we cannot extract from yet.
-                parse_unreadable += 1
+                # A document past MAX_PAGES is counted SEPARATELY: "too long to
+                # read" and "read, no table" are different facts, and merging
+                # them would hide a dork that keeps surfacing spec books behind
+                # a number that looks like ordinary template drift (§6).
+                if result.report.parse_status == STATUS_TOO_LARGE:
+                    parse_too_large += 1
+                else:
+                    parse_unreadable += 1
 
         if fetch_failures == len(targeted) and not rows:
             # Every PDF was found in search but none could be fetched — the
@@ -479,6 +496,7 @@ class PlanHolderSource(BaseSource):
                 "pdfs_location_dropped": location_dropped,
                 "pdfs_fetched": fetched,
                 "pdfs_unreadable": parse_unreadable,
+                "pdfs_too_large": parse_too_large,
                 "pdfs_content_dropped": content_dropped,
                 "target_state": target_state,
                 "rows_raw": len(rows),
@@ -497,6 +515,7 @@ class PlanHolderSource(BaseSource):
             "pdfs_fetched": fetched,
             "pdfs_failed": fetch_failures,
             "pdfs_unreadable": parse_unreadable,
+            "pdfs_too_large": parse_too_large,
             "pdfs_content_dropped": content_dropped,
             "rows_raw": len(rows),
             "rows_email_less_dropped": email_less,
@@ -508,7 +527,7 @@ class PlanHolderSource(BaseSource):
         logger.info(
             "PlanHolderSource: %s — %d rows from %d PDFs (%d found, %d "
             "location-dropped, %d content-dropped, %d fetched, %d failed, %d "
-            "unreadable, %d email-less dropped)",
+            "unreadable, %d too large, %d email-less dropped)",
             SourceStatus.SUCCESS.value,
             len(records),
             len(rows),
@@ -518,6 +537,7 @@ class PlanHolderSource(BaseSource):
             fetched,
             fetch_failures,
             parse_unreadable,
+            parse_too_large,
             email_less,
         )
         return SourceStatus.SUCCESS, records[:limit], metadata
@@ -767,7 +787,10 @@ class PlanHolderSource(BaseSource):
                 return self._fetch(url)
             return self._default_fetch(url)
         except Exception as exc:  # noqa: BLE001 — one PDF never kills the run
-            logger.info("PlanHolderSource: %s unreachable — %s", url, exc)
+            # "not fetched", not "unreachable": an oversize body is a refusal
+            # by MAX_PDF_BYTES, and calling that unreachable would misreport a
+            # document we deliberately declined as one we could not reach.
+            logger.info("PlanHolderSource: %s not fetched — %s", url, exc)
             return None
 
     @staticmethod
@@ -787,11 +810,35 @@ class PlanHolderSource(BaseSource):
 
         import requests  # noqa: PLC0415
 
+        # stream=True is load-bearing: plain GET buffers the ENTIRE body before
+        # returning, so by the time any size check could run the bytes are
+        # already resident — the check would only be a post-mortem. Streaming
+        # lets the declared length be refused before the body is read, and caps
+        # an undeclared/lying length mid-read.
         resp = requests.get(
-            url, headers=_HEADERS, timeout=_TIMEOUT, allow_redirects=True
+            url, headers=_HEADERS, timeout=_TIMEOUT, allow_redirects=True,
+            stream=True,
         )
-        resp.raise_for_status()
-        return resp.content
+        try:
+            resp.raise_for_status()
+            try:
+                declared = int(resp.headers.get("Content-Length") or 0)
+            except (TypeError, ValueError):
+                declared = 0
+            if declared > MAX_PDF_BYTES:
+                raise ValueError(
+                    f"Content-Length {declared} is past MAX_PDF_BYTES "
+                    f"{MAX_PDF_BYTES}"
+                )
+            body = resp.raw.read(MAX_PDF_BYTES + 1, decode_content=True)
+        finally:
+            resp.close()
+        if len(body) > MAX_PDF_BYTES:
+            raise ValueError(
+                f"body read past MAX_PDF_BYTES {MAX_PDF_BYTES} with no usable "
+                "Content-Length"
+            )
+        return body
 
     # -- row -> company record ---------------------------------------------
 

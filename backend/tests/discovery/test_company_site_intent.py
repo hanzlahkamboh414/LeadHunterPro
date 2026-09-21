@@ -16,10 +16,13 @@ from app.discovery.intent.company_site import CompanySiteIntentPlugin
 from app.discovery.sources.status import SourceStatus
 from app.engines.lead.lead_models import IntentEvidenceType
 from tests.fixtures.intent_pages import (
+    CHROME_ONLY_SITE,
+    CHROME_SITE,
     EXPANSION_ABOUT_HTML,
     HIRING_CAREERS_HTML,
     NO_INTENT_HTML,
     PROJECT_HOME_HTML,
+    chrome_page,
 )
 
 BASE = "https://texasskylineco.com"
@@ -128,3 +131,85 @@ class TestHonestOutcomes:
         assert evidence == []
         assert metadata["note"] == "no website to crawl"
         assert fetcher.fetched == []
+
+
+class TestSiteChrome:
+    """A phrase on most of a site's pages is the template, not the page.
+
+    Regression guard for the live defect of 2026-09-18: the footer careers
+    promo on turnerconstruction.com turned ``/``, ``/services``,
+    ``/projects`` and ``/insights`` into four "hiring" evidence rows while
+    none of those pages said anything about hiring. The rule is phrase
+    frequency across the pages already fetched — no model, no AI.
+    """
+
+    def test_the_shared_footer_is_not_evidence(self):
+        plugin = _plugin(CHROME_SITE)
+        status, evidence, metadata = plugin.collect_evidence(
+            company_name="Texas Skyline Roofing",
+            website=BASE,
+        )
+
+        urls = {e.source_url for e in evidence}
+        assert f"{BASE}/" not in urls
+        assert f"{BASE}/services" not in urls
+        assert f"{BASE}/projects" not in urls, (
+            "a page whose only hiring phrase is the global footer carries "
+            "no hiring evidence"
+        )
+        assert metadata["chrome_matches"] > 0
+
+    def test_the_genuine_hiring_page_is_kept(self):
+        """The other half of the rule: real page content must survive.
+
+        ``/careers`` matches the footer too, but it also says "Now hiring"
+        in its own meta description. Dropping the whole page would lose the
+        one true signal on the site.
+        """
+        plugin = _plugin(CHROME_SITE)
+        status, evidence, _ = plugin.collect_evidence(
+            company_name="Texas Skyline Roofing",
+            website=BASE,
+        )
+
+        assert status is SourceStatus.SUCCESS
+        hiring = [e for e in evidence if e.type is IntentEvidenceType.hiring]
+        assert len(hiring) == 1
+        assert hiring[0].source_url == f"{BASE}/careers"
+        assert "now hiring" in hiring[0].snippet.lower(), (
+            "the cited phrase must be the page's own words, not the footer's"
+        )
+
+    def test_a_site_that_is_all_chrome_is_empty_and_says_why(self):
+        """Suppression must never be silent (CLAUDE.md §6)."""
+        plugin = _plugin(CHROME_ONLY_SITE)
+        status, evidence, metadata = plugin.collect_evidence(
+            company_name="Texas Skyline Roofing",
+            website=BASE,
+        )
+
+        assert status is SourceStatus.EMPTY
+        assert evidence == []
+        assert metadata["note"] == "only site-wide chrome matched"
+        assert metadata["chrome_phrases"] == ["join our team"]
+
+    def test_a_sample_too_small_to_call_anything_chrome_is_left_alone(self):
+        """Two pages sharing a sentence is not a site-wide pattern.
+
+        Without this floor a site whose only two reachable pages both
+        mention hiring would have BOTH signals suppressed — the rule would
+        destroy the evidence it exists to protect.
+        """
+        site = {
+            "/": chrome_page("Acme Roofing", "  <p>Roofing in Dallas.</p>"),
+            "/about": chrome_page("About | Acme Roofing", "  <p>Since 1998.</p>"),
+        }
+        plugin = _plugin(site)
+        status, evidence, _ = plugin.collect_evidence(
+            company_name="Acme Roofing",
+            website=BASE,
+        )
+
+        assert status is SourceStatus.SUCCESS
+        assert {e.type for e in evidence} == {IntentEvidenceType.hiring}
+        assert len(evidence) == 2

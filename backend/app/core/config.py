@@ -184,6 +184,27 @@ class Settings(BaseSettings):
     # verdict quality ever regresses.
     HOMEPAGE_PRE_VERDICT: bool = True
 
+    # Company Signal Intelligence engine, Phase 1 (docs/architecture/
+    # signal_intelligence_engine.md §10). Switches ON the three already-built,
+    # already-tested intent plugins (usaspending / google_news / company_site)
+    # for every lead that SURVIVES the Stage 1c not-a-client shortcut, and
+    # stores what they return as canonical evidence in research_evidence.db —
+    # company-keyed, so re-research refines instead of duplicating.
+    #
+    # Placed after Stage 1c on purpose: the plugins make real network calls,
+    # and running them before the client-fit verdict would spend them on the
+    # non-client leads the pre-verdict exists to drop (the measured leak).
+    # No AI is involved in this phase — it is evidence collection only.
+    #
+    # Kill-switch: these are three live third-party endpoints. If one turns
+    # slow or starts blocking, set false rather than editing code.
+    #
+    # No timeout knob here on purpose: each plugin already owns its ceiling
+    # (google_news DEFAULT_TIMEOUT=15, usaspending=30) and collect_evidence()
+    # takes no timeout argument, so a config value here would be a knob that
+    # silently does nothing (CLAUDE.md §12 — no fake switches).
+    INTENT_EVIDENCE_ENABLED: bool = True
+
     # Phase 4 load management — bounded CONCURRENT pipelines. Every submitted
     # job used to spawn its worker immediately, so 10 simultaneous users meant
     # 10 streaming pipelines (10 discovery producers + 30 research consumer

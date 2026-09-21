@@ -129,6 +129,7 @@ def test_lead_dossier_roundtrip():
         recommendation="contact_now",
         sources_checked=["website", "search"],
         source_errors={"tavily": "timeout"},
+        signal_intelligence={"recommended_angle": "Bid Volume Support"},
     )
     d = ld.to_dict()
     ld2 = LeadDossier.from_dict(d)
@@ -142,6 +143,7 @@ def test_lead_dossier_roundtrip():
     assert ld2.recommendation == "contact_now"
     assert ld2.sources_checked == ["website", "search"]
     assert ld2.source_errors == {"tavily": "timeout"}
+    assert ld2.signal_intelligence == {"recommended_angle": "Bid Volume Support"}
 
 
 def test_lead_dossier_defaults():
@@ -155,3 +157,4 @@ def test_lead_dossier_defaults():
     assert ld.recommendation == "skip"
     assert ld.sources_checked == []
     assert ld.source_errors == {}
+    assert ld.signal_intelligence == {}

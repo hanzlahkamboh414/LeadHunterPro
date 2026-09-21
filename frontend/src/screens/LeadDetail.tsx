@@ -1,9 +1,9 @@
 import { useState } from "react";
 import { Link, useLocation, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, ExternalLink } from "lucide-react";
+import { Activity, ArrowLeft, BrainCircuit, ChevronDown, ChevronUp, ExternalLink, Sparkles, Target } from "lucide-react";
 import { api } from "../api/client";
-import type { EvidenceFact } from "../types";
+import type { CompanyIntelligence as CompanyIntelligenceData, EvidenceFact } from "../types";
 import { CopyButton } from "../components/CopyButton";
 import { Spinner } from "../components/StatusChip";
 import { recommendationBadge, recommendationLabel, scoreColor } from "../lib/format";
@@ -101,6 +101,10 @@ export default function LeadDetail() {
         </div>
       )}
 
+      {data.signal_intelligence && (
+        <CompanyIntelligence intelligence={data.signal_intelligence} />
+      )}
+
       {/* Sections */}
       <div className="mt-6 space-y-5">
         <Section title="Company" subtitle={data.refined_domain ? `domain: ${data.refined_domain}` : undefined}>
@@ -164,6 +168,118 @@ export default function LeadDetail() {
     </div>
   );
 }
+
+function CompanyIntelligence({ intelligence }: { intelligence: CompanyIntelligenceData }) {
+  const activity = intelligence.recent_activity || [];
+  const signals = intelligence.signals || [];
+  const pains = intelligence.pain_hypotheses || [];
+  const trigger = intelligence.outreach_trigger;
+  return (
+    <section className="mt-6 overflow-hidden rounded-2xl border border-indigo-400/20 bg-gradient-to-br from-indigo-500/[0.08] via-white/[0.025] to-cyan-500/[0.04]">
+      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-white/[0.07] px-5 py-4">
+        <div>
+          <div className="flex items-center gap-2 text-indigo-300">
+            <BrainCircuit className="h-4 w-4" />
+            <h2 className="text-[14px] font-semibold text-white">Company Intelligence</h2>
+          </div>
+          <p className="mt-1 text-[12px] text-slate-500">Current company activity, evidence and safe outreach guidance</p>
+        </div>
+        <span className="rounded-full border border-indigo-400/20 bg-indigo-500/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-indigo-200">
+          evidence licensed
+        </span>
+      </div>
+
+      <div className="grid gap-px bg-white/[0.06] md:grid-cols-3">
+        <IntelColumn icon={<Activity className="h-4 w-4" />} title="Recent activity" count={activity.length}>
+          {activity.length ? activity.map((item) => (
+            <div key={item.event_id} className="rounded-lg border border-white/[0.06] bg-black/10 p-3">
+              <p className="text-[12.5px] font-medium text-slate-100">{pretty(item.event_type)}</p>
+              <p className="mt-1 text-[11px] text-slate-500">{displayDate(item.occurred_at)} · {pretty(item.recency)}</p>
+            </div>
+          )) : <EmptyIntel text="No activity verified in the last 90 days." />}
+        </IntelColumn>
+
+        <IntelColumn icon={<Sparkles className="h-4 w-4" />} title="Signals" count={signals.length}>
+          {signals.length ? signals.map((signal) => (
+            <div key={signal.signal_id} className="rounded-lg border border-white/[0.06] bg-black/10 p-3">
+              <div className="flex items-start justify-between gap-2">
+                <p className="text-[12.5px] font-medium text-slate-100">{pretty(signal.signal_type)}</p>
+                <Strength value={signal.strength} />
+              </div>
+              <p className="mt-1 text-[11px] text-slate-500">{signal.event_count} event{signal.event_count === 1 ? "" : "s"} · {signal.independent_source_count} source{signal.independent_source_count === 1 ? "" : "s"}</p>
+            </div>
+          )) : <EmptyIntel text="No current signal reached the scoring threshold." />}
+        </IntelColumn>
+
+        <IntelColumn icon={<Target className="h-4 w-4" />} title="Recommended angle" count={trigger ? 1 : 0}>
+          <div className="rounded-lg border border-indigo-400/15 bg-indigo-500/[0.07] p-3">
+            <p className="text-[12.5px] font-semibold text-indigo-200">{intelligence.recommended_angle || "General Estimating Support"}</p>
+            {trigger && <>
+              <div className="mt-2"><Strength value={trigger.strength} /></div>
+              <p className="mt-2 text-[12px] leading-relaxed text-slate-300">“{trigger.wording}”</p>
+            </>}
+          </div>
+        </IntelColumn>
+      </div>
+
+      <div className="border-t border-white/[0.07] px-5 py-4">
+        <h3 className="text-[12px] font-semibold uppercase tracking-[0.12em] text-slate-400">Pain hypotheses</h3>
+        <div className="mt-3 grid gap-3 md:grid-cols-2">
+          {pains.length ? pains.map((pain) => <PainCard key={pain.hypothesis_id} pain={pain} />) : (
+            <EmptyIntel text="Unknown — no evidence-backed pain hypothesis is available." />
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function IntelColumn({ icon, title, count, children }: { icon: React.ReactNode; title: string; count: number; children: React.ReactNode }) {
+  return <div className="min-w-0 bg-[#0d111a]/90 p-4">
+    <div className="mb-3 flex items-center gap-2 text-slate-400">{icon}<h3 className="text-[11px] font-bold uppercase tracking-[0.12em]">{title}</h3><span className="ml-auto text-[10px] text-slate-600">{count}</span></div>
+    <div className="space-y-2">{children}</div>
+  </div>;
+}
+
+function PainCard({ pain }: { pain: CompanyIntelligenceData["pain_hypotheses"][number] }) {
+  const [open, setOpen] = useState(false);
+  const licensed = (pain.verdict === "VERIFIED" || pain.verdict === "LIKELY") && pain.why.length > 0;
+  const verdict = licensed ? pain.verdict : pain.verdict === "BLOCKED" ? "BLOCKED" : "UNKNOWN";
+  return <div className="rounded-xl border border-white/[0.07] bg-black/10 p-3.5">
+    <div className="flex items-start justify-between gap-3">
+      <div><p className="text-[13px] font-medium text-slate-100">{pretty(pain.pain_type)}</p><p className="mt-1 text-[11.5px] leading-relaxed text-slate-400">{pain.reasoning || "No verified explanation available."}</p></div>
+      <Strength value={verdict} />
+    </div>
+    {licensed && <p className="mt-2 text-[11px] text-slate-500">Confidence {Math.round(pain.confidence * 100)}%</p>}
+    <button onClick={() => setOpen((value) => !value)} className="mt-2 inline-flex items-center gap-1 text-[11.5px] font-medium text-indigo-300 hover:text-indigo-200">
+      Why? {open ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+    </button>
+    {open && <div className="mt-2 space-y-2 border-t border-white/[0.06] pt-2">
+      {pain.blocked_by.map((reason) => <p key={reason} className="text-[11px] text-amber-200/75">Blocked: {reason}</p>)}
+      {pain.why.length ? pain.why.map((item) => <a key={item.evidence_id} href={item.source_url} target="_blank" rel="noreferrer" className="block rounded-lg border border-white/[0.05] bg-white/[0.02] p-2.5 hover:border-indigo-400/20">
+        <div className="flex items-center justify-between gap-2"><span className="text-[11px] font-medium text-indigo-300">{item.publisher || item.source_type || "Source"}</span><span className="text-[10px] text-slate-600">{displayDate(item.published_at)}</span></div>
+        {item.title && <p className="mt-1 text-[11.5px] text-slate-200">{item.title}</p>}
+        {item.excerpt && <p className="mt-1 line-clamp-3 text-[11px] leading-relaxed text-slate-500">{item.excerpt}</p>}
+      </a>) : <p className="text-[11px] text-slate-500">Unknown — no supporting source is attached.</p>}
+    </div>}
+  </div>;
+}
+
+function Strength({ value }: { value: string }) {
+  const normalized = String(value || "UNKNOWN").toUpperCase();
+  const cls = normalized === "CONFIRMED" || normalized === "VERIFIED" || normalized === "HIGH"
+    ? "border-emerald-400/20 bg-emerald-500/10 text-emerald-300"
+    : normalized === "LIKELY" || normalized === "STRONG_INFERENCE" || normalized === "MEDIUM"
+      ? "border-cyan-400/20 bg-cyan-500/10 text-cyan-300"
+      : normalized === "WEAK_INFERENCE" || normalized === "LOW"
+        ? "border-amber-400/20 bg-amber-500/10 text-amber-300"
+        : "border-slate-500/20 bg-slate-500/10 text-slate-400";
+  return <span className={`inline-flex shrink-0 rounded-full border px-2 py-0.5 text-[9.5px] font-bold uppercase tracking-wide ${cls}`}>{pretty(normalized)}</span>;
+}
+
+function EmptyIntel({ text }: { text: string }) { return <p className="rounded-lg border border-dashed border-white/[0.08] p-3 text-[11.5px] leading-relaxed text-slate-500">{text}</p>; }
+function pretty(value: string) { return String(value || "Unknown").split("_").join(" ").toLowerCase().replace(/\b\w/g, (c: string) => c.toUpperCase()); }
+function displayDate(value: string) { if (!value) return "Date unknown"; const date = new Date(value); return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(date); }
 
 function ReasonProof({
   label,

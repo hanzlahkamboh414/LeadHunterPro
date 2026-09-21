@@ -15,7 +15,7 @@ All seams are injectable for testing.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from app.company_profile import get_profile
 from app.core.config import settings
@@ -149,6 +149,9 @@ class AILeadResearchAgent:
         domain_delivers_email: Callable[[str], bool] | None = None,
         query_yield_store: QueryYieldStore | None = None,
         fit_learning_store: FitLearningStore | None = None,
+        intent_evidence_plugins: Sequence[Any] | None = None,
+        event_ai_ask: Callable[[str], str] | None = None,
+        pain_ai_ask: Callable[[str], str] | None = None,
     ) -> None:
         self._company = company_researcher or CompanyResearcher()
         self._person = person_researcher or PersonResearcherAI()
@@ -166,6 +169,18 @@ class AILeadResearchAgent:
         # run's fit outcome per industry / source host and auto-skips a class
         # the pipeline has proven, by its own repeated verdicts, is not a buyer.
         self._fit_learning = fit_learning_store
+        # Phase 1 evidence-intake seam. Same rule as the stages above: a
+        # network-touching collaborator is INJECTED, so tests run fully
+        # offline. ``None`` means "use whatever is registered at runtime,
+        # falling back to the three built-ins" — the production behaviour.
+        # An empty list is a legitimate value and means "collect nothing".
+        self._intent_evidence_plugins = intent_evidence_plugins
+        # Phase 2 AI Call #1 seam. Production resolves the configured deep
+        # lane lazily; tests inject a deterministic offline response.
+        self._event_ai_ask = event_ai_ask
+        # Phase 4 AI Call #2 seam. The model may propose correlations only;
+        # the deterministic PAIN_GATE decides every stored verdict.
+        self._pain_ai_ask = pain_ai_ask
 
     def enable_query_yield(self, db_path: str) -> None:
         """Enable the deterministic query-yield loop against ``db_path``.
@@ -475,6 +490,23 @@ class AILeadResearchAgent:
                 )
                 return dossier
 
+        # Signal-intelligence evidence intake (Phase 1 of the Company Signal
+        # Intelligence engine). Company-scoped, and placed HERE on purpose:
+        # after the Stage 1c not-a-client shortcut above, so the live network
+        # calls are spent only on leads that survived every client-fit gate.
+        # Running it earlier would spend them on the non-client leads the
+        # pre-verdict exists to drop.
+        #
+        # No AI is involved — this is evidence collection only. Each plugin's
+        # IntentEvidence is projected onto the canonical record and stored in
+        # research_evidence.db against a stable company_id, so the next lead
+        # at the same company reuses today's evidence instead of re-fetching
+        # it. The outcome rides in sources_checked / source_errors, which the
+        # UI already renders.
+        self._collect_signal_evidence(
+            dossier, domain, sources_checked, source_errors
+        )
+
         # Stage 2: person research
         # Generic emails (info@/admin@/contact@) skip person research — there
         # is no specific individual to find; spending an AI call here would
@@ -598,3 +630,266 @@ class AILeadResearchAgent:
             email, dossier.potential_score, dossier.recommendation,
         )
         return dossier
+
+    def _collect_signal_evidence(
+        self,
+        dossier: LeadDossier,
+        domain: str,
+        sources_checked: list[str],
+        source_errors: dict[str, str],
+    ) -> None:
+        """Store buying-intent evidence for this lead's company (Phase 1).
+
+        Calls :func:`app.research.intake.collect_company_evidence`, which is
+        best-effort by construction — a third-party endpoint having a bad day
+        must never fail a lead. The outcome is recorded against the existing
+        diagnostic fields rather than a new one:
+
+        * ``sources_checked += "intent_evidence"`` when the intake ran,
+        * ``source_errors["intent_evidence"]`` when it came back with
+          anything other than VERIFIED, carrying the honest reason.
+
+        That second part is the point: a thin evidence result is reported as
+        *why* it is thin — "no provider answered" and "every provider
+        answered and had nothing" are different facts and are stored as
+        different strings (CLAUDE.md §6/§12).
+        """
+        if not settings.INTENT_EVIDENCE_ENABLED:
+            return
+        try:
+            from app.research.intake import collect_company_evidence
+            from app.research.taxonomy import ResearchState
+
+            company_name = dossier.refined_company or dossier.company.name
+            website = dossier.company.website or ""
+            location = dossier.company.location or ""
+            # The lead's own registered domain is the identity handle; the
+            # refined domain is the same company under its resolved name.
+            handle = dossier.refined_domain or domain
+
+            result = collect_company_evidence(
+                company_name=company_name,
+                domain=handle,
+                website=website,
+                location=location,
+                plugins=self._intent_evidence_plugins,
+            )
+            sources_checked.append("intent_evidence")
+            if result.state != ResearchState.VERIFIED.value:
+                source_errors["intent_evidence"] = (
+                    f"{result.state}: {result.honest_reason or result.error}"
+                )
+            logger.info(
+                "intent evidence for %s: state=%s stored=%d known=%d "
+                "(company_id=%s)",
+                dossier.email, result.state, result.evidence_stored,
+                result.evidence_known, result.company_id or "-",
+            )
+            if result.state == ResearchState.VERIFIED.value and result.company_id:
+                if result.evidence_stored > 0:
+                    self._extract_signal_events(
+                        result.company_id,
+                        company_name,
+                        dossier.email,
+                        sources_checked,
+                        source_errors,
+                    )
+                else:
+                    sources_checked.append("signal_events")
+                    logger.info(
+                        "signal events for %s: skipped AI because evidence "
+                        "was unchanged (company_id=%s)",
+                        dossier.email,
+                        result.company_id,
+                    )
+                    self._compute_company_signals(
+                        result.company_id,
+                        dossier.email,
+                        sources_checked,
+                        source_errors,
+                    )
+                self._attach_company_intelligence(
+                    dossier, result.company_id, sources_checked
+                )
+        except Exception as exc:  # noqa: BLE001 — never fail a lead over this
+            source_errors["intent_evidence"] = f"{type(exc).__name__}: {exc}"
+            logger.exception("intent evidence intake failed for %s", dossier.email)
+
+    def _extract_signal_events(
+        self,
+        company_id: str,
+        company_name: str,
+        email: str,
+        sources_checked: list[str],
+        source_errors: dict[str, str],
+    ) -> None:
+        """Run Phase 2 once for evidence not already represented by events."""
+        from app.ai.gateway import make_ai_ask
+        from app.research.events import extract_company_events
+        from app.research.store import ResearchEvidenceStore
+
+        sources_checked.append("signal_events")
+        try:
+            store = ResearchEvidenceStore()
+            covered = {
+                evidence_id
+                for event in store.events_for_company(company_id)
+                for evidence_id in event.evidence_ids
+            }
+            pending = [
+                item for item in store.evidence_for_company(company_id)
+                if item.evidence_id not in covered
+            ]
+            if not pending:
+                logger.info(
+                    "signal events for %s: no uncovered evidence (company_id=%s)",
+                    email, company_id,
+                )
+                self._compute_company_signals(
+                    company_id, email, sources_checked, source_errors
+                )
+                return
+            ask = self._event_ai_ask or make_ai_ask()
+            result = extract_company_events(
+                pending, company_name=company_name, ai_ask=ask
+            )
+            stored = sum(1 for event in result.events if store.add_event(event))
+            if result.rejections:
+                source_errors["signal_events"] = (
+                    f"{len(result.rejections)} proposal(s) rejected: "
+                    + "; ".join(result.rejections)
+                )
+            logger.info(
+                "signal events for %s: evidence=%d accepted=%d stored=%d "
+                "rejected=%d (company_id=%s)",
+                email, len(pending), len(result.events), stored,
+                len(result.rejections), company_id,
+            )
+            self._compute_company_signals(
+                company_id, email, sources_checked, source_errors
+            )
+        except Exception as exc:  # noqa: BLE001 — intelligence is additive
+            source_errors["signal_events"] = f"{type(exc).__name__}: {exc}"
+            logger.exception("signal event extraction failed for %s", email)
+
+    def _compute_company_signals(
+        self,
+        company_id: str,
+        email: str,
+        sources_checked: list[str],
+        source_errors: dict[str, str],
+    ) -> None:
+        """Compute and persist the deterministic Phase 3 signal snapshot."""
+        from app.research.signals import compute_company_signals
+        from app.research.store import ResearchEvidenceStore
+
+        sources_checked.append("signal_scoring")
+        try:
+            store = ResearchEvidenceStore()
+            result = compute_company_signals(
+                store.events_for_company(company_id),
+                store.evidence_for_company(company_id),
+            )
+            store.replace_signals(company_id, result.signals)
+            if result.contradictions:
+                source_errors["signal_scoring"] = (
+                    f"{len(result.contradictions)} contradiction(s) excluded: "
+                    + "; ".join(result.contradictions)
+                )
+            logger.info(
+                "signal scoring for %s: signals=%d contradictions=%d "
+                "excluded_events=%d (company_id=%s)",
+                email, len(result.signals), len(result.contradictions),
+                len(result.excluded_event_ids), company_id,
+            )
+            if result.signals:
+                self._infer_company_pain(
+                    company_id, email, sources_checked, source_errors
+                )
+        except Exception as exc:  # noqa: BLE001 — intelligence is additive
+            source_errors["signal_scoring"] = f"{type(exc).__name__}: {exc}"
+            logger.exception("signal scoring failed for %s", email)
+
+    def _infer_company_pain(
+        self,
+        company_id: str,
+        email: str,
+        sources_checked: list[str],
+        source_errors: dict[str, str],
+    ) -> None:
+        """Run cached AI Call #2 and persist deterministic PAIN_GATE verdicts."""
+        from app.ai.gateway import make_ai_ask
+        from app.research.pain import (
+            infer_company_pain,
+            pain_basis_hash,
+        )
+        from app.research.store import ResearchEvidenceStore
+
+        sources_checked.append("pain_inference")
+        try:
+            store = ResearchEvidenceStore()
+            events = store.events_for_company(company_id)
+            signals = store.signals_for_company(company_id)
+            evidence = store.evidence_for_company(company_id)
+            basis = pain_basis_hash(events, signals)
+            if store.pain_basis_hash(company_id) == basis:
+                logger.info(
+                    "pain inference for %s: skipped AI because event/signal "
+                    "snapshot was unchanged (company_id=%s)",
+                    email, company_id,
+                )
+                return
+            ask = self._pain_ai_ask or make_ai_ask()
+            result = infer_company_pain(
+                events, signals, evidence, ai_ask=ask
+            )
+            store.replace_pain_hypotheses(
+                company_id, result.hypotheses, basis_hash=basis
+            )
+            if result.rejections:
+                source_errors["pain_inference"] = (
+                    f"{len(result.rejections)} proposal(s) rejected: "
+                    + "; ".join(result.rejections)
+                )
+            logger.info(
+                "pain inference for %s: proposed=%d stored=%d rejected=%d "
+                "(company_id=%s)",
+                email, len(result.hypotheses) + len(result.rejections),
+                len(result.hypotheses), len(result.rejections), company_id,
+            )
+        except Exception as exc:  # noqa: BLE001 — intelligence is additive
+            source_errors["pain_inference"] = f"{type(exc).__name__}: {exc}"
+            logger.exception("pain inference failed for %s", email)
+
+    def _attach_company_intelligence(
+        self,
+        dossier: LeadDossier,
+        company_id: str,
+        sources_checked: list[str],
+    ) -> None:
+        """Attach and persist the Phase 5 evidence-licensed UI snapshot."""
+        from app.research.outreach import (
+            build_company_intelligence,
+            build_outreach_trigger,
+        )
+        from app.research.store import ResearchEvidenceStore
+
+        store = ResearchEvidenceStore()
+        company = store.get_company(company_id)
+        if company is None:
+            raise ValueError(f"unknown company_id {company_id!r}")
+        pains = store.pain_hypotheses_for_company(company_id)
+        payload = build_company_intelligence(
+            company,
+            store.events_for_company(company_id),
+            store.signals_for_company(company_id),
+            pains,
+            store.evidence_for_company(company_id),
+            coverage=store.latest_coverage_for_company(company_id),
+        )
+        store.replace_outreach_trigger(
+            company_id,
+            build_outreach_trigger(company, pains),
+        )
+        dossier.signal_intelligence = payload
+        sources_checked.append("company_intelligence")

@@ -203,6 +203,7 @@ class LeadDetail(BaseModel):
     recommendation: str = "skip"
     sources_checked: list = Field(default_factory=list)
     source_errors: dict = Field(default_factory=dict)
+    signal_intelligence: dict = Field(default_factory=dict)
     #: Extraction date (``YYYY-MM-DD``) — when this lead was first researched.
     created_at: str = ""
     folder: str = ""

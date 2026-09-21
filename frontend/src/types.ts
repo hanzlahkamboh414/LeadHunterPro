@@ -143,6 +143,55 @@ export interface EvidenceFact {
   confidence: string;
 }
 
+export interface IntelligenceEvidence {
+  evidence_id: string;
+  source_url: string;
+  source_type: string;
+  publisher: string;
+  published_at: string;
+  title: string;
+  excerpt: string;
+}
+
+export interface CompanyIntelligence {
+  company_id: string;
+  company_name: string;
+  recent_activity: Array<{
+    event_id: string;
+    event_type: string;
+    occurred_at: string;
+    confidence: number;
+    recency: string;
+    evidence_ids: string[];
+  }>;
+  signals: Array<{
+    signal_id: string;
+    signal_type: string;
+    strength: string;
+    score: number;
+    recency: string;
+    contradiction: string[];
+    event_count: number;
+    independent_source_count: number;
+  }>;
+  pain_hypotheses: Array<{
+    hypothesis_id: string;
+    pain_type: string;
+    verdict: string;
+    confidence: number;
+    reasoning: string;
+    blocked_by: string[];
+    why: IntelligenceEvidence[];
+  }>;
+  recommended_angle: string;
+  outreach_trigger: {
+    strength: string;
+    wording: string;
+    evidence_ids: string[];
+  };
+  coverage: Record<string, unknown>;
+}
+
 export interface LeadDetail {
   email: string;
   domain: string;
@@ -179,6 +228,7 @@ export interface LeadDetail {
   recommendation: string;
   sources_checked: string[];
   source_errors: Record<string, string>;
+  signal_intelligence?: CompanyIntelligence;
   /** Extraction date (YYYY-MM-DD). */
   created_at: string;
   folder: string;
@@ -676,6 +726,31 @@ export interface PhonePoolStats {
   by_trade: Record<string, number>;
   by_state: Record<string, number>;
   mine: number;
+  /** Per-state rows that would serve RIGHT NOW (unclaimed, not parked) — the
+   *  honest "is location mein kitna naya data hai" number. A state whose
+   *  numbers were already handed out is absent from this map even though
+   *  `by_state` still counts them. */
+  servable_by_state: Record<string, number>;
+  servable_total: number;
+}
+
+/** One user's row in the admin phone-claims report. */
+export interface PhoneClaimRow {
+  user_id: string;
+  username: string;
+  total: number;
+  visible: number;
+  hidden: number;
+  first_claimed: string;
+  last_claimed: string;
+}
+
+/** Admin view of the call sheets: what each user SEES vs the stock a newer
+ *  search pushed off-screen (still owned, still invisible to everyone). */
+export interface PhoneClaimsReport {
+  total_claims: number;
+  total_hidden: number;
+  by_user: PhoneClaimRow[];
 }
 
 /** Signup category — which verticals the account uses. */

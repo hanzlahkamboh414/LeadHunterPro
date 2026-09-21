@@ -241,6 +241,7 @@ class LeadDossier:
     recommendation: str = "skip"  # contact_now | nurture | skip
     sources_checked: list[str] = field(default_factory=list)
     source_errors: dict[str, str] = field(default_factory=dict)
+    signal_intelligence: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -257,6 +258,7 @@ class LeadDossier:
             "recommendation": self.recommendation,
             "sources_checked": self.sources_checked,
             "source_errors": self.source_errors,
+            "signal_intelligence": self.signal_intelligence,
         }
 
     @staticmethod
@@ -275,4 +277,5 @@ class LeadDossier:
             recommendation=d.get("recommendation", "skip"),
             sources_checked=list(d.get("sources_checked", [])),
             source_errors=dict(d.get("source_errors", {})),
+            signal_intelligence=dict(d.get("signal_intelligence", {})),
         )

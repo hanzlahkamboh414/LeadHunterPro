@@ -34,6 +34,26 @@ from app.main import app
 from tests.campaigns.test_campaigns import NOW, Clock, _dossier, _http_error
 
 
+def test_safe_signal_trigger_bypasses_ai():
+    dossier = _dossier("jane@acme.com")
+    dossier.signal_intelligence = {
+        "outreach_trigger": {
+            "strength": "weak_inference",
+            "wording": "As bid volume picks up, flexible estimating support can help.",
+        }
+    }
+    calls = []
+
+    def ask(prompt):
+        calls.append(prompt)
+        raise AssertionError("approved deterministic trigger must bypass AI")
+
+    assert personalize.generate_hook(ask, dossier) == (
+        "As bid volume picks up, flexible estimating support can help."
+    )
+    assert calls == []
+
+
 def _http_error(code: int) -> requests.HTTPError:  # re-exported shape
     resp = requests.Response()
     resp.status_code = code

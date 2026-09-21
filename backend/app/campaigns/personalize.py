@@ -172,6 +172,16 @@ def generate_hook(ask: Ask, dossier: LeadDossier) -> str:
     """One AI call -> the cleaned opening line ('' = none). Exceptions
     PROPAGATE: the scheduler decides (best-effort — a failing AI must not
     block the send, but the failure is logged, never swallowed here)."""
+    intelligence = dossier.signal_intelligence or {}
+    trigger = intelligence.get("outreach_trigger", {})
+    if isinstance(trigger, dict) and trigger.get("strength") in {
+        "confirmed", "strong_inference", "weak_inference", "none",
+    }:
+        wording = trigger.get("wording", "")
+        if isinstance(wording, str):
+            approved = clean_hook(wording)
+            if approved:
+                return approved
     return clean_hook(ask(build_prompt(dossier)))
 
 

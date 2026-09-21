@@ -7,6 +7,16 @@ USAspending page — traceable per lead schema hard rule #5. ``requests``
 is used directly; no API key, no extra dependency. Failures (non-200,
 network errors) are ``UNAVAILABLE``, never a fabricated award. Offline
 tests monkeypatch ``requests``.
+
+**Defect found live, 2026-09-18 (fixed here).** The request body omitted
+``filters.award_type_codes`` and ``subawards``, both required by this
+endpoint, so every call answered ``422`` and this plugin had never returned
+a single award. The failure was invisible because the 422 was reported as
+``UNAVAILABLE`` — "the source is down" — which reads as a passing outage
+rather than a bug on our side. Two things changed: the body now carries the
+required keys (verified live: 200 with real awards), and HTTP failures are
+split by whose fault they are (§ :class:`SourceFailureReason`), with the
+API's own explanation kept in ``metadata["detail"]``.
 """
 
 from __future__ import annotations
@@ -18,7 +28,7 @@ import requests
 
 from app.discovery.intent.base import BaseIntentPlugin
 from app.discovery.plugins.base_plugin import PluginCapability
-from app.discovery.sources.status import SourceStatus
+from app.discovery.sources.status import SourceFailureReason, SourceStatus
 from app.engines.lead.lead_models import IntentEvidence, IntentEvidenceType
 
 logger = logging.getLogger(__name__)
@@ -43,6 +53,12 @@ FIELDS = (
     "End Date",
     "Description",
 )
+
+#: Contract award type codes (the A–D definitive-contract family).
+#: REQUIRED by the endpoint: without it the API answers
+#: ``422 Missing value: 'filters|award_type_codes' is a required field`` and
+#: this plugin returns nothing. See the module docstring.
+AWARD_TYPE_CODES = ("A", "B", "C", "D")
 
 #: Network failures that count as "unavailable". Captured at import so a
 #: monkeypatched ``requests`` (offline tests) still resolves the tuple.
@@ -72,9 +88,17 @@ class USAspendingPlugin(BaseIntentPlugin):
             "filters": {
                 "recipient_search_text": [company_name.strip()],
                 "time_period": [{"start_date": START_DATE, "end_date": END_DATE}],
+                # Required by the endpoint; omitting it is a 422, not an
+                # empty search (see AWARD_TYPE_CODES).
+                "award_type_codes": list(AWARD_TYPE_CODES),
             },
             "fields": list(FIELDS),
+            "page": 1,
             "limit": 20,
+            "sort": "Award Amount",
+            "order": "desc",
+            # Required by the endpoint as well.
+            "subawards": False,
         }
 
         try:
@@ -87,18 +111,27 @@ class USAspendingPlugin(BaseIntentPlugin):
             )
             return SourceStatus.UNAVAILABLE, [], {
                 "source": self.name,
+                "reason": SourceFailureReason.ACCESS_ERROR.value,
                 "error": str(exc),
             }
         if response.status_code != 200:
+            reason = self._failure_reason(response.status_code)
+            detail = self._error_detail(response)
             logger.warning(
-                "USAspendingPlugin: API non-200 for %r: %s",
-                company_name,
+                "USAspendingPlugin: HTTP %s (%s) for %r%s",
                 response.status_code,
+                reason.value,
+                company_name,
+                f" — {detail}" if detail else "",
             )
-            return SourceStatus.UNAVAILABLE, [], {
+            metadata: dict[str, Any] = {
                 "source": self.name,
                 "status": response.status_code,
+                "reason": reason.value,
             }
+            if detail:
+                metadata["detail"] = detail
+            return SourceStatus.ERROR, [], metadata
 
         try:
             data = response.json()
@@ -108,20 +141,56 @@ class USAspendingPlugin(BaseIntentPlugin):
                 company_name,
                 exc,
             )
-            return SourceStatus.UNAVAILABLE, [], {
+            return SourceStatus.ERROR, [], {
                 "source": self.name,
+                "reason": SourceFailureReason.SOURCE_ERROR.value,
                 "error": str(exc),
             }
 
         evidence = [self._to_evidence(award) for award in (data.get("results") or [])]
         evidence = [e for e in evidence if e is not None]
         if not evidence:
-            return SourceStatus.EMPTY, [], {"source": self.name, "query": company_name}
+            return SourceStatus.EMPTY, [], {
+                "source": self.name,
+                "reason": SourceFailureReason.NO_DATA.value,
+                "query": company_name,
+            }
         return SourceStatus.SUCCESS, evidence, {
             "source": self.name,
             "query": company_name,
             "results": len(evidence),
         }
+
+    # -- failure classification -------------------------------------------
+
+    @staticmethod
+    def _failure_reason(status_code: int) -> SourceFailureReason:
+        """4xx is ours, 5xx is theirs. Both are ``ERROR``; the reason tells them apart.
+
+        ``UNAVAILABLE`` is reserved for "we never reached it" (timeout, DNS,
+        refused) — the one case where the source was not given the chance to
+        answer. A 422 was answered, and the answer was that our request was
+        malformed: filing that as ``UNAVAILABLE`` ("the source is
+        unreachable") is what let a dead request body read as a flaky
+        endpoint for this plugin's whole life.
+        """
+        if 400 <= status_code < 500:
+            return SourceFailureReason.REQUEST_ERROR
+        return SourceFailureReason.SOURCE_ERROR
+
+    @staticmethod
+    def _error_detail(response: Any, limit: int = 200) -> str:
+        """The API's own explanation of a rejection, when it gives one.
+
+        Worth keeping: on the 422 that broke this plugin the response body
+        named the exact missing field, and discarding it left "unavailable"
+        as the only clue anyone could act on.
+        """
+        try:
+            body = (response.text or "").strip()
+        except Exception:  # noqa: BLE001 — a diagnostic must never raise
+            return ""
+        return " ".join(body.split())[:limit]
 
     # -- award mapping ----------------------------------------------------
 

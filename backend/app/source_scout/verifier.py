@@ -37,9 +37,13 @@ the loop, and every answer comes from a measured HTTP response:
 
 Every check lands in the verdict detail; the whole pass/fail is recorded
 via :meth:`ScoutStore.record_verdict` (stage ``mechanical``), and a PASS
-advances the lifecycle (``mark_verified``). A FAIL leaves the proposal
-in ``proposed`` — retry policy (and retirement after repeated fails)
-belongs to the probation service (sub-inc 4), not here.
+advances the lifecycle (``mark_verified``). One or two FAILs leave the
+proposal in ``proposed`` so a transient portal blip can be retried. Three
+consecutive mechanical FAILs call :meth:`ScoutStore.retire` with the full
+check detail. Probation's circuit breaker only retires PROMOTED sources
+after production failures, so it never sees these ``proposed`` rows.
+Retired dataset ids stay out of fresh SELECT — ``_used_dataset_ids``
+still scans ``retired``.
 
 Everything is injected (``fetch_fn``, ``pinned_get``) so tests stay
 hermetic — the network is only touched in production.
@@ -82,6 +86,11 @@ MIN_SOURCE_ROWS = 200
 #: publish daily; annual publishers get the benefit of the doubt up to
 #: here (400 > 366 so a yearly refresh never fails purely on leap years).
 MAX_STALENESS_DAYS = 400
+
+#: Consecutive mechanical FAILs before a still-proposed source is retired.
+#: One or two failures stay retryable. The verdict rows are the counter
+#: (a leading run of fails); there is no separate column.
+MECHANICAL_FAIL_LIMIT = 3
 
 #: One HTTP request's budget — mirrors the soda.py connector timeout.
 FETCH_TIMEOUT_S = 30.0
@@ -196,7 +205,9 @@ def verify_source(
     Returns ``{"source_id", "passed", "checks": [{name, ok, note}],
     "reason"}`` — always explainable. The verdict is recorded in the
     store (stage ``mechanical``) and a pass advances the proposal to
-    ``verified``; a fail leaves it retryable in ``proposed``.
+    ``verified``. One or two fails leave it retryable in ``proposed``.
+    Three consecutive mechanical fails (a leading run of failures) retire
+    it; the full check detail is stored as ``retire_reason``.
     """
     fetch_fn = fetch_fn or _default_fetch
     pinned_get = pinned_get or _pinned_get
@@ -341,6 +352,21 @@ def verify_source(
         source_id, STAGE_MECHANICAL, passed, detail)
     if passed:
         store.mark_verified(source_id)
+    else:
+        # Leading Falses are the current streak (newest verdict first).
+        # The fail just recorded is included. A newer pass resets it.
+        streak = 0
+        for ok in store.recent_verdicts(source_id, STAGE_MECHANICAL):
+            if ok:
+                break
+            streak += 1
+        if streak >= MECHANICAL_FAIL_LIMIT:
+            store.retire(source_id, detail)
+            logger.info(
+                "scout-verify %s: retired after %d consecutive "
+                "mechanical fails",
+                source_id, streak,
+            )
 
     logger.info("scout-verify %s: %s — %s", source_id,
                 "PASS" if passed else "FAIL", detail[:300])

@@ -17,7 +17,9 @@ something when trials are spread out):
   3. VERIFY  every ``proposed`` source gets the mechanical verifier (real
              fetch, error classify + DNS retry + IP pin + alt endpoint,
              shape/trade-evidence/volume/recency). Pass -> ``verified``;
-             fail stays ``proposed`` (retryable).
+             one or two fails stay ``proposed`` (retryable); three
+             consecutive mechanical fails -> ``retired`` (the dataset id
+             stays excluded from fresh SELECT).
   4. PROBATION  one agnes check per ``verified``/``probation`` source (the
              mechanical gate runs first — no AI spend without a logged
              fetch), auto-promote at >= 70% after 5 trials, auto-retire
@@ -109,14 +111,21 @@ def main() -> int:
     # -- 3. mechanical verify of every pending proposal ---------------------
     verified: list[str] = []
     failed: list[dict[str, str]] = []
+    retired: list[dict[str, str]] = []
     for row in store.list_status("proposed"):
         out = vf.verify_source(store, row["source_id"])
         if out["passed"]:
             verified.append(row["source_id"])
+            continue
+        entry = {"source_id": row["source_id"],
+                 "reason": out["reason"][:200]}
+        if store.get(row["source_id"])["status"] == "retired":
+            retired.append(entry)
         else:
-            failed.append({"source_id": row["source_id"],
-                           "reason": out["reason"][:200]})
-    print("VERIFY:", json.dumps({"verified": verified, "failed": failed}))
+            failed.append(entry)
+    print("VERIFY:", json.dumps({
+        "verified": verified, "failed": failed, "retired": retired,
+    }))
 
     # -- 4. agnes probation (AI; skipped with --no-ai) ----------------------
     if ai_ask is None:

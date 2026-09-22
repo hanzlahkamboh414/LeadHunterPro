@@ -208,25 +208,27 @@ def _parse_proposals(reply: str) -> list[dict[str, Any]]:
 
 
 def _ask_parsed(ai_ask: Callable[[str], str], prompt: str,
-                stage: str) -> list[dict[str, Any]]:
+                stage: str) -> tuple[list[dict[str, Any]], bool]:
     """One AI call plus ONE retry on a blank/unparseable reply.
 
-    A flash transport occasionally returns an empty body (seen live
-    2026-09-14); one retry is cheaper than a wasted generation pass. A
-    VALID empty array (``[]`` — the AI selecting/mapping nothing) is
-    returned as-is, not retried. Transport exceptions propagate — the
-    caller reports them as an LLM failure, not a crash.
+    Returns ``(parsed, malformed)``. A VALID empty array (``[]`` — the
+    model selected or mapped nothing) is ``([], False)`` and is not
+    retried. Two blank/unparseable replies are ``([], True)`` so the
+    caller can say ``malformed_response_retries_exhausted`` instead of
+    treating a transport glitch as an empty selection. Transport
+    exceptions propagate — the caller reports them as an LLM failure,
+    not a crash.
     """
     for attempt in (1, 2):
         reply = ai_ask(prompt)
         parsed = _extract_array(reply or "")
         if parsed is not None:
-            return parsed
+            return parsed, False
         logger.info(
             "scout-gen: %s stage — blank/unparseable reply "
             "(attempt %d, %d chars)", stage, attempt, len(reply or ""),
         )
-    return []
+    return [], True
 
 
 def _used_dataset_ids(store: Any) -> set[str]:
@@ -524,7 +526,7 @@ def generate_source_proposals(
 
     # -- stage 1: SELECT from the real candidates ------------------------
     try:
-        selections_raw = _ask_parsed(
+        selections_raw, select_malformed = _ask_parsed(
             ai_ask, _selection_prompt(fresh, covered, known, trades),
             "select",
         )
@@ -546,14 +548,21 @@ def generate_source_proposals(
         existing_ids.add(clean["source_id"])
         selections.append(clean)
     if not selections:
-        return {
-            "proposed": [], "rejected": rejected,
-            "reason": (
-                f"AI selected none of the {len(fresh)} real candidates"
-                if not selections_raw else
+        if select_malformed:
+            reason = "malformed_response_retries_exhausted"
+        elif not selections_raw:
+            reason = (
+                "no_candidates_qualified: AI selected none of the "
+                f"{len(fresh)} real candidates"
+            )
+        else:
+            reason = (
                 "every selection was rejected (invented id/column — "
                 "see rejected reasons)"
-            ),
+            )
+        return {
+            "proposed": [], "rejected": rejected,
+            "reason": reason,
             "catalog": summary,
         }
 
@@ -584,7 +593,7 @@ def generate_source_proposals(
         }
 
     try:
-        mappings_raw = _ask_parsed(
+        mappings_raw, map_malformed = _ask_parsed(
             ai_ask,
             _mapping_prompt(
                 [(s["source_id"], s["trade_column"],
@@ -597,6 +606,13 @@ def generate_source_proposals(
         logger.warning("scout-gen: LLM call failed: %s", exc)
         return {"proposed": [], "rejected": rejected,
                 "reason": f"LLM call failed: {exc}", "catalog": summary}
+
+    if map_malformed:
+        return {
+            "proposed": [], "rejected": rejected,
+            "reason": "malformed_response_retries_exhausted",
+            "catalog": summary,
+        }
 
     proposed: list[str] = []
     by_sid = {str(m.get("source_id", "")).strip().lower(): m

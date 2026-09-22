@@ -242,6 +242,30 @@ def test_already_used_dataset_is_not_offered_twice(tmp_path):
     assert out["catalog"]["fresh"] == 0
 
 
+def test_retired_dataset_is_not_offered_again(tmp_path):
+    """Retiring a bad proposal must not put its dataset id back into
+    SELECT. ``_used_dataset_ids`` still scans ``retired``."""
+    store = _store(tmp_path)
+    store.propose("or_first", "soda", "OR CCB",
+                  "https://data.oregon.gov/resource/pzjw-h5rt.json",
+                  {"state": "OR"}, "t")
+    store.retire("or_first", "three consecutive mechanical fails")
+
+    def boom(_prompt):
+        raise AssertionError("AI must not be called when the only candidate "
+                             "is a retired dataset")
+
+    out = pg.generate_source_proposals(
+        store, boom, existing_coverage=_COVERAGE,
+        catalog_fetch=lambda states: {"candidates": [_CAND_OR],
+                                      "queries": [], "errors": []},
+        value_sampler=_SAMPLER)
+
+    assert out["proposed"] == []
+    assert "already in use" in out["reason"]
+    assert out["catalog"]["fresh"] == 0
+
+
 def test_happy_path_skips_mapping_when_ai_selects_none(tmp_path):
     store = _store(tmp_path)
     ai = _AI("[]")
@@ -249,7 +273,7 @@ def test_happy_path_skips_mapping_when_ai_selects_none(tmp_path):
     out = _run(store, ai)
 
     assert out["proposed"] == []
-    assert "selected none" in out["reason"]
+    assert "no_candidates_qualified" in out["reason"]
     assert len(ai.prompts) == 1
 
 
@@ -393,10 +417,27 @@ def test_blank_reply_is_retried_once(tmp_path):
 
 def test_garbage_reply_is_an_honest_zero(tmp_path):
     store = _store(tmp_path)
-    out = _run(store, _AI("I could not find any datasets, sorry.",
-                          "still nothing useful"))
+    ai = _AI("I could not find any datasets, sorry.",
+             "still nothing useful")
+    out = _run(store, ai)
     assert out["proposed"] == []
-    assert "selected none" in out["reason"]
+    assert "malformed_response_retries_exhausted" in out["reason"]
+    assert "no_candidates_qualified" not in out["reason"]
+    assert len(ai.prompts) == 2
+
+
+def test_rejected_inventions_are_not_an_empty_selection(tmp_path):
+    """A non-empty reply whose ids are all sanitized away keeps its own
+    reason — neither an empty selection nor a parse failure."""
+    p = _base()
+    p["dataset_id"] = "4xk7-ygij"
+    store = _store(tmp_path)
+    pg.seed_known(store)
+    out = _run(store, _AI(json.dumps([p]), _MAP_REPLY))
+    assert out["proposed"] == []
+    assert "every selection was rejected" in out["reason"]
+    assert "no_candidates_qualified" not in out["reason"]
+    assert "malformed_response_retries_exhausted" not in out["reason"]
 
 
 def test_llm_failure_is_a_reason_not_a_crash(tmp_path):

@@ -187,7 +187,70 @@ def test_http_error_with_dead_alt_endpoint_fails_honestly(tmp_path):
     assert out["passed"] is False
     by_name = {c["name"]: c for c in out["checks"]}
     assert "also failing" in by_name["sample_fetch"]["note"]
-    # A failed verify leaves the proposal retryable, not retired.
+    # One mechanical FAIL stays proposed. The third consecutive FAIL retires.
+    assert store.get("or_ccb_license")["status"] == "proposed"
+
+
+def _failing_fetch():
+    return FakeFetch(sample_error=True, filtered_error=True,
+                     count_error=True, meta_error=True)
+
+
+def test_two_mechanical_fails_stay_proposed(tmp_path):
+    """A transient miss is retryable. Probation-stage fails do not count
+    toward the mechanical streak."""
+    store = _store_with_proposal(tmp_path)
+    ff = _failing_fetch()
+    for _ in range(2):
+        out = vf.verify_source(store, "or_ccb_license", fetch_fn=ff,
+                               clock=lambda: _NOW)
+        assert out["passed"] is False
+    store.record_verdict("or_ccb_license", "probation", False,
+                         "other stage")
+    assert store.get("or_ccb_license")["status"] == "proposed"
+
+
+def test_three_consecutive_mechanical_fails_retire(tmp_path):
+    """co_cda / CT CE / DE asbestos: the same mechanical FAIL every pass
+    becomes terminal, with the check detail stored as retire_reason."""
+    store = _store_with_proposal(tmp_path)
+    ff = _failing_fetch()
+    for _ in range(2):
+        vf.verify_source(store, "or_ccb_license", fetch_fn=ff,
+                         clock=lambda: _NOW)
+    assert store.get("or_ccb_license")["status"] == "proposed"
+
+    out = vf.verify_source(store, "or_ccb_license", fetch_fn=ff,
+                           clock=lambda: _NOW)
+
+    row = store.get("or_ccb_license")
+    assert out["passed"] is False
+    assert row["status"] == "retired"
+    assert "sample_fetch=FAIL" in (row.get("retire_reason") or "")
+    assert store.recent_verdicts(
+        "or_ccb_license", "mechanical") == [False, False, False]
+    skip = vf.verify_source(store, "or_ccb_license", fetch_fn=ff,
+                            clock=lambda: _NOW)
+    assert "nothing to verify" in skip["reason"]
+    assert store.get("or_ccb_license")["status"] == "retired"
+    assert store.recent_verdicts(
+        "or_ccb_license", "mechanical") == [False, False, False]
+
+
+def test_mechanical_pass_resets_the_fail_streak(tmp_path):
+    """A leading pass breaks the streak. A real mechanical PASS leaves
+    ``proposed`` via mark_verified, so the reset is locked by writing the
+    verdict directly, then two later fails must stay proposed."""
+    store = _store_with_proposal(tmp_path)
+    ff = _failing_fetch()
+    vf.verify_source(store, "or_ccb_license", fetch_fn=ff,
+                     clock=lambda: _NOW)
+    store.record_verdict("or_ccb_license", "mechanical", True,
+                         "injected pass")
+    for _ in range(2):
+        out = vf.verify_source(store, "or_ccb_license", fetch_fn=ff,
+                               clock=lambda: _NOW)
+        assert out["passed"] is False
     assert store.get("or_ccb_license")["status"] == "proposed"
 
 

@@ -102,7 +102,10 @@ def _store_with_proposal(tmp_path, **payload_extra):
     return store
 
 
-def _rows(n=10, phone="555-1234"):
+def _rows(n=10, phone="503-957-3452"):
+    """Ten license rows. ``phone`` must be a REAL 10-digit number — the
+    shape gate counts only values the serving lane's ``normalize_phone``
+    accepts, so a filler like "555-1234" would fail it silently."""
     return [
         {"phone_number": phone, "primary_principal_name": "Smith, John",
          "license_type": "General Contractor", "license_status": "ACTIVE",
@@ -273,7 +276,8 @@ def test_http_error_but_live_alt_endpoint_still_fails_shape_honestly(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_missing_person_column_fails(tmp_path):
-    rows = [{"phone_number": "555", "license_type": "General Contractor"}]
+    rows = [{"phone_number": "503-957-3452",
+             "license_type": "General Contractor"}]
     store = _store_with_proposal(tmp_path)
     out = vf.verify_source(
         store, "or_ccb_license",
@@ -305,6 +309,47 @@ def test_too_few_rows_with_phone_fails(tmp_path):
         clock=lambda: _NOW)
     by_name = {c["name"]: c for c in out["checks"]}
     assert by_name["sample_with_phone"]["ok"] is False
+
+
+def test_a_metric_column_cannot_be_the_phone_column(tmp_path):
+    """The live defect (2026-09-22): ``of_phone_calls_answered_within``
+    holds "0.95" on every row, so a non-empty test passed it while the
+    serving lane's ``normalize_phone`` returns '' for that value — the
+    source would have been promoted holding zero serveable phones."""
+    store = _store_with_proposal(
+        tmp_path, phone_column="of_phone_calls_answered_within")
+    rows = [{"of_phone_calls_answered_within": "0.95",
+             "primary_principal_name": "Smith, John",
+             "license_type": "General Contractor",
+             "license_status": "ACTIVE"}
+            for _ in range(10)]
+    out = vf.verify_source(
+        store, "or_ccb_license",
+        fetch_fn=FakeFetch(sample=rows, filtered=rows),
+        clock=lambda: _NOW)
+    by_name = {c["name"]: c for c in out["checks"]}
+    assert by_name["sample_with_phone"]["ok"] is False
+    assert "0 rows with a phone" in by_name["sample_with_phone"]["note"]
+    assert out["passed"] is False
+
+
+def test_junk_values_cannot_inflate_the_phone_count(tmp_path):
+    """Two real numbers among twelve rows is still too few: counting
+    non-empty cells would let the ten junk values carry the count past
+    MIN_SAMPLE_ROWS. Only values that normalize to a phone count."""
+    store = _store_with_proposal(tmp_path)
+    rows = _rows(n=2) + [
+        {"phone_number": "N/A", "primary_principal_name": "Smith, John",
+         "license_type": "General Contractor", "license_status": "ACTIVE"}
+        for _ in range(10)
+    ]
+    out = vf.verify_source(
+        store, "or_ccb_license",
+        fetch_fn=FakeFetch(sample=rows, filtered=_rows(3)),
+        clock=lambda: _NOW)
+    by_name = {c["name"]: c for c in out["checks"]}
+    assert by_name["sample_with_phone"]["ok"] is False
+    assert "2 rows with a phone" in by_name["sample_with_phone"]["note"]
 
 
 def test_wrong_trade_values_fail_the_mapping(tmp_path):

@@ -22,7 +22,9 @@ the loop, and every answer comes from a measured HTTP response:
   5. SHAPE — the sample must be a non-empty JSON list carrying the
      proposed ``phone_column``, ``person_column``, ``trade_column`` (and
      ``status_column`` when claimed), with at least MIN_SAMPLE_ROWS rows
-     that actually have a phone number.
+     whose phone value normalizes to a real number — the serving lane's
+     own bar (:func:`app.phones.store.normalize_phone`), never merely a
+     non-empty cell.
   6. TRADE EVIDENCE — a filtered sample (``$where=trade_column IN(...)``
      of the FIRST proposed slug's values) must return rows: this proves
      the AI's value mapping, which is the part it most plausibly
@@ -60,6 +62,7 @@ from urllib.parse import urlparse
 
 from app.discovery.sources._http import FetchResult, fetch as _default_fetch
 from app.discovery.sources.status import SourceStatus
+from app.phones.store import normalize_phone
 from app.source_scout.store import (
     STAGE_MECHANICAL,
     STATUS_PROPOSED,
@@ -73,8 +76,10 @@ logger = logging.getLogger(__name__)
 #: to see columns and prove a trade mapping without hammering the portal.
 SAMPLE_LIMIT = 50
 
-#: Rows in the unfiltered sample that must carry a non-empty phone —
-#: below this the "phone source" has no phones.
+#: Rows in the unfiltered sample that must carry a phone the serving lane
+#: would accept (``normalize_phone`` returns a number, not ''). Below this
+#: the "phone source" has no phones. A non-empty cell is not enough — a
+#: numeric metric column named for phones is non-empty on every row.
 MIN_SAMPLE_ROWS = 5
 
 #: A dataset must hold at least this many rows to be coverage worth
@@ -257,9 +262,16 @@ def verify_source(
         check("sample_fetch", True, fetch_reason)
 
     # -- 5. shape -----------------------------------------------------------
+    # Non-empty is not enough. A metric column whose name merely contains
+    # "phone" — ``of_phone_calls_answered_within``, "0.95" on every row —
+    # satisfied the old check while the serving lane's ``normalize_phone``
+    # returns '' for it, so a source could pass mechanical and then serve
+    # nothing. Counting only values the lane accepts makes this gate
+    # measure the contract it exists to protect.
     usable_rows = [r for r in (rows or [])
                    if isinstance(r, dict)
-                   and str(r.get(payload["phone_column"], "") or "").strip()]
+                   and normalize_phone(
+                       str(r.get(payload["phone_column"], "") or ""))]
     if status is SourceStatus.SUCCESS and rows is not None:
         check("sample_nonempty", bool(rows), "empty dataset")
         keys: set[str] = set()

@@ -14,6 +14,7 @@ import { PageHeader } from "../components/PageHeader";
 import { Select } from "../components/Select";
 import { useAuth } from "../contexts/AuthContext";
 import { US_STATE_CODES, US_STATES } from "../data/locations";
+import { latestSheetOutcomes } from "../lib/phoneOutcomes";
 import type {
   PhoneCallActivity,
   PhoneCallAction,
@@ -113,6 +114,7 @@ export default function Phones() {
   const [noteSavedId, setNoteSavedId] = useState<number | null>(null);
   const [selectedDay, setSelectedDay] = useState(() => new Date().toISOString().slice(0, 10));
   const [activity, setActivity] = useState<PhoneCallActivity | null>(null);
+  const [todayActivity, setTodayActivity] = useState<PhoneCallActivity | null>(null);
   const [activityDays, setActivityDays] = useState<string[]>([]);
 
   const stateCode = US_STATE_CODES[stateName] || "";
@@ -151,7 +153,14 @@ export default function Phones() {
   }, []);
 
   const refreshActivity = useCallback(() => {
-    api.phoneActivity(selectedDay).then(setActivity).catch(() => undefined);
+    const today = new Date().toISOString().slice(0, 10);
+    api.phoneActivity(selectedDay).then((data) => {
+      setActivity(data);
+      if (selectedDay === today) setTodayActivity(data);
+    }).catch(() => undefined);
+    if (selectedDay !== today) {
+      api.phoneActivity().then(setTodayActivity).catch(() => undefined);
+    }
     api.phoneActivityDays().then(setActivityDays).catch(() => undefined);
   }, [selectedDay]);
 
@@ -330,7 +339,11 @@ export default function Phones() {
 
   const myLeads = saved.filter((s) => s.kind === "lead");
   const myContacts = saved.filter((s) => s.kind === "contact");
-  const lastTouch = activity?.events.find((e) => e.action === "dialed" || e.action === "copied");
+  const lastTouch = todayActivity?.events.find((e) => e.action === "dialed" || e.action === "copied");
+  const sheetOutcomes = useMemo(
+    () => latestSheetOutcomes(todayActivity?.events ?? []),
+    [todayActivity],
+  );
   const callMetrics = [
     ["Dial attempts", activity?.dialed ?? 0, "bg-indigo-400"],
     ["Leads", activity?.outcomes.lead ?? 0, "bg-emerald-400"],
@@ -642,11 +655,14 @@ export default function Phones() {
                               <StickyNote className="w-3 h-3" /> Note
                             </button>
                             <button title="Not interested" onClick={() => recordEvent(l.id, "not_interested")}
-                              className="rounded-md bg-rose-500/10 px-2 py-1 text-[11.5px] text-rose-300">Not interested</button>
+                              aria-pressed={sheetOutcomes.get(l.id) === "not_interested"}
+                              className={`rounded-md px-2 py-1 text-[11.5px] ${sheetOutcomes.get(l.id) === "not_interested" ? "bg-rose-500 text-white font-semibold ring-2 ring-rose-300" : "bg-rose-500/10 text-rose-300"}`}>Not interested</button>
                             <button title="Call again later" onClick={() => recordEvent(l.id, "follow_up")}
-                              className="rounded-md bg-sky-500/10 px-2 py-1 text-[11.5px] text-sky-300">Follow up</button>
+                              aria-pressed={sheetOutcomes.get(l.id) === "follow_up"}
+                              className={`rounded-md px-2 py-1 text-[11.5px] ${sheetOutcomes.get(l.id) === "follow_up" ? "bg-sky-500 text-white font-semibold ring-2 ring-sky-300" : "bg-sky-500/10 text-sky-300"}`}>Follow up</button>
                             <button title="No answer" onClick={() => recordEvent(l.id, "no_answer")}
-                              className="rounded-md bg-white/[0.06] px-2 py-1 text-[11.5px] text-slate-300">No answer</button>
+                              aria-pressed={sheetOutcomes.get(l.id) === "no_answer"}
+                              className={`rounded-md px-2 py-1 text-[11.5px] ${sheetOutcomes.get(l.id) === "no_answer" ? "bg-slate-300 text-slate-950 font-semibold ring-2 ring-slate-200" : "bg-white/[0.06] text-slate-300"}`}>No answer</button>
                             <button title="Wrong or nonexistent number; remove from my sheet" onClick={() => recordEvent(l.id, "wrong_number")}
                               className="rounded-md bg-orange-500/10 px-2 py-1 text-[11.5px] text-orange-300">Wrong number</button>
                           </div>

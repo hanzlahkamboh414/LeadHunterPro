@@ -9,7 +9,7 @@ import { Check, Copy } from "lucide-react";
  * Shows a checkmark for ~1.4s after a successful copy — the only feedback
  * a clipboard write can honestly give (we cannot read the clipboard back).
  */
-export function CopyButton({ value, label }: { value: string; label?: string }) {
+export function CopyButton({ value, label, onCopied }: { value: string; label?: string; onCopied?: () => void }) {
   const [copied, setCopied] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -41,6 +41,7 @@ export function CopyButton({ value, label }: { value: string; label?: string }) 
       }
     }
     if (ok) {
+      onCopied?.();
       setCopied(true);
       if (timer.current) clearTimeout(timer.current);
       timer.current = setTimeout(() => setCopied(false), 1400);

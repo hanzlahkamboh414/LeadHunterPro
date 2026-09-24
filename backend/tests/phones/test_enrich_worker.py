@@ -208,3 +208,93 @@ def test_overture_lane_feeds_the_emails_vertical(stores):
 
     mine = phone_store.list_owned("alice")
     assert mine[0]["email_source"] == "overture"
+
+
+def test_unclaimed_trade_queue_verifies_without_inventing_person(stores):
+    phone_store, pending_store = stores
+    raw = _rec("6125550100", business="North Star Roofing", person_name="",
+               trade_category="", state="MN", source="mn_dli_registration")
+    raw["state_only"] = True
+    phone_store.add([raw])
+    assert phone_store.serve("", "MN", "", 1, "alice") == []
+
+    worker = PhoneEnrichmentWorker(
+        phone_store, pending_store,
+        enrich=lambda l: pytest.fail("email lane must not claim raw lead"),
+        resolve_trade_fn=lambda lead: {
+            "trade": "roofing",
+            "evidence_url": "https://northstarroofing.com/services",
+            "evidence_kind": "company_website",
+        },
+    )
+    stats = worker.run_trade_once()
+    assert stats["verified"] == 1
+    served = phone_store.serve("roofing", "MN", "", 1, "alice")
+    assert len(served) == 1
+    assert served[0]["person_name"] == ""
+    assert worker.run_trade_once()["considered"] == 0
+
+
+def test_trade_miss_is_deferred_and_one_error_does_not_stop_batch(stores):
+    phone_store, pending_store = stores
+    for n in range(3):
+        raw = _rec(f"612555010{n}", business=f"Unknown {n}",
+                   trade_category="", state="MN")
+        raw["state_only"] = True
+        phone_store.add([raw])
+
+    def resolve(lead):
+        if lead["business_name"] == "Unknown 0":
+            raise RuntimeError("temporary network error")
+        if lead["business_name"] == "Unknown 1":
+            return {"trade": "", "evidence_url": "", "evidence_kind": ""}
+        return {"trade": "roofing", "evidence_url": "https://unknown2.com/roofing",
+                "evidence_kind": "company_website"}
+
+    worker = PhoneEnrichmentWorker(
+        phone_store, pending_store, resolve_trade_fn=resolve,
+        trade_batch_size=3,
+    )
+    stats = worker.run_trade_once()
+    assert stats == {"considered": 3, "verified": 1, "unverified": 1,
+                     "errors": 1, "skipped_poison": 0}
+    assert phone_store.unclaimed_count("roofing", "MN") == 1
+    pending = phone_store.pending_trade_enrichment(10)
+    assert [r["business_name"] for r in pending] == ["Unknown 0"]
+
+
+def test_slow_trade_lookup_does_not_delay_claimed_email_lane(stores):
+    import threading
+
+    phone_store, pending_store = stores
+    raw = _rec("6125550100", business="North Star Roofing",
+               trade_category="", state="MN")
+    raw["state_only"] = True
+    phone_store.add([raw, _rec("5031110001")])
+    phone_store.serve("gc", "WA", "", 1, "alice")
+    trade_started = threading.Event()
+    release_trade = threading.Event()
+    email_done = threading.Event()
+
+    def slow_trade(lead):
+        trade_started.set()
+        release_trade.wait(2)
+        return {"trade": "", "evidence_url": "", "evidence_kind": ""}
+
+    def fast_email(lead):
+        email_done.set()
+        return {"email": "", "email_source": "", "website": ""}
+
+    worker = PhoneEnrichmentWorker(
+        phone_store, pending_store, enrich=fast_email,
+        resolve_trade_fn=slow_trade, interval_s=0.01,
+        trade_interval_s=0.01,
+        batch_size=1, trade_batch_size=1,
+    )
+    try:
+        worker.start()
+        assert trade_started.wait(1)
+        assert email_done.wait(0.5)
+    finally:
+        release_trade.set()
+        worker.stop()

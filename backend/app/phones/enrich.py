@@ -34,12 +34,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any, Callable
 from urllib.parse import urlparse
 
 from app.crawlers.html_parser import HTMLParser
 from app.discovery.sources._http import fetch as _default_fetch
+from app.email.email_cleaner import clean_emails
 from app.email.pattern_inference import infer_verified_email
+from app.discovery.tradefold import normalize_trade
+from app.phones.store import normalize_phone
 
 logger = logging.getLogger(__name__)
 
@@ -48,14 +52,13 @@ logger = logging.getLogger(__name__)
 # own website, so its emails belong to the directory, not the lead.
 from app.engines.verification.identity_verifier import _AGGREGATOR_HOSTS
 
-#: Emails that are page furniture, not contacts (tracking pixels disguised
-#: as mailto:, template placeholders, the classic wix/yelp sentinels).
-_JUNK_EMAIL_TOKENS = (
-    "example.com", "example.org", "domain.com", "yourdomain", "email.com",
-    "sentry.io", "sentry-next", "wixpress.com", "godaddy.com", "no-reply",
-    "noreply@", "donotreply",
-)
-_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")
+#: Page-furniture filtering lives in ONE place now. The local
+#: ``_JUNK_EMAIL_TOKENS``/``_IMAGE_EXTS``/``_clean_emails`` trio that used to
+#: sit here was a second, drifted copy of the rules: it knew ``email.com``
+#: and the shared cleaner did not, which is precisely how ``test@email.com``
+#: was filtered off a phone record yet stored as a research contact. Deleted
+#: 2026-09-21 — ``clean_emails`` from ``app.email.email_cleaner`` is the gate
+#: for scraped, dataset (Overture) and regex-hit addresses alike (CLAUDE.md §14).
 
 #: How many extra same-site pages to try when the homepage shows no email —
 #: the contact page is where contractors put it.
@@ -75,22 +78,6 @@ def _is_aggregator(url: str) -> bool:
     )
 
 
-def _clean_emails(raw: list[str]) -> list[str]:
-    """Drop page-furniture addresses; lowercase, dedup, keep order."""
-    seen: list[str] = []
-    for e in raw:
-        e = (e or "").strip().lower().rstrip(".")
-        if "@" not in e or "." not in e.rsplit("@", 1)[-1]:
-            continue
-        if any(t in e for t in _JUNK_EMAIL_TOKENS):
-            continue
-        if e.endswith(_IMAGE_EXTS):
-            continue
-        if e not in seen:
-            seen.append(e)
-    return seen
-
-
 def _default_search(query: str, num: int) -> list[str]:
     """Search the web via the provider registry (SearXNG primary, free).
 
@@ -101,12 +88,26 @@ def _default_search(query: str, num: int) -> list[str]:
     """
     from app.search_providers.manager import SearchProviderManager
     from app.search_providers.models import SearchQuery
+    from app.search_providers.registry import get_registry
+
+    registry = get_registry()
 
     async def _run() -> list[str]:
-        response = await SearchProviderManager().search(
-            SearchQuery(keywords=query, num_results=num),
-        )
-        return [r.url for r in response.results]
+        try:
+            response = await SearchProviderManager(registry).search(
+                SearchQuery(keywords=query, num_results=num),
+            )
+            return [r.url for r in response.results]
+        finally:
+            # asyncio.run closes this loop after _run returns. Provider
+            # sessions belong to that loop and must be closed before then.
+            for provider in registry.get_enabled():
+                close = getattr(provider, "close", None)
+                if close:
+                    try:
+                        await close()
+                    except Exception:  # noqa: BLE001 — cleanup cannot hide search results
+                        logger.warning("phone search provider close failed", exc_info=True)
 
     return asyncio.run(_run())
 
@@ -144,6 +145,65 @@ def _default_overture(phone: str) -> dict[str, str]:
         return {}
 
 
+def resolve_trade(
+    lead: dict[str, Any], *,
+    search_fn: Callable[[str, int], list[str]] | None = None,
+    fetch_fn: Callable[..., Any] | None = None,
+) -> dict[str, str]:
+    """Verify a raw phone lead's trade on its own website, or leave it raw.
+
+    A board business name is only a search key. The fetched page must show
+    both the same business and the same phone, then independently describe
+    one canonical trade outside the business name. The exact fetched page is
+    retained as evidence. No person is inferred from a business name.
+    """
+    empty = {"trade": "", "evidence_url": "", "evidence_kind": ""}
+    business = (lead.get("business_name") or "").strip()
+    phone = normalize_phone(lead.get("phone", ""))
+    words = re.findall(r"[a-z0-9]+", business.lower())
+    while words and words[-1] in {"llc", "inc", "corp", "corporation", "ltd", "co"}:
+        words.pop()
+    if len(words) < 2 or not phone:
+        return empty
+    identity = " ".join(words)
+    query = f'"{business}" {lead.get("city", "")} {lead.get("state", "")}'
+    search = search_fn or _default_search
+    fetch = fetch_fn or _default_fetch
+    parser = HTMLParser()
+    from app.search_providers.contractor_classifier import ContractorClassifier
+
+    classifier = ContractorClassifier()
+    candidates = [url for url in search(query.strip(), 6) if not _is_aggregator(url)]
+    for url in candidates[:3]:
+        result = fetch(url, timeout=12.0)
+        if not result.ok or not result.text:
+            continue
+        exact_url = getattr(result, "final_url", "") or url
+        if _is_aggregator(exact_url):
+            continue
+        parsed = parser.parse(result.text, exact_url)
+        page_identity = " ".join(re.findall(
+            r"[a-z0-9]+", (parsed.title + " " + parsed.text_content).lower()))
+        if identity not in page_identity:
+            continue
+        if phone not in {normalize_phone(p) for p in parsed.phones}:
+            continue
+        # Strip the legal business name before classifying: a registered
+        # "North Star Roofing" name alone is not a proven roofing service.
+        own_words = " ".join(re.findall(
+            r"[a-z0-9]+", " ".join((parsed.title, parsed.description,
+                                      *parsed.h1_texts, parsed.text_content[:3000])).lower()))
+        trade_text = own_words.replace(identity, " ")
+        folded = normalize_trade(trade_text)
+        verdict = classifier.classify(description=trade_text, url=exact_url)
+        classified = normalize_trade(verdict.get("trade_category", ""))
+        if (folded and folded == classified and verdict.get("accepted") and
+                verdict.get("confidence", 0) >= 0.6):
+            return {"trade": folded, "evidence_url": exact_url,
+                    "evidence_kind": "company_website"}
+    return empty
+
+
 def enrich_lead(
     lead: dict[str, Any],
     *,
@@ -177,7 +237,7 @@ def enrich_lead(
     phone = (lead.get("phone") or "").strip()
     if phone:
         hit = do_overture(phone)
-        emails = _clean_emails([hit.get("email", "")])
+        emails = clean_emails([hit.get("email", "")])
         if emails:
             return {
                 "email": emails[0],
@@ -218,7 +278,7 @@ def enrich_lead(
         if not result.ok or not result.text:
             continue
         parsed = parser.parse(result.text, url)
-        emails.extend(_clean_emails(parsed.emails))
+        emails.extend(clean_emails(parsed.emails))
         if url == site:
             # Contact pages are discovered from the homepage only — a contact
             # page linking another contact page adds nothing.

@@ -24,11 +24,7 @@ import logging
 from typing import Any, Protocol
 
 from app.ai.scorer import CompanyScorer
-from app.discovery.intent import (
-    CompanySiteIntentPlugin,
-    GoogleNewsPlugin,
-    USAspendingPlugin,
-)
+from app.discovery.intent import collect_intent_evidence
 from app.discovery.leadership_discovery import LeadershipDiscovery
 from app.engines.discovery.company.company_models import CompanyDiscoveryResult
 from app.engines.lead.lead_models import (
@@ -71,13 +67,13 @@ class ScorerProvider(Protocol):
     ) -> dict[str, Any]: ...
 
 
-def default_intent_plugins() -> list[IntentProvider]:
-    """The three free/keyless intent plugins, constructed offline-safe."""
-    return [
-        CompanySiteIntentPlugin(),
-        GoogleNewsPlugin(),
-        USAspendingPlugin(),
-    ]
+# ``default_intent_plugins`` is RE-EXPORTED, not defined here (Phase 1 of the
+# signal-intelligence engine). Its home is now ``app.discovery.intent`` — the
+# package that defines the plugins — so this module and ``app.research.intake``
+# share ONE list instead of two copies that can drift. It stays importable from
+# this path because ``run_leads.py`` and ``diagnose_lead_evidence.py`` already
+# import it from here.
+from app.discovery.intent import default_intent_plugins  # noqa: F401
 
 
 class LeadPipeline:
@@ -246,29 +242,21 @@ class LeadPipeline:
     def _collect_intent(
         self, company: CompanyDiscoveryResult, query: dict[str, Any] | None
     ) -> list[IntentEvidence]:
+        """Buying-intent evidence for one company.
+
+        Delegates to :func:`app.discovery.intent.collect_intent_evidence`,
+        which owns the loop, the per-plugin failure handling and the dedup
+        rule. That function used to live here as the only copy; the signal
+        engine's intake needs the same behaviour, so it was extracted rather
+        than duplicated (CLAUDE.md §14).
+        """
         location = str((query or {}).get("location") or "")
-        evidence: list[IntentEvidence] = []
-        seen: set[tuple[str, str]] = set()
-        for plugin in self._intent_plugins:
-            try:
-                _, items, _ = plugin.collect_evidence(
-                    company_name=company.company_name,
-                    website=company.website,
-                    location=location,
-                )
-            except Exception as exc:  # noqa: BLE001 — one bad plugin never kills the run
-                logger.warning(
-                    "intent plugin %r failed: %s",
-                    getattr(plugin, "name", type(plugin).__name__),
-                    exc,
-                )
-                continue
-            for item in items:
-                key = (item.type.value, item.source_url)
-                if item.source_url.strip() and key not in seen:
-                    seen.add(key)
-                    evidence.append(item)
-        return evidence
+        return collect_intent_evidence(
+            self._intent_plugins,
+            company_name=company.company_name,
+            website=company.website,
+            location=location,
+        ).evidence
 
     def _score(
         self,

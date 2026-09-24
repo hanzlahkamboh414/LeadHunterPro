@@ -150,15 +150,17 @@ export default function Execute() {
   }
 
   return (
-    <div className="px-8 py-7 max-w-4xl">
+    <div className="workspace-page page-focused">
       <PageHeader
         eyebrow="LeadHunter Pro"
         title="Research"
-        subtitle="Discovery → AI research → qualified leads, run as a background job you can watch live."
+        subtitle="Choose your market. Discover companies and follow their research as it happens."
       />
+      <div className="screen-tip"><span><b>01</b> Choose a market</span><span><b>02</b> Set your target</span><span><b>03</b> Review qualified leads</span></div>
 
       {/* API key (M12 baseline) */}
-      <div className="mt-6 rounded-xl border border-white/5 bg-white/[0.02] p-5">
+      <details className="ui-panel rounded-xl border p-4">
+        <summary className="text-xs font-medium text-slate-400">Advanced connection settings</summary>
         <div className="flex items-center gap-3">
           <div className="w-9 h-9 rounded-lg bg-indigo-500/15 flex items-center justify-center shrink-0">
             <KeyRound className="w-[17px] h-[17px] text-indigo-400" strokeWidth={1.75} />
@@ -166,7 +168,7 @@ export default function Execute() {
           <div className="flex-1">
             <label className="block text-[13px] text-slate-300">
               API key{" "}
-              <span className="text-slate-500">(only if the backend sets LEADS_API_KEY)</span>
+              <span className="text-slate-500">(only if your administrator requires one)</span>
             </label>
           </div>
           <button
@@ -192,11 +194,12 @@ export default function Execute() {
             Save
           </button>
         </div>
-      </div>
+      </details>
 
       {/* Query form */}
-      <div className="mt-5 rounded-xl border border-white/5 bg-white/[0.02] p-5">
+      <div className="mt-5 ui-panel rounded-xl border border-white/5 bg-white/[0.02] p-5">
         <form onSubmit={onSubmit} className="space-y-4">
+          <div className="border-b border-white/10 pb-4"><h2 className="text-base font-semibold text-white">Build your search</h2><p className="mt-1 text-xs text-slate-400">Be specific about trade and location for more relevant results.</p></div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <Field label="Trade (WHAT)">
               <Select
@@ -396,7 +399,7 @@ function JobLiveView({
   const eta = estimateRemaining(job);
 
   return (
-    <div className="mt-6 rounded-xl border border-white/5 bg-white/[0.02] p-5">
+    <div className="mt-6 ui-panel rounded-xl border border-white/5 bg-white/[0.02] p-5">
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <div className="flex items-center gap-3">

@@ -12,17 +12,28 @@ import re
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
-from app.email.email_cleaner import is_crawl_artifact
+from app.email.email_cleaner import (
+    EMAIL_CLEAN_PATTERN,
+    is_acceptable_email,
+    is_free_mail_domain,
+)
 
 logger = logging.getLogger(__name__)
 
 # Patterns for identifying business entities
 _PHONE_PATTERN = re.compile(
-    r"(?:tel:|phone:)?\s*(?:\+?1[-.\s]?)?" r"(?:\(?\d{3}\)?[-.\s]?)?\d{3}[-.\s]?\d{4}",
+    # Only consume unbounded whitespace AFTER an actual label. A free-standing
+    # \s* makes a failed search retry every position of a long whitespace run
+    # (quadratic CPU on real HTML pages with no phone number).
+    r"(?:(?:tel:|phone:)\s*)?(?:\+?1[-.\s]?)?"
+    r"(?:\(?\d{3}\)?[-.\s]?)?\d{3}[-.\s]?\d{4}",
     re.IGNORECASE,
 )
 
-_EMAIL_PATTERN = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+# The SHARED address grammar — see ``app.email.email_cleaner``. This module
+# used to carry its own copy of the regex, so a grammar fix made in one place
+# silently missed the other (CLAUDE.md §14).
+_EMAIL_PATTERN = EMAIL_CLEAN_PATTERN
 
 _ADDRESS_PATTERN = re.compile(
     r"\d+\s+[A-Za-z]+(?:\s+[A-Za-z]+)*," r"\s*[A-Za-z\s]+,\s*[A-Z]{2}\s*\d{5}",
@@ -651,17 +662,17 @@ class CompanyExtractor:
 
         # Email
         emails = _EMAIL_PATTERN.findall(html)
-        # Crawl artifacts first (Sentry DSNs, example.com placeholders,
-        # mailing-list ids — machine strings the regex cannot tell apart
-        # from contacts on raw page source).
-        emails = [e for e in emails if not is_crawl_artifact(e)]
+        # The full gate, not just the artifact half: placeholder/template
+        # domains, machine strings (Sentry DSNs, mailing-list ids), no-reply
+        # boxes, social platforms and malformed locals the regex still
+        # matched. Machine strings cannot be told from contacts on raw source.
+        emails = [e for e in emails if is_acceptable_email(e)]
         if emails:
-            # Filter out obvious non-business emails
-            business_emails = [
-                e
-                for e in emails
-                if not any(x in e.lower() for x in ["gmail", "yahoo", "hotmail", "aol"])
-            ]
+            # Prefer a corporate address over a personal webmail box. This
+            # used to be a substring test (``"aol" in e``), which dropped a
+            # real contact like karlaolson@acme.com along with aol.com; the
+            # domain-exact helper is the one place that rule lives.
+            business_emails = [e for e in emails if not is_free_mail_domain(e)]
             if business_emails:
                 profile.email = business_emails[0]
             else:

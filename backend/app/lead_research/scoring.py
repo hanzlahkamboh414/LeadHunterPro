@@ -20,6 +20,7 @@ from app.lead_research.models import (
     IntentAssessment,
     LeadDossier,
     PersonFindings,
+    TIMING_WINDOWS,
     TimingAssessment,
 )
 
@@ -48,10 +49,50 @@ def _is_construction(industry: str) -> bool:
     return any(kw in ind for kw in _CONSTRUCTION_KEYWORDS)
 
 
+#: The ``dossier.fit`` prefixes the PRE-SCORING gates in
+#: ``app.lead_research.agent`` write when they abandon a lead — the junk-domain,
+#: free-mail, dead-domain, pre-verdict and not-a-client shortcuts, every one of
+#: which returns before Stage 4 and so leaves ``potential_score`` at its
+#: dataclass default. :func:`has_measured_score` is the ONE reader of this list;
+#: adding a new early-return gate means adding its prefix here, or
+#: :func:`rescore_dossier` will score a lead that was never researched.
+#:
+#: ``"Generic email — "`` is written by no current code — the 60 rows carrying
+#: it are legacy from a stage that has since been removed, kept because the
+#: rows are still in the store.
+_ABANDONED_FIT_PREFIXES = (
+    "Not our client — ",
+    "Free mail domain — ",
+    "Junk/placeholder address — ",
+    "Dead/expired domain — ",
+    "Generic email — ",
+)
+
+
 def _is_service_area(location: str) -> bool:
-    """Return True if location is in our primary service area (Texas)."""
-    loc = (location or "").lower()
-    return "texas" in loc or "tx" in loc
+    """Return True if location is in our primary service area (Texas).
+
+    A STATE FOLD, not a substring test (fixed 2026-09-21). This used to be
+    ``"texas" in loc or "tx" in loc``, which is a THIRD answer to a question
+    the codebase already had two answers to — and the wrong kind of answer: it
+    credited any string merely CONTAINING "tx", and it read a bare state name
+    anywhere in a compound string as proof. Measured on the live store, that
+    handed the Texas service-area signal to 14 dossiers whose real home is
+    elsewhere ("Dallas, TX (corporate HQ: Tustin, CA)", "Amsterdam,
+    Netherlands (with Dallas, TX office)").
+
+    ``state_from_text`` is the single fold, the same one ``serve_shared`` uses
+    to decide which state's run a dossier may be served to, so the score and
+    the serve filter can no longer disagree about one string.
+
+    ``location`` is the AI's Stage-1 claim, NOT verified evidence — the
+    discovery path verifies location through ``LocationVerifier``, this path
+    does not. The fold is honest about that: anything it cannot resolve to
+    exactly one state returns "" , and "" is not Texas.
+    """
+    from app.engines.verification.location_verifier import state_from_text
+
+    return state_from_text(location) == "TX"
 
 
 class LeadScorer:
@@ -63,7 +104,9 @@ class LeadScorer:
 - Person has relevant role:   +1.0
     - Needs estimation (yes):     +2.0
     - Intent signal present:      +1.0
-    - Timing window present:      +0.5
+    - Timing window reported:     +0.5   (only now/soon/later — "unknown" is
+                                         the failure sentinel, see
+                                         ``TIMING_WINDOWS``)
     - Service area (Texas):       +0.5
     - Has evidence facts:         +0.5
     - Non-construction industry:  -1.0
@@ -83,8 +126,15 @@ class LeadScorer:
         person: PersonFindings,
         intent: IntentAssessment,
         timing: TimingAssessment,
+        *,
+        log: bool = True,
     ) -> tuple[str, float, str]:
-        """Score the lead deterministically. Returns (fit, potential_score, recommendation)."""
+        """Score the lead deterministically. Returns (fit, potential_score, recommendation).
+
+        ``log=False`` silences the per-lead INFO line for READ-time callers
+        (:func:`rescore_dossier` runs once per row of every leads page); the
+        research path keeps it, because there it is progress, not noise.
+        """
         signals: list[tuple[str, float]] = []
 
         # --- Company signals ---
@@ -122,7 +172,12 @@ class LeadScorer:
             signals.append(("intent signal", 1.0))
 
         # --- Timing signals ---
-        if timing.window:
+        # An ALLOWLIST, not a truthiness test. ``window`` is free text whose
+        # default is the string "unknown" — which ``intent_timing`` writes when
+        # the AI call failed or returned something unparseable — and "unknown"
+        # is truthy, so ``if timing.window`` paid this bonus for a call that
+        # never answered. A failure must not score better than silence.
+        if (timing.window or "").strip().lower() in TIMING_WINDOWS:
             signals.append(("timing window", 0.5))
 
         # --- Location signal ---
@@ -144,11 +199,12 @@ class LeadScorer:
         # verifiable location required)
         recommendation = self._gate(person, potential_score, company.industry, company.location)
 
-        logger.info(
-            "Scoring %s: score=%.1f rec=%s signals=%s",
-            email, potential_score, recommendation,
-            [s[0] for s in signals],
-        )
+        if log:
+            logger.info(
+                "Scoring %s: score=%.1f rec=%s signals=%s",
+                email, potential_score, recommendation,
+                [s[0] for s in signals],
+            )
 
         return fit, potential_score, recommendation
 
@@ -222,14 +278,101 @@ class LeadScorer:
         return ("Unable to assess — scoring unavailable", 0.0, "skip")
 
 
-def regate_recommendation(dossier: LeadDossier) -> str:
-    """Re-derive a STORED dossier's recommendation from TODAY'S hard rules.
+def has_measured_score(dossier: LeadDossier) -> bool:
+    """True when ``potential_score`` is a MEASUREMENT, not a leftover default.
 
-    Old dossiers carry research-time recommendations — researched before the
-    deterministic role override and the non-construction hard skip existed, an
-    AI could return contact_now for a "Sales Representative" or "Contact /
-    Representative" at Ferguson. Without re-researching (zero credits), we
-    re-apply the SAME gates the live scorer uses:
+    ``LeadDossier.potential_score`` defaults to ``0.0`` and is only overwritten
+    by Stage 4. Every gate that returns BEFORE Stage 4 — the junk-domain,
+    free-mail, dead-domain, pre-verdict and not-a-client shortcuts in
+    ``app.lead_research.agent`` — therefore persists ``0.0`` for a lead whose
+    research never happened, and that ``0.0`` is indistinguishable from a real
+    score by value alone (a scored dossier can legitimately total 0.0 too).
+
+    That distinction is load-bearing for :func:`rescore_dossier`: re-deriving a
+    score for an abandoned lead would compute a number from fields that were
+    never researched and present it as a measurement. Measured on the live
+    store 2026-09-21 — 397 of 1179 dossiers are abandoned this way, and
+    re-scoring them manufactured a passing score for 43 companies the pipeline
+    had explicitly decided are not our clients.
+
+    ``fit`` is the discriminator, and it is exact, not a guess: every gate that
+    abandons a lead writes its reason there, so an abandoned dossier carries
+    one of these prefixes and a scored one carries ``_build_fit_text``'s
+    sentence instead. Verified across all 1179 stored rows: 397 triage fits all
+    at score 0.0, 782 scorer fits, ZERO rows with a triage fit and a score.
+    ``"Generic email — "`` is in the list although no current code writes it —
+    those 60 rows are legacy from a removed stage, which is exactly why this is
+    a compatibility shim and not a permanent representation.
+
+    NOTE (RC-8, fixed 2026-09-22): this used to add that ``agent.py``'s
+    not-a-client shortcut also appended ``"scoring"`` to ``sources_checked``
+    although the scorer never ran, which is why ``sources_checked`` could not
+    be the marker. That false append is now removed, so the two markers agree
+    — but ``fit`` remains the discriminator anyway, because the 397 rows
+    written before the fix still carry the phantom ``"scoring"`` and because
+    a stored field can never be re-derived, only read.
+    """
+    fit = (dossier.fit or "").strip()
+    if not fit:
+        return False
+    return not fit.startswith(_ABANDONED_FIT_PREFIXES)
+
+
+def rescore_dossier(dossier: LeadDossier) -> float:
+    """Re-derive a STORED dossier's potential score from TODAY'S weights.
+
+    The score is written ONCE, at research time. :func:`regate_verdict` has
+    always re-applied today's hard gates at read time — but it compared them
+    against that STORED number, so a formula correction reached the gate and
+    never reached the number the gate compares, nor the number the leads page
+    shows. Measured on the live store before the 2026-09-21 fixes: 1058 of 1179
+    dossiers carry the ``"unknown"`` timing sentinel and were paid a bonus for a
+    call that never answered; 27 of them sit exactly on a threshold that bogus
+    +0.5 carried, and 6 change class.
+
+    An ABANDONED dossier is returned unchanged (see
+    :func:`has_measured_score`) — there is no measurement to correct, and
+    inventing one is worse than a stale number would be.
+
+    REUSE, not a second formula (CLAUDE.md §14): this calls the SAME
+    ``LeadScorer`` the research path calls with the SAME five inputs
+    (``agent.py`` Stage 4), so the displayed score and a fresh research of the
+    same lead can never disagree. ``log=False`` because this runs on the READ
+    path, once per row of every page.
+
+    Only the score is returned: the recommendation is NOT ``LeadScorer._gate``'s
+    to give here. :func:`regate_verdict` applies gates this class does not have
+    (off-vertical, non-client, the identity backstop, and a role relevance
+    recomputed from the role STRING rather than the stored AI-era flag), so it
+    keeps owning the verdict and consumes this score.
+    """
+    if not has_measured_score(dossier):
+        return float(dossier.potential_score or 0.0)
+    _, score, _ = LeadScorer().score(
+        dossier.email,
+        dossier.company,
+        dossier.person,
+        dossier.intent,
+        dossier.timing,
+        log=False,
+    )
+    return score
+
+
+def regate_verdict(dossier: LeadDossier) -> tuple[str, float]:
+    """TODAY'S verdict for a STORED dossier: ``(recommendation, score)``.
+
+    ONE computation for the two numbers a read path needs, because they must
+    never disagree: the recommendation is gated on THIS score. Callers that
+    want only the verdict use :func:`regate_recommendation`; callers that show
+    a row use both.
+
+    Old dossiers carry research-time recommendations AND research-time scores —
+    researched before the deterministic role override and the non-construction
+    hard skip existed, an AI could return contact_now for a "Sales
+    Representative" or "Contact / Representative" at Ferguson. Without
+    re-researching (zero credits), we re-apply the SAME gates the live scorer
+    uses:
 
       1. Industry construction check        -> hard skip
       2. role_relevance recomputed from the ROLE STRING (the deterministic
@@ -238,14 +381,27 @@ def regate_recommendation(dossier: LeadDossier) -> str:
 
     Applied at read time in :func:`app.api.v1.leads.list_leads`, so the leads
     page is always an honest view of current rules — never a stale AI guess.
+
+    The SCORE the thresholds compare is re-derived too, through
+    :func:`rescore_dossier` (fixed 2026-09-21). Re-applying today's gates
+    against a stale number is only half an honest view: a dossier sitting at
+    the 6.0 contact_now line on a bonus the formula no longer grants was still
+    served contact_now, and the page displayed the number that justified it.
+
+    The score is computed up front, before the hard skips, so every return
+    path can report it. It is deterministic and cheap (no AI, no network, no
+    I/O) — the same arithmetic the research path already ran on this dossier.
     """
     from app.engines.lead.lead_models import role_is_plausibly_relevant
 
     from app.company_profile import get_profile
 
+    # TODAY'S score, not the stored one — see the docstring.
+    score = rescore_dossier(dossier)
+
     ind = (dossier.company.industry or "").lower()
     if ind and not _is_construction(ind):
-        return "skip"
+        return "skip", score
     # Off-vertical hard skip (root-cause fix for the "fiber construction" leak):
     # the binary construction check passes any 'fiber/telecom/utility/road/
     # pipeline/materials' contractor that calls itself construction. The company
@@ -254,7 +410,7 @@ def regate_recommendation(dossier: LeadDossier) -> str:
     # lead — re-gated here so old dossiers are never served stale (same policy
     # as the _is_construction skip above). Conservative: unknown industries pass.
     if ind and get_profile().is_off_vertical(dossier.company.industry):
-        return "skip"
+        return "skip", score
     # Non-client hard skip (root-cause fix for the "irrelevant data" flood): a
     # company that is an A/E/C consultant, trade association, software/IT firm,
     # transit/mobility provider, plan service, etc. is NOT a buyer even when it
@@ -263,7 +419,7 @@ def regate_recommendation(dossier: LeadDossier) -> str:
     # is what keeps old off-service contacts from showing on the frontend —
     # the user's "data jo hamari services se match nahi karta" complaint.
     if ind and get_profile().is_non_client(dossier.company.industry):
-        return "skip"
+        return "skip", score
 
     # --- Identity backstop (root-cause hardening for the 2026-09-08 purge) ---
     # All three industry gates above can only read the STORED industry label,
@@ -286,21 +442,30 @@ def regate_recommendation(dossier: LeadDossier) -> str:
         any(v in _identity for v in _profile.excluded_vernaculars)
         or any(t in _identity for t in _profile.non_client_terms)
     ):
-        return "skip"
+        return "skip", score
     if dossier.company.facts and any(
         t in (dossier.company.facts[0].claim or "").lower()
         for t in _profile.non_client_terms
     ):
-        return "skip"
+        return "skip", score
 
     relevant = bool((dossier.person.role or "").strip()) and role_is_plausibly_relevant(
         dossier.person.role
     )
     loc = (dossier.company.location or "").strip()
-    if dossier.potential_score >= 6.0 and dossier.person.bound and relevant:
+    if score >= 6.0 and dossier.person.bound and relevant:
         if not loc:
-            return "nurture"
-        return "contact_now"
-    if dossier.potential_score >= 3.0:
-        return "nurture"
-    return "skip"
+            return "nurture", score
+        return "contact_now", score
+    if score >= 3.0:
+        return "nurture", score
+    return "skip", score
+
+
+def regate_recommendation(dossier: LeadDossier) -> str:
+    """The recommendation half of :func:`regate_verdict` — see it for the rules.
+
+    Kept because most callers only gate visibility (:func:`_is_visible`,
+    ``serve_shared``, ``clear_junk``) and never show a number.
+    """
+    return regate_verdict(dossier)[0]

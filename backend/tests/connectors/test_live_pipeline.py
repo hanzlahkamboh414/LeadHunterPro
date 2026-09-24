@@ -6,6 +6,8 @@ CompanyExtractor, and ContractorClassifier in the live discovery flow.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from app.connectors.texas_procurement import TexasProcurementConnector
@@ -307,6 +309,24 @@ class TestCompanyExtractor:
         html = "Call us at (555) 123-4567 for a free quote"
         profile = extractor.extract("https://example.com", html)
         assert profile.phone != ""
+
+    @pytest.mark.parametrize("contact", [
+        "tel: +1 (555) 123-4567",
+        "phone: 555-123-4567",
+        "Call 555 123 4567",
+    ])
+    def test_extract_phone_labeled_and_unlabeled(self, extractor, contact):
+        profile = extractor.extract("https://example.com", contact)
+        assert "555" in profile.phone
+        assert "4567" in profile.phone
+
+    def test_whitespace_heavy_page_without_phone_finishes_promptly(self, extractor):
+        html = "<title>North Roofing</title>" + " " * 8_000
+        started = time.perf_counter()
+        profile = extractor.extract("https://example.com", html)
+        elapsed = time.perf_counter() - started
+        assert profile.phone == ""
+        assert elapsed < 1.0
 
     def test_extract_city_state_from_address(self, extractor):
         """City and state extracted from address pattern."""

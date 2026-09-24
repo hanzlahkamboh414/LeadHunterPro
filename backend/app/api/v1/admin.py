@@ -10,8 +10,10 @@ Security rules (CLAUDE.md §6 — honest, never leaky):
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 
 import logging
+from datetime import datetime, timezone
 
 from app.admin_read import (
     AdminReadRepository,
@@ -25,6 +27,7 @@ from app.auth.dependencies import require_admin
 from app.auth.models import User, UserStore
 from app.core.runtime_keys import KNOWN_KEY_NAMES, RuntimeKeyStore
 from app.lead_research.service import _email_hash
+from app.phones.store import PhoneLeadsStore
 from app.schemas.admin import (
     AdminActivityOut,
     AdminActivityRow,
@@ -34,10 +37,15 @@ from app.schemas.admin import (
     AdminDashboardOut,
     AdminDecisionOut,
     AdminDeletedOut,
+    AdminGmailInboxModeIn,
     AdminKeysOut,
+    AdminLaneScheduleIn,
+    AdminLaneStatusOut,
     AdminLeadActionOut,
     AdminLeadScopeIn,
     AdminPasswordIn,
+    AdminPhoneClaimRow,
+    AdminPhoneClaimsOut,
     AdminPurgeOut,
     AdminSearchCacheOut,
     AdminUserCreateIn,
@@ -342,9 +350,13 @@ def leads_delete(body: AdminLeadScopeIn) -> AdminLeadActionOut:
 def users() -> AdminUsersOut:
     """Every account (no password data ever leaves the backend)."""
     all_users = _user_store().list_all()
+    from app.api.v1.phones import _store as phone_store
     return AdminUsersOut(
         total=len(all_users),
-        users=[AdminUserOut(**u.to_dict()) for u in all_users],
+        users=[AdminUserOut(
+            **u.to_dict(), phone_daily_limit=phone_store.daily_limit(u.id),
+            phone_daily_used=phone_store.daily_usage(u.id),
+        ) for u in all_users],
     )
 
 
@@ -413,6 +425,120 @@ def set_auth_mode(body: AdminAuthModeIn, admin: User = Depends(require_admin)) -
     return {"auth_enabled": body.enabled}
 
 
+@router.post("/gmail-inbox-mode")
+def set_gmail_inbox_mode(
+    body: AdminGmailInboxModeIn, admin: User = Depends(require_admin)
+) -> dict:
+    """Turn the Gmail-like inbox interface (browse/read/send) ON/OFF.
+
+    OFF = every /gmail endpoint except the address export and /gmail/mode
+    answers an honest 503; the export keeps working (it is the production
+    feature). The frontend reads /gmail/mode and hides the browsing UI.
+    """
+    from app.auth.settings import get_settings
+
+    get_settings().set_gmail_inbox_enabled(body.enabled)
+    detail = ("Gmail inbox interface ON" if body.enabled
+              else "Gmail inbox interface OFF (address export only)")
+    get_activity().record(admin.id, admin.username, "gmail", detail=detail)
+    logger.info("POST /admin/gmail-inbox-mode -> %s (by %s)",
+                detail, admin.username)
+    return {"inbox_enabled": body.enabled}
+
+
+# ---------------------------------------------------------------------------
+# Harvester AI-lane schedule — which lane runs, and for how long.
+#
+# The schedule lives in output/harvester.db (app/harvester/lane_schedule.py)
+# and the worker re-reads it at the top of EVERY pass, so a save here is
+# live: it lands on the next pass (<= HARVESTER_INTERVAL_S, default 5 min)
+# with no backend restart and no worker rebuild.
+# ---------------------------------------------------------------------------
+
+def _lane_status_payload() -> AdminLaneStatusOut:
+    """The stored schedule + what the worker will actually do next pass."""
+    from app.core.config import settings
+    from app.harvester.lane_schedule import get_lane_store
+
+    now = datetime.now(timezone.utc)
+    decision = get_lane_store().resolve(now)
+    spec = decision.spec
+    return AdminLaneStatusOut(
+        mode=spec.mode,
+        repeat=spec.repeat,
+        phone_min=spec.phone_min,
+        email_min=spec.email_min,
+        phone_first=spec.phone_first,
+        started_at=spec.started_at,
+        effective_mode=decision.mode,
+        in_phone_slot=decision.in_phone_slot,
+        cycle_s=decision.cycle_s,
+        position_s=decision.position_s,
+        seconds_to_switch=decision.seconds_to_switch,
+        next_switch_at=(
+            decision.next_switch_at.isoformat(timespec="seconds")
+            if decision.next_switch_at else ""
+        ),
+        one_time_done=decision.one_time_done,
+        harvester_enabled=bool(getattr(settings, "HARVESTER_ENABLED", True)),
+        interval_s=float(getattr(settings, "HARVESTER_INTERVAL_S", 300.0)),
+        notes=[
+            "phones lane = free license-board SODA fetches: ZERO AI spend. "
+            "emails lane = the AI research lane; that is where the budget goes.",
+            "This steers the HARVESTER only — a user's live Execute search is "
+            "never blocked by this setting.",
+            "The hourly Source Scout runs on its own cron and is NOT covered "
+            "by this schedule.",
+        ],
+    )
+
+
+@router.get("/harvester/lane", response_model=AdminLaneStatusOut)
+def harvester_lane() -> AdminLaneStatusOut:
+    """The live AI-lane schedule: stored spec + the lane the next pass runs."""
+    return _lane_status_payload()
+
+
+@router.post("/harvester/lane", response_model=AdminLaneStatusOut)
+def set_harvester_lane(
+    body: AdminLaneScheduleIn, admin: User = Depends(require_admin)
+) -> AdminLaneStatusOut:
+    """Save the AI-lane schedule — persisted AND picked up on the next pass.
+
+    ``mode``: both | phones | emails | auto. In ``auto`` the cycle is
+    anchored at the moment of this save (so "10 min phones, then 40 min
+    emails" starts now, not at midnight), and ``repeat`` decides whether it
+    loops all day or runs exactly one cycle before returning to both.
+
+    An invalid combination answers 422 with the validator's own message — a
+    schedule that cannot run is never stored as a silent no-op.
+    """
+    from app.harvester.lane_schedule import LaneSpec, get_lane_store
+
+    spec = LaneSpec(
+        mode=body.mode,
+        phone_min=body.phone_min,
+        email_min=body.email_min,
+        phone_first=body.phone_first,
+        repeat=body.repeat,
+    )
+    try:
+        saved = get_lane_store().save(spec, datetime.now(timezone.utc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    detail = (
+        f"AI lane schedule = {saved.mode}"
+        + (f" ({saved.phone_min:g} min phones / {saved.email_min:g} min emails, "
+           f"{'phones' if saved.phone_first else 'emails'} first, "
+           f"{'repeating all day' if saved.repeat == 'day' else 'one cycle only'})"
+           if saved.mode == "auto" else "")
+    )
+    get_activity().record(admin.id, admin.username, "harvest-lane", detail=detail)
+    logger.info("POST /admin/harvester/lane -> %s (by %s)", detail, admin.username)
+    return _lane_status_payload()
+
+
 @router.get("/activity", response_model=AdminActivityOut)
 def activity(limit: int = Query(default=200, ge=1, le=1000),
              user_id: str = Query(default="")) -> AdminActivityOut:
@@ -462,3 +588,74 @@ def user_leads_summary(user_id: str) -> AdminUserSummaryOut:
         total=catalog["total"],
         dates=dates,
     )
+
+
+@router.get("/phones/claims-report", response_model=AdminPhoneClaimsOut)
+def phone_claims_report(
+    admin: User = Depends(require_admin),
+) -> AdminPhoneClaimsOut:
+    """Phone claims report — per user visible vs hidden claims.
+
+    The call sheet shows only each user's LATEST batch. Older batches are
+    hidden from the sheet but their ownership lives on (the numbers still
+    serve to nobody). This report is the admin's eyes on that hidden stock —
+    the data the user manages at main deploy.
+    """
+    from app.api.v1.phones import _store as phone_store
+
+    rows = phone_store.claim_visibility_by_user()
+    umap = {}
+    try:
+        for u in _user_store().list_all():
+            umap[u.id] = u.username
+    except Exception:  # pragma: no cover — usernames are best-effort
+        pass
+    out_rows = [
+        AdminPhoneClaimRow(
+            user_id=r["user_id"],
+            username=umap.get(r["user_id"], ""),
+            total=r["total"],
+            visible=r["visible"],
+            hidden=r["hidden"],
+            first_claimed=r["first_claimed"],
+            last_claimed=r["last_claimed"],
+        )
+        for r in rows
+    ]
+    return AdminPhoneClaimsOut(
+        total_claims=sum(r["total"] for r in rows),
+        total_hidden=sum(r["hidden"] for r in rows),
+        by_user=out_rows,
+    )
+
+
+class PhoneDailyLimitIn(BaseModel):
+    daily_limit: int = Field(..., ge=0, le=5000)
+
+
+@router.put("/users/{user_id}/phone-limit")
+def set_user_phone_limit(user_id: str, body: PhoneDailyLimitIn) -> dict:
+    """Admin override of one account's daily phone-claim allowance."""
+    target = _user_store().get_by_id(user_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    from app.api.v1.phones import _store as phone_store
+    phone_store.set_daily_limit(user_id, body.daily_limit)
+    logger.info("PUT /admin/users/%s/phone-limit -> %d", user_id, body.daily_limit)
+    return {"user_id": user_id, "daily_limit": phone_store.daily_limit(user_id)}
+
+
+@router.get("/phones/wrong")
+def wrong_phone_archive() -> list[dict]:
+    """Admin view of suppressed wrong numbers, retained indefinitely."""
+    from app.api.v1.phones import _store as phone_store
+    return phone_store.list_wrong_archive()
+
+
+@router.post("/phones/wrong/{archive_id}/recover")
+def recover_wrong_phone(archive_id: int) -> dict:
+    from app.api.v1.phones import _store as phone_store
+    if not phone_store.recover_wrong_number(archive_id):
+        raise HTTPException(status_code=404, detail="Wrong-number archive row unavailable")
+    logger.info("POST /admin/phones/wrong/%s/recover", archive_id)
+    return {"recovered": True}

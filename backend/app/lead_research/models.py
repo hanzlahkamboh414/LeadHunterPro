@@ -184,6 +184,19 @@ class TimingAssessment:
         )
 
 
+#: A timing window the AI actually REPORTED, in urgency order.
+#:
+#: ``"unknown"`` is deliberately not a member: ``intent_timing`` writes it when
+#: the call FAILED (an exception, or an unparseable reply) or when the reply
+#: omitted the key. It is a sentinel for "no observation was made", not an
+#: observation — and because it is a non-empty string, a truthiness test on the
+#: field paid the +0.5 timing signal for every call that never answered, which
+#: is a bonus for a failure. Scoring credits a real window and nothing else
+#: (see ``LeadScorer.score``), and this tuple is the ONE definition of what
+#: "a real window" means for every caller.
+TIMING_WINDOWS = ("now", "soon", "later")
+
+
 #: The CRM pipeline stages a lead moves through (Phase E1), in journey order.
 #: Stored verbatim in ``dossiers.crm_status``; anything outside this tuple is
 #: rejected by the API (422) so the column never fills with free text.

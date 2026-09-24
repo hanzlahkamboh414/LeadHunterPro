@@ -152,6 +152,7 @@ def _lead_summary(
     d: Any,
     *,
     recommendation: str | None = None,
+    score: float | None = None,
     source: str = "",
     folder: str = "",
     tags: list[str] | None = None,
@@ -163,11 +164,15 @@ def _lead_summary(
 
     ``recommendation`` defaults to the CURRENT deterministic verdict — found via
     :func:`regate_recommendation` (a stored dossier's AI-era recommendation is
-    never served stale). ``source`` names the query run that produced the lead
-    (e.g. ``General Contractors · Dallas TX``), so the user can tell which
-    search each row belongs to instead of an undifferentiated mix. ``folder``/
-    ``tags`` are the user's organization metadata (Phase B); ``created_at`` is
-    the extraction date (the lead's honest research date, ``YYYY-MM-DD``).
+    never served stale). ``score`` defaults to the stored ``potential_score``;
+    read paths pass the re-derived one (:func:`rescore_dossier`) for the same
+    reason the verdict is re-gated — a formula correction must reach the number
+    on screen, not only the gate that reads it. ``source`` names the query run
+    that produced the lead (e.g. ``General Contractors · Dallas TX``), so the
+    user can tell which search each row belongs to instead of an
+    undifferentiated mix. ``folder``/``tags`` are the user's organization
+    metadata (Phase B); ``created_at`` is the extraction date (the lead's
+    honest research date, ``YYYY-MM-DD``).
     """
     return LeadSummary(
         email=d.email,
@@ -178,7 +183,7 @@ def _lead_summary(
         bound=d.person.bound,
         linkedin=d.person.linkedin,
         phone=d.person.phone,
-        score=d.potential_score,
+        score=d.potential_score if score is None else score,
         recommendation=recommendation or d.recommendation,
         intent=d.intent.needs_estimation if d.intent else "",
         reason=d.intent.reason if d.intent else "",
@@ -397,7 +402,7 @@ def list_leads(
     is RE-GATED as a freshness backstop (a verdict that drifted since the row was
     written heals its column so the NEXT request filters it correctly).
     """
-    from app.lead_research.scoring import regate_recommendation
+    from app.lead_research.scoring import regate_verdict
 
     scope = _view_scope(user)
     source_by_email = _job_source_by_email(
@@ -426,13 +431,15 @@ def list_leads(
     out: list[LeadSummary] = []
     for item in page:
         d = item["dossier"]
-        # Freshness backstop: TODAY'S gate is re-applied to the page (cheap — a
-        # page, not the store) and any drift heals the column, so a rule change
-        # corrects the next request up-front.
-        fresh = regate_recommendation(d)
-        if fresh != item["recommendation"]:
+        # Freshness backstop: TODAY'S rules are re-applied to the page (cheap —
+        # a page, not the store) and any drift heals the column, so a rule change
+        # corrects the next request up-front. BOTH halves drift: the verdict and
+        # the score it is compared against. Healing only the verdict wrote a
+        # fresh recommendation next to the stale number that used to justify it.
+        fresh, fresh_score = regate_verdict(d)
+        if fresh != item["recommendation"] or fresh_score != d.potential_score:
             _store.set_filter_columns(
-                item["email_hash"], fresh, d.potential_score, bool(d.person.bound)
+                item["email_hash"], fresh, fresh_score, bool(d.person.bound)
             )
         if recommendation is not None and fresh != recommendation:
             continue  # drifted out of an explicit filter — healed above
@@ -441,6 +448,7 @@ def list_leads(
         out.append(_lead_summary(
             d,
             recommendation=fresh,
+            score=fresh_score,
             source=source_by_email.get(d.email, ""),
             folder=item["folder"],
             tags=item["tags"],
@@ -573,9 +581,11 @@ def organize_lead(email: str, body: OrganizeIn,
     if not _store.set_meta(email, folder=body.folder, tags=body.tags):
         raise HTTPException(status_code=404, detail=f"no dossier for {email}")
     dossier = _store.get(email)
-    from app.lead_research.scoring import regate_recommendation
+    from app.lead_research.scoring import regate_verdict
 
-    rec = regate_recommendation(dossier) if dossier else "skip"
+    # Same pair as the list: the verdict AND the score it rests on are today's,
+    # so organizing a row cannot hand back a number the list would not show.
+    rec, score = regate_verdict(dossier) if dossier else ("skip", None)
     logger.info("PUT /leads/%s/organize -> folder=%r tags=%r", email, body.folder, body.tags)
     meta = _store.get_meta(email)
     crm = _store.get_crm(email)
@@ -583,6 +593,7 @@ def organize_lead(email: str, body: OrganizeIn,
     return _lead_summary(
         dossier,
         recommendation=rec,
+        score=score,
         source=_job_source_by_email(
             user_id=scope["user_id"], is_admin=scope["is_admin"],
             include_legacy=scope["include_legacy"],

@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { KeyRound, ShieldCheck, Info, Mail, Send, Trash2, CheckCircle2, AlertTriangle } from "lucide-react";
 import { ApiError, api, getStoredApiKey, googleAuthorizeUrl, setStoredApiKey } from "../api/client";
 import { PageHeader } from "../components/PageHeader";
+import { ConnectionStatus } from "../components/Topbar";
 
 /** The OAuth return banner: ?gmail=connected:<email> | ?gmail=error:<code>. */
 function readGmailBanner(): { ok: boolean; text: string } | null {
@@ -73,12 +74,13 @@ export default function Settings() {
   const configured = gmailStatus.data?.configured === true;
 
   return (
-    <div className="px-8 py-7 max-w-2xl">
+    <div className="workspace-page page-settings">
       <PageHeader
         eyebrow="LeadHunter Pro"
         title="Settings"
         subtitle="API access, email sending, and connection details."
       />
+      {(accounts.isError || gmailStatus.isError || disconnect.isError) && <div role="alert" className="mt-4 rounded-lg bg-rose-500/10 border border-rose-400/20 p-4 text-sm text-rose-200">{disconnect.isError ? "Could not disconnect this account. Please try again." : "Account connection details could not be loaded."}<button className="ml-2 underline" onClick={() => { void accounts.refetch(); void gmailStatus.refetch(); }}>Refresh</button></div>}
 
       {banner && (
         <div
@@ -101,7 +103,7 @@ export default function Settings() {
       )}
 
       {/* Email accounts (sending) */}
-      <div className="mt-6 rounded-xl border border-white/5 bg-white/[0.02] p-5">
+      <div className="mt-6 ui-panel rounded-xl border border-white/5 bg-white/[0.02] p-5">
         <div className="flex items-center gap-3">
           <div className="w-9 h-9 rounded-lg bg-indigo-500/15 flex items-center justify-center shrink-0">
             <Mail className="w-[17px] h-[17px] text-indigo-400" strokeWidth={1.75} />
@@ -115,7 +117,7 @@ export default function Settings() {
           </div>
         </div>
 
-        {configured ? (
+        {gmailStatus.isPending ? <p role="status" className="mt-4 text-sm text-slate-400">Checking email connection availability…</p> : gmailStatus.isError ? null : configured ? (
           <>
             <button
               onClick={() => {
@@ -189,8 +191,7 @@ export default function Settings() {
 
             {accounts.data && accounts.data.length === 0 && (
               <p className="mt-3 text-[12.5px] text-slate-500">
-                No Gmail connected yet. Connect one to send campaigns in later
-                phases — a test email proves the link end-to-end.
+                No Gmail connected yet. Connect your sending account to start creating campaigns.
               </p>
             )}
           </>
@@ -198,18 +199,14 @@ export default function Settings() {
           <div className="mt-4 flex items-start gap-2.5 rounded-lg border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-[12.5px] text-amber-300">
             <Info className="w-4 h-4 shrink-0 mt-0.5" />
             <p>
-              Gmail OAuth is not configured on the server yet —{" "}
-              <code>GOOGLE_CLIENT_ID</code> / <code>GOOGLE_CLIENT_SECRET</code>{" "}
-              must be set in the backend <code>.env</code> (Google Cloud project
-              → Gmail API → OAuth client). Once configured, the Connect button
-              appears here.
+              Gmail connection is not available yet. Ask your administrator to enable it, then connect your sending account here.
             </p>
           </div>
         )}
       </div>
 
       {/* API key */}
-      <div className="mt-5 rounded-xl border border-white/5 bg-white/[0.02] p-5">
+      <div className="mt-5 ui-panel rounded-xl border border-white/5 bg-white/[0.02] p-5">
         <div className="flex items-center gap-3">
           <div className="w-9 h-9 rounded-lg bg-indigo-500/15 flex items-center justify-center shrink-0">
             <KeyRound className="w-[17px] h-[17px] text-indigo-400" strokeWidth={1.75} />
@@ -217,8 +214,7 @@ export default function Settings() {
           <div>
             <h2 className="text-[15px] font-semibold text-white">API key</h2>
             <p className="text-[12.5px] text-slate-500">
-              Only needed if the backend sets <code>LEADS_API_KEY</code>. Sent as{" "}
-              <code>X-API-Key</code>. Stored in this browser (localStorage).
+              Only enter a key if your administrator provides one. This setting is saved in this browser.
             </p>
           </div>
         </div>
@@ -246,20 +242,17 @@ export default function Settings() {
       </div>
 
       {/* Connection */}
-      <div className="mt-5 rounded-xl border border-white/5 bg-white/[0.02] p-5">
+      <div className="mt-5 ui-panel rounded-xl border border-white/5 bg-white/[0.02] p-5">
         <div className="flex items-center gap-3">
           <div className="w-9 h-9 rounded-lg bg-indigo-500/15 flex items-center justify-center shrink-0">
             <ShieldCheck className="w-[17px] h-[17px] text-indigo-400" strokeWidth={1.75} />
           </div>
           <div>
             <h2 className="text-[15px] font-semibold text-white">System status</h2>
-            <p className="text-[12.5px] text-slate-500">Backend connection is live.</p>
+            <p className="text-[12.5px] text-slate-500">Server availability is checked every 30 seconds.</p>
           </div>
         </div>
-        <div className="mt-4 flex items-center gap-1.5 text-[13px] text-emerald-400">
-          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Operational
-        </div>
+        <div className="mt-4 inline-flex"><ConnectionStatus /></div>
       </div>
 
       <div className="mt-5 flex items-start gap-2.5 text-[12px] text-slate-500">

@@ -20,8 +20,8 @@ export function PageHeader({
   large?: boolean;
 }) {
   return (
-    <div>
-      <p className="text-indigo-400 text-[11.5px] font-bold tracking-[0.18em] uppercase">
+    <div className={`page-heading ${large ? "page-heading-large" : ""}`}>
+      <p className="page-eyebrow">
         {eyebrow}
       </p>
       <h1
@@ -34,7 +34,7 @@ export function PageHeader({
         {title}
       </h1>
       {subtitle && (
-        <p className="text-slate-500 text-[13.5px] mt-1.5">{subtitle}</p>
+        <p className="page-description">{subtitle}</p>
       )}
     </div>
   );

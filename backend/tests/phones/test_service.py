@@ -109,3 +109,17 @@ def test_state_without_coverage_is_honest(tmp_path):
                        target=5, user_id="alice")
     assert out["coverage"] == []
     assert "no phone source covers" in out["reason"]
+
+
+def test_state_only_raw_stock_is_not_promised_as_ready_leads(tmp_path):
+    store = PhoneLeadsStore(db_path=str(tmp_path / "phones.db"))
+    raw = _wa_record("6125550100", "North Star Roofing", trade_desc="")
+    raw.update({"state": "MN", "source": "mn_dli_registration",
+                "state_only": True})
+    store.add([raw])
+    out = phone_search(store, trade="", state="MN", city="",
+                       target=10, user_id="alice")
+    assert out["leads"] == []
+    assert "pending trade verification" in out["reason"]
+    assert "try again in a few minutes" not in out["reason"]
+    assert store.pool_stats()["total"] == 1

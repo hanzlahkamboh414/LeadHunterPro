@@ -217,21 +217,22 @@ class Settings(BaseSettings):
     # verdict), so searches stay under budget. 0 = unlimited (old behavior).
     MAX_ACTIVE_JOBS: int = 4
 
-    # P6 background harvester — the 24/7 stocker (big-bang plan). One
-    # daemon pass every HARVESTER_INTERVAL_S under admission control (it
-    # only works when user searches leave pipeline budget spare): the
+    # P6 background harvester — the 24/7 stocker (big-bang plan). Phone
+    # and email daemon lanes each tick every HARVESTER_INTERVAL_S under
+    # admission control (they work when user searches leave pipeline
+    # budget spare): the
     # phones lane stocks trade×state pools with free license-board SODA
     # fetches, the emails lane runs harvest-time AI research (SHARED
     # dossiers, user_id='') — but ONLY for pairs users have actually
     # searched, so the AI lane never spends without a demand signal. Daily
-    # quotas are the big-bang numbers: 5,000 stocked phone rows and 2,000
-    # researched email leads per day. HARVESTER_ENABLED=false is the dev
+    # email quota is 2,000 researched leads per day. Phone stocking has no
+    # daily ceiling by default. HARVESTER_ENABLED=false is the dev
     # kill-switch (set in the local .env so a dev machine never spends).
     HARVESTER_ENABLED: bool = True
     HARVESTER_INTERVAL_S: float = 300.0
     HARVEST_PHONE_BATCH: int = 250
     HARVEST_EMAIL_BATCH: int = 25
-    HARVEST_PAIR_COOLDOWN_S: float = 21600.0  # one pair every 6h max
+    HARVEST_PAIR_COOLDOWN_S: float = 0.0  # age rotation paces each pair
     HARVEST_MIN_POOL_FLOOR: int = 100         # per trade×state pool target
     HARVEST_STALENESS_DAYS: int = 30
     # Wall-clock budget for ONE emails-lane pass (soft stop via run_full's
@@ -243,8 +244,34 @@ class Settings(BaseSettings):
     # the next pass resumes with fresh cooldown — the demand-gated lane
     # never loses a pair, it just splits the work.
     HARVEST_EMAIL_BUDGET_S: float = 2700.0
-    DAILY_PHONE_QUOTA: int = 5000
+    # Lane-time-slice BOOT DEFAULT. The live control is the admin screen's
+    # schedule (app/harvester/lane_schedule.py → output/harvester.db), which
+    # the worker re-reads every pass; these values only apply on a deployment
+    # where no schedule has been saved. Four values:
+    #   "both"   (default) — phones and emails run together every pass
+    #              (existing behaviour; production's default).
+    #   "phones" — emails blocked entirely: a zero-AI pass by construction,
+    #              since the phones lane is pure free SODA fetching.
+    #   "emails" — phones blocked; the AI lane only.
+    #   "auto"   — a clock splits the day into alternating slots (phones
+    #              first when HARVEST_PHONE_FIRST), the slot lengths below
+    #              deciding how long each lane runs before the swap.
+    HARVEST_LANE_MODE: str = "both"
+    # Slot lengths in seconds for "auto" mode. Must sum to a positive cycle
+    # (checked at import by Settings.model_post_init).
+    HARVEST_PHONE_SLOT_S: float = 1800.0   # 30 min per phone phase
+    HARVEST_EMAIL_SLOT_S: float = 5400.0   # 90 min per email phase
+    # Which lane opens the cycle at the anchor. In "auto" the anchor is the
+    # moment the schedule was saved, so the first slot really is the lane the
+    # operator picked; the env-driven fallback anchors at midnight UTC.
+    HARVEST_PHONE_FIRST: bool = True
+    # 0 removes the daily phone-stock ceiling. The per-request batch,
+    # admission control and source cooldown still bound each pass.
+    DAILY_PHONE_QUOTA: int = 0
     DAILY_EMAIL_QUOTA: int = 2000
+    # Defaults to the harvester's deployment switch: local development
+    # installs that disable harvesting must not start a paid AI scout.
+    SOURCE_SCOUT_ENABLED: bool | None = None
 
     # Optional lightweight auth for the Leads API (M12 baseline). When set,
     # requests must carry `X-API-Key: <key>`. When empty, the Leads API is
@@ -302,6 +329,27 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    def model_post_init(self, __context) -> None:  # noqa: N805
+        """Validate the lane-time-slice boot defaults at import time.
+
+        The vocabulary lives in ONE place (app/harvester/lane_schedule.py) —
+        imported here rather than re-spelled, so the config can never accept
+        a mode the worker would refuse to run.
+        """
+        from app.harvester.lane_schedule import MODES
+
+        if self.SOURCE_SCOUT_ENABLED is None:
+            self.SOURCE_SCOUT_ENABLED = self.HARVESTER_ENABLED
+
+        if self.HARVEST_LANE_MODE not in MODES:
+            raise ValueError(
+                f"HARVEST_LANE_MODE must be one of {MODES}, "
+                f"got {self.HARVEST_LANE_MODE!r}"
+            )
+        if self.HARVEST_PHONE_SLOT_S + self.HARVEST_EMAIL_SLOT_S <= 0:
+            raise ValueError(
+                "HARVEST_PHONE_SLOT_S + HARVEST_EMAIL_SLOT_S must be > 0"
+            )
 
 settings = Settings()
 

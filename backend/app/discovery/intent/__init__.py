@@ -126,8 +126,8 @@ class IntentCollection:
             not in (SourceStatus.SUCCESS.value, SourceStatus.EMPTY.value)
         ]
 
-    def failure_reasons(self) -> dict[str, str]:
-        """Provider name -> its ``SourceFailureReason``, where it gave one.
+    def provider_reasons(self) -> dict[str, str]:
+        """Provider name -> its ``SourceReason``, where it gave one.
 
         Computed properties cannot reach a caller's log line, but the reason
         a provider failed decides what the failure MEANS: a rejected request

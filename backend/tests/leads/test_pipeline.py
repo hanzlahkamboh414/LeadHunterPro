@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 from app.discovery.sources.status import SourceStatus
 from app.lead_research.agent import DEAD_DOMAIN_MARKER
+from app.lead_research.models import CompanyProfile, LeadDossier, PersonFindings
 from app.leads.pipeline import (
     ResearchQuery,
     _discovery_status,
@@ -277,7 +278,17 @@ def test_discovery_generation_off_without_stores():
 
 def test_discovery_generation_fires_when_room(monkeypatch, tmp_path):
     """With both stores present and the cold-start gate cleared, the add-side
-    calls the generator (1 LLM credit) and returns its honest result."""
+    calls the generator (1 LLM credit) and returns its honest result.
+
+    BOTH lanes are stubbed. ``_run_discovery_generation`` merges the Layer-1
+    dork result with the Layer-2 web-angle result, so asserting on the merge
+    while leaving the web lane REAL made this test depend on that lane's
+    cold-start guard holding — and, once the guard did not hold, on a live AI
+    call. It failed once in a full-suite run and passed alone, which is the
+    signature of exactly this: a test that reads production behaviour it never
+    pinned. Stubbing the second lane makes the assertion a statement about the
+    merge (which is what the test is for) instead of about the world.
+    """
     from app.leads.pipeline import _run_discovery_generation
     from app.discovery.template_candidates import TemplateCandidateStore
     from app.discovery.yield_learning import DiscoveryYieldStore
@@ -285,18 +296,28 @@ def test_discovery_generation_fires_when_room(monkeypatch, tmp_path):
     yield_store = DiscoveryYieldStore(str(tmp_path / "yield.db"))
     cand_store = TemplateCandidateStore(str(tmp_path / "cand.db"))
     new_dork = '"plan holder roster" {industry} {location} filetype:pdf'
-    calls = {"n": 0}
+    calls = {"dork": 0, "web": 0}
 
     def _fake_gen(yield_store, *, candidate_store=None, segment=""):
-        calls["n"] += 1
+        calls["dork"] += 1
         return {"generated": [new_dork], "rejected": [], "reason": ""}
+
+    def _fake_web(yield_store, *, candidate_store=None, segment=""):
+        calls["web"] += 1
+        # An honest HOLD — the fresh yield store has no trial evidence.
+        return {"generated": [], "rejected": [],
+                "reason": "cold-start guard: no dispatched template yet"}
 
     monkeypatch.setattr(
         "app.discovery.template_generation.generate_dork_candidates", _fake_gen,
     )
+    monkeypatch.setattr(
+        "app.discovery.template_generation.generate_web_angle_candidates",
+        _fake_web,
+    )
     result = _run_discovery_generation(yield_store, cand_store)
-    assert calls["n"] == 1
-    assert result["generated"] == [new_dork]
+    assert calls == {"dork": 1, "web": 1}  # one LLM credit per lane, no more
+    assert result["generated"] == [new_dork]  # the held lane contributes none
 
 
 def test_discovery_generation_pauses_at_cap(monkeypatch, tmp_path):
@@ -790,17 +811,20 @@ def test_run_research_auto_files_named_search_into_folder(monkeypatch):
         def __init__(self, preexisting: set[str]):
             self._preexisting = preexisting
         def get(self, email):
-            # The cached branch reads real dossier fields (person.name, etc.).
+            # A REAL LeadDossier, not a namespace of the fields this branch
+            # happens to read: the cached entry re-derives today's verdict from
+            # the dossier, so a hand-narrowed double breaks every time the
+            # verdict needs one more field.
             if email not in self._preexisting:
                 return None
-            return SimpleNamespace(
-                company=SimpleNamespace(name="Pre"),
-                person=SimpleNamespace(name="Old", bound=False),
+            return LeadDossier(
+                email=email,
+                domain="y.com",
+                company=CompanyProfile(name="Pre", industry="general contractor"),
+                person=PersonFindings(name="Old", bound=False),
                 potential_score=5.0,
                 recommendation="nurture",
-                intent=None,
-                timing=None,
-                sources_checked=[],
+                fit="Scored at research time.",
             )
         def save(self, dossier, user_id=""):
             saved.append(dossier)

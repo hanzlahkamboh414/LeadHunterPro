@@ -73,6 +73,53 @@ async def lifespan(app: FastAPI):
     except Exception:  # noqa: BLE001 — a harvester failure must not kill the app
         logger.exception("background harvester failed to start — continuing")
 
+    # Discover and verify new public board datasets independently of phone
+    # demand. Its own durable schedule prevents duplicate daily AI work on
+    # restarts and retries failures without stopping the background loop.
+    scout = None
+    if settings.SOURCE_SCOUT_ENABLED:
+        try:
+            from app.source_scout.worker import get_worker as get_scout
+            scout = get_scout()
+            scout.start()
+        except Exception:  # noqa: BLE001 — scout failure must not block startup
+            logger.exception("source scout failed to start — continuing")
+
+    # Intent-plugin registration (Phase 1, Company Signal Intelligence
+    # engine). The three buying-intent plugins (usaspending / google_news /
+    # company_site) were built, tested and then never wired to a caller;
+    # registering them here is what makes them discoverable by name and
+    # capability at runtime, and it gives the process an explicit record of
+    # what evidence collection can actually reach. That record matters:
+    # CLAUDE.md §5/§12 — an empty provider registry must never be silent.
+    #
+    # This cannot affect company discovery: the plugins declare
+    # PROJECT_/NEWS_/BID_DISCOVERY and never COMPANY_DISCOVERY, and the
+    # production discovery orchestrator registers its own sources rather
+    # than reading this registry.
+    try:
+        from app.discovery.intent import register_intent_plugins, registered_intent_plugins
+        from app.discovery.plugins.plugin_registry import get_registry
+
+        added = register_intent_plugins()
+        active = registered_intent_plugins()
+        if active:
+            logger.info(
+                "intent plugins ready: %s (registered now: %s)",
+                [p.name for p in active],
+                added or "none — already registered",
+            )
+        else:
+            logger.error(
+                "NO INTENT PLUGINS REGISTERED — evidence collection will fall "
+                "back to the built-in plugin list at call time. Registered "
+                "now: %s, registry size: %d",
+                added,
+                len(get_registry()),
+            )
+    except Exception:  # noqa: BLE001 — plugin setup must not block startup
+        logger.exception("intent plugin registration failed — continuing")
+
     # The sweep is the startup block; yield hands control to the app until it
     # shuts down.
     yield
@@ -82,6 +129,8 @@ async def lifespan(app: FastAPI):
         enricher.stop()
     if harvester is not None:
         harvester.stop()
+    if scout is not None:
+        scout.stop()
 
 
 app = FastAPI(

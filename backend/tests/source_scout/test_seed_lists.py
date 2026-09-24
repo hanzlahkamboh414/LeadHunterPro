@@ -65,6 +65,33 @@ def test_board_seed_known_access_is_prober_path():
         ) or r["known_access"] == ""
 
 
+def test_mn_verified_download_is_a_candidate_not_a_trade_claim():
+    mn = next(r for r in load_state_boards() if r["state"] == "MN")
+    assert mn["base_url"] == (
+        "https://secure.doli.state.mn.us/ccld/data/"
+        "MNDLILicRegCertExport_Contractor_Registrations.csv"
+    )
+    assert mn["known_access"] == "bulk_file"
+    assert "trade unclassified" in mn["notes"]
+
+
+def test_az_seed_tracks_official_posting_list_without_claiming_fetch_access():
+    az = next(r for r in load_state_boards() if r["state"] == "AZ")
+    assert az["base_url"] == ""
+    assert az["known_access"] == ""
+    assert "roc.az.gov/posting-list" in az["notes"]
+    assert "403" in az["notes"]
+
+
+def test_nc_paid_roster_is_pending_not_claimed_as_free_feed():
+    nc = next(r for r in load_state_boards() if r["state"] == "NC")
+    assert nc["base_url"] == ""
+    assert nc["known_access"] == ""
+    assert "nclbgc.org" in nc["notes"]
+    assert "$25" in nc["notes"]
+    assert "pending" in nc["notes"]
+
+
 def test_bad_trade_scope_token_rejected(tmp_path):
     import shutil
     bad = tmp_path / "bad.csv"

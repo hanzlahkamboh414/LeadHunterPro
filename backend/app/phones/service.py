@@ -39,6 +39,7 @@ def phone_search(
     city: str,
     target: int,
     user_id: str,
+    enforce_quota: bool = True,
 ) -> dict[str, Any]:
     """Serve ``target`` phone leads for one user from the shared pool.
 
@@ -64,7 +65,8 @@ def phone_search(
     state = (state or "").strip().upper()[:2]
     city = (city or "").strip()
 
-    leads = store.serve(slug, state, city, target, user_id)
+    leads = store.serve(slug, state, city, target, user_id,
+                        enforce_quota=enforce_quota)
     if slug:
         coverage = covered_sources(slug, state)
     else:
@@ -91,7 +93,12 @@ def phone_search(
     if len(leads) >= target:
         return outcome
 
-    if not coverage:
+    if not slug and store.unqualified_count(state, city):
+        outcome["reason"] = (
+            f"pool served {len(leads)}/{target} — raw business records are "
+            "pending trade verification and cannot serve yet"
+        )
+    elif not coverage:
         outcome["reason"] = (
             f"no phone source covers trade '{trade}'"
             if slug else f"no phone source covers {state or 'any state'} yet"

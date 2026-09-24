@@ -13,6 +13,7 @@ jane kept), year/date window query shape, and real-xlsx bytes out.
 from __future__ import annotations
 
 import io
+import time
 import zipfile
 from datetime import datetime, timedelta, timezone
 from xml.etree import ElementTree as ET
@@ -25,6 +26,33 @@ from app.email_accounts.store import EmailAccountStore
 from app.main import app
 
 _SCOPES = google.OAUTH_SCOPES  # everything granted
+
+
+class _FakeClock:
+    """A stand-in for the ``time`` module that intercepts only ``sleep``.
+
+    Patch ``gi.time`` with this, never ``gi.time.sleep``. ``gmail_inbox`` does
+    ``import time``, so ``gi.time`` IS the one ``time`` module every other
+    thread in the process shares — patching its ``sleep`` attribute reaches
+    code that has nothing to do with Gmail. Measured in a full-suite run
+    (2026-09-22): ``test_quota_exceeded_uses_window_backoff`` recorded 155
+    unrelated 0.3s idle-waits from a background pipeline thread and failed its
+    ``[30.0, 60.0]`` assertion. Rebinding the module ATTRIBUTE keeps the patch
+    inside the module under test.
+
+    Any other attribute (``monotonic``, …) falls through to the real module,
+    so this cannot break if ``gmail_inbox`` starts using one.
+    """
+
+    def __init__(self, on_sleep=None):
+        self._on_sleep = on_sleep
+
+    def sleep(self, seconds):
+        if self._on_sleep is not None:
+            self._on_sleep(seconds)
+
+    def __getattr__(self, name):
+        return getattr(time, name)
 
 
 def _meta(mid: str, *, frm="", to="", cc="", subject="s", snippet="sn",
@@ -279,7 +307,9 @@ def test_modify_star_and_trash(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 
 def _export_pages(mail):
-    """A fake Gmail: one page per call, message metadata per id."""
+    """A fake Gmail: one page per call, message metadata per id (batched —
+    the export fetches metadata through google.batch_get_message_metadata,
+    one call carrying a whole page of ids)."""
     def fake_list(token, *, label="", q="", page_token="", limit=100):
         seen.append(q)
         if page_token:
@@ -289,10 +319,11 @@ def _export_pages(mail):
 
     seen: list[str] = []
 
-    def fake_get_message(token, mid, *, metadata_only=False):
-        return _meta(mid, **mail[mid])
+    def fake_batch(token, message_ids):
+        return [_meta(mid, **mail[mid]) for mid in message_ids
+                if mid in mail]
 
-    return fake_list, fake_get_message, seen
+    return fake_list, fake_batch, seen
 
 
 def _xlsx_rows(content: bytes) -> list[list[str]]:
@@ -312,9 +343,9 @@ def test_export_sent_addresses_deduped(monkeypatch, tmp_path):
         "s2": {"to": "jane@acme.com", "cc": ""},
         "s3": {"to": "not-an-email", "cc": ""},
     }
-    fake_list, fake_get, seen = _export_pages(mail)
+    fake_list, fake_batch, seen = _export_pages(mail)
     monkeypatch.setattr(gi.google, "list_message_ids", fake_list)
-    monkeypatch.setattr(gi.google, "get_message", fake_get)
+    monkeypatch.setattr(gi.google, "batch_get_message_metadata", fake_batch)
     client, acct, _ = _setup(tmp_path, monkeypatch)
     r = client.get(f"/api/v1/gmail/export/addresses.xlsx"
                    f"?account_id={acct}&source=sent")
@@ -336,9 +367,9 @@ def test_export_received_persons_only(monkeypatch, tmp_path):
         "i6": {"frm": "Me <me@gmail.com>"},                # own address
         "i7": {"frm": "Bank <alerts@chase.com>"},          # role local
     }
-    fake_list, fake_get, _ = _export_pages(mail)
+    fake_list, fake_batch, _ = _export_pages(mail)
     monkeypatch.setattr(gi.google, "list_message_ids", fake_list)
-    monkeypatch.setattr(gi.google, "get_message", fake_get)
+    monkeypatch.setattr(gi.google, "batch_get_message_metadata", fake_batch)
     client, acct, _ = _setup(tmp_path, monkeypatch)
     r = client.get(f"/api/v1/gmail/export/addresses.xlsx"
                    f"?account_id={acct}&source=received")
@@ -349,9 +380,9 @@ def test_export_received_persons_only(monkeypatch, tmp_path):
 
 
 def test_export_year_and_date_windows(monkeypatch, tmp_path):
-    fake_list, fake_get, seen = _export_pages({})
+    fake_list, fake_batch, seen = _export_pages({})
     monkeypatch.setattr(gi.google, "list_message_ids", fake_list)
-    monkeypatch.setattr(gi.google, "get_message", fake_get)
+    monkeypatch.setattr(gi.google, "batch_get_message_metadata", fake_batch)
     client, acct, _ = _setup(tmp_path, monkeypatch)
 
     r = client.get(f"/api/v1/gmail/export/addresses.xlsx"
@@ -415,12 +446,12 @@ def test_export_retries_gmail_rate_limit(monkeypatch, tmp_path):
             raise _rate_limit_error()
         return step
 
-    monkeypatch.setattr(gi.time, "sleep", lambda s: None)  # no real backoff
+    monkeypatch.setattr(gi, "time", _FakeClock())  # no real backoff
     monkeypatch.setattr(gi.google, "list_message_ids", fake_list)
     monkeypatch.setattr(
-        gi.google, "get_message",
-        lambda t, mid, *, metadata_only=False:
-            _meta(mid, frm="Jane <jane@acme.com>"))
+        gi.google, "batch_get_message_metadata",
+        lambda t, ids: [_meta(mid, frm="Jane <jane@acme.com>")
+                        for mid in ids])
     client, acct, _ = _setup(tmp_path, monkeypatch)
     r = client.get(f"/api/v1/gmail/export/addresses.xlsx"
                    f"?account_id={acct}&source=received")
@@ -437,10 +468,10 @@ def test_export_persistent_rate_limit_is_honest_502(monkeypatch, tmp_path):
     def fake_list(token, *, label="", q="", page_token="", limit=100):
         raise _rate_limit_error()
 
-    monkeypatch.setattr(gi.time, "sleep", lambda s: None)
+    monkeypatch.setattr(gi, "time", _FakeClock())
     monkeypatch.setattr(gi.google, "list_message_ids", fake_list)
-    monkeypatch.setattr(gi.google, "get_message",
-                        lambda *a, **k: _meta("m"))
+    monkeypatch.setattr(gi.google, "batch_get_message_metadata",
+                        lambda t, ids: [_meta(mid) for mid in ids])
     client, acct, _ = _setup(tmp_path, monkeypatch)
     r = client.get(f"/api/v1/gmail/export/addresses.xlsx"
                    f"?account_id={acct}&source=received")
@@ -462,12 +493,12 @@ def test_quota_exceeded_uses_window_backoff(monkeypatch, tmp_path):
             raise _quota_error()
         return {"ids": ["i1"], "next_page_token": "", "total_estimate": 1}
 
-    monkeypatch.setattr(gi.time, "sleep", sleeps.append)
+    monkeypatch.setattr(gi, "time", _FakeClock(sleeps.append))
     monkeypatch.setattr(gi.google, "list_message_ids", fake_list)
     monkeypatch.setattr(
-        gi.google, "get_message",
-        lambda t, mid, *, metadata_only=False:
-            _meta(mid, frm="Jane <jane@acme.com>"))
+        gi.google, "batch_get_message_metadata",
+        lambda t, ids: [_meta(mid, frm="Jane <jane@acme.com>")
+                        for mid in ids])
     client, acct, _ = _setup(tmp_path, monkeypatch)
     r = client.get(f"/api/v1/gmail/export/addresses.xlsx"
                    f"?account_id={acct}&source=received")
@@ -494,7 +525,7 @@ def test_quota_vs_burst_counters_are_separate(monkeypatch):
             raise _quota_error()
         return "done"
 
-    monkeypatch.setattr(gi.time, "sleep", lambda s: None)
+    monkeypatch.setattr(gi, "time", _FakeClock())
     assert gi._rate_retry(fn) == "done"
 
 
@@ -503,6 +534,30 @@ def test_quota_exceeded_flavor_detection():
     assert gi._quota_exceeded(_quota_error()) is True
     assert gi._quota_exceeded(_rate_limit_error()) is False
     assert gi._quota_exceeded(ValueError("no response")) is False
+
+
+def test_user_rate_limit_message_earns_window_wait():
+    """The batch endpoint's own throttle wording ("User-rate limit
+    exceeded", seen live 2026-09-15) is a PER-MINUTE window too — without
+    this the export burned the 17s burst chain and 502'd a whole year."""
+    import requests as _requests
+    resp = _requests.Response()
+    resp.status_code = 429
+    resp._content = (
+        b'{"error": {"code": 429, "status": "RESOURCE_EXHAUSTED", '
+        b'"message": "User-rate limit exceeded.  Retry after '
+        b'2026-09-15T20:49:30.000Z", '
+        b'"errors": [{"reason": "rateLimitExceeded"}]}}'
+    )
+    exc = _requests.HTTPError("429 Too Many Requests", response=resp)
+
+    assert gi._quota_exceeded(exc) is True
+    # And a bare 429 with no body still retries on the burst chain — the
+    # flavor is never guessed from the status code alone.
+    bare = _requests.Response()
+    bare.status_code = 429
+    assert gi._quota_exceeded(
+        _requests.HTTPError("429", response=bare)) is False
 
 
 # ---------------------------------------------------------------------------
@@ -527,3 +582,82 @@ def test_is_person_filter_unit():
     assert not gi._is_person("mailer-daemon@aol.com", own)
     assert not gi._is_person("garbage", own)
     assert not gi._is_person("", own)
+
+
+# ---------------------------------------------------------------------------
+# The admin kill-switch: browse off, export stays on
+# ---------------------------------------------------------------------------
+
+def _inbox_mode(monkeypatch, enabled: bool):
+    """Point the guard's settings at a temp store with the flag set."""
+    import app.auth.settings as auth_settings
+
+    store = auth_settings.AuthSettings(
+        db_path=str(tmp_db_path.get()))
+    store.set_gmail_inbox_enabled(enabled)
+    monkeypatch.setattr(auth_settings, "get_settings", lambda: store)
+
+
+tmp_db_path: dict = {}
+
+
+def test_inbox_disabled_gates_browse_but_not_export(monkeypatch, tmp_path):
+    """The admin toggle: with the interface OFF, every browsing endpoint
+    answers 503 but /gmail/mode and the address EXPORT keep working (the
+    export is the production feature)."""
+    import app.auth.settings as auth_settings
+    tmp_db_path["path"] = str(tmp_path / "settings.db")
+
+    store = auth_settings.AuthSettings(db_path=tmp_db_path["path"])
+    store.set_gmail_inbox_enabled(False)
+    monkeypatch.setattr(auth_settings, "get_settings", lambda: store)
+
+    fake_list, fake_batch, _ = _export_pages(
+        {"i1": {"frm": "Jane <jane@acme.com>"}})
+    monkeypatch.setattr(gi.google, "list_message_ids", fake_list)
+    monkeypatch.setattr(gi.google, "batch_get_message_metadata", fake_batch)
+    monkeypatch.setattr(gi.google, "get_message",
+                        lambda *a, **k: _meta("m"))
+    client, acct, _ = _setup(tmp_path, monkeypatch)
+
+    # mode probe: reachable, honest state
+    r = client.get("/api/v1/gmail/mode")
+    assert r.status_code == 200
+    assert r.json() == {"inbox_enabled": False, "export_enabled": True}
+
+    # browse endpoints: honest 503
+    assert client.get(
+        f"/api/v1/gmail/messages?account_id={acct}").status_code == 503
+    assert client.get(
+        f"/api/v1/gmail/messages/m1?account_id={acct}").status_code == 503
+    assert client.post(
+        "/api/v1/gmail/send",
+        json={"account_id": acct, "to": "a@b.com", "subject": "s",
+              "body": "x"}).status_code == 503
+
+    # the export: still 200 with real rows
+    r = client.get(f"/api/v1/gmail/export/addresses.xlsx"
+                   f"?account_id={acct}&source=received")
+    assert r.status_code == 200
+    rows = _xlsx_rows(r.content)
+    assert [row[0] for row in rows[1:]] == ["jane@acme.com"]
+
+
+def test_inbox_enabled_default_keeps_everything_working(monkeypatch, tmp_path):
+    """Missing row = feature ON (the safe default) — no toggle needed on a
+    fresh install."""
+    import app.auth.settings as auth_settings
+    tmp_db_path["path"] = str(tmp_path / "settings.db")
+
+    store = auth_settings.AuthSettings(db_path=tmp_db_path["path"])
+    monkeypatch.setattr(auth_settings, "get_settings", lambda: store)
+
+    monkeypatch.setattr(gi.google, "list_message_ids",
+                        lambda *a, **k: {"ids": [], "next_page_token": "",
+                                         "total_estimate": 0})
+    monkeypatch.setattr(gi.google, "get_message",
+                        lambda *a, **k: _meta("m"))
+    client, acct, _ = _setup(tmp_path, monkeypatch)
+
+    assert client.get(
+        f"/api/v1/gmail/messages?account_id={acct}").status_code == 200

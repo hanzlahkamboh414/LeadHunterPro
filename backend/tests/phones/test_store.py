@@ -75,6 +75,63 @@ def test_add_drops_bad_phones_honestly(tmp_path):
     assert counts["inserted"] == 1
 
 
+def test_explicit_state_only_record_never_infers_trade_from_name(tmp_path):
+    store = PhoneLeadsStore(db_path=str(tmp_path / "phones.db"))
+    record = _rec("6125550100", "North Star Construction", "", state="MN")
+    record["state_only"] = True
+    assert store.add([record])["inserted"] == 1
+    assert store.unclaimed_count("gc", "MN") == 0
+    assert store.unclaimed_count("", "MN") == 0
+    assert store.serve("", "MN", "", 1, "user") == []
+    assert store.servable_by_state() == {}
+    assert store.pool_stats()["total"] == 1  # retained for verification
+
+
+def test_business_and_verified_trade_required_for_new_claim(tmp_path):
+    store = PhoneLeadsStore(db_path=str(tmp_path / "phones.db"))
+    no_business = _rec("5031110001", "", "ROOFING")
+    no_trade = _rec("5031110002", "North Star Roofing", "")
+    no_trade["state_only"] = True
+    store.add([no_business, no_trade, _rec("5031110003", "Ready Co", "ROOFING")])
+
+    assert store.unclaimed_count("", "WA") == 1
+    assert store.servable_by_state() == {"WA": 1}
+    assert [r["business_name"] for r in store.serve("", "WA", "", 10, "u1")] == [
+        "Ready Co"]
+    assert store.pool_stats()["total"] == 3
+    assert store.pending_trade_enrichment(10)[0]["business_name"] == \
+        "North Star Roofing"
+
+
+def test_trade_resolution_promotes_only_with_evidence(tmp_path):
+    store = PhoneLeadsStore(db_path=str(tmp_path / "phones.db"))
+    rec = _rec("6125550100", "North Star Roofing", "", state="MN")
+    rec["state_only"] = True
+    store.add([rec])
+    lead = store.pending_trade_enrichment(1)[0]
+
+    assert not store.set_trade_resolution(
+        lead["id"], trade="roofing", evidence_url="", evidence_kind="website")
+    assert store.serve("", "MN", "", 1, "u1") == []
+    assert store.set_trade_resolution(
+        lead["id"], trade="roofing",
+        evidence_url="https://northstarroofing.com/services",
+        evidence_kind="company_website")
+    served = store.serve("roofing", "MN", "", 1, "u1")
+    assert len(served) == 1
+    assert served[0]["business_name"] == "North Star Roofing"
+    assert served[0]["person_name"] == "Jane Smith"  # source value unchanged
+    assert served[0]["trade_evidence_url"] == \
+        "https://northstarroofing.com/services"
+
+
+def test_missing_trade_is_not_inferred_from_business_name(tmp_path):
+    store = PhoneLeadsStore(db_path=str(tmp_path / "phones.db"))
+    store.add([_rec("5031110001", "North Star Roofing", "")])
+    assert store.serve("roofing", "WA", "", 1, "u1") == []
+    assert len(store.pending_trade_enrichment(1)) == 1
+
+
 def test_serve_trade_gate_strict(tmp_path):
     """P2 rule on phones too: a trade-filtered serve only serves that trade;
     other-trade rows stay banked as pool inventory."""
@@ -92,21 +149,28 @@ def test_serve_trade_gate_strict(tmp_path):
 
 
 def test_serve_location_filters_compose(tmp_path):
-    store = PhoneLeadsStore(db_path=str(tmp_path / "phones.db"))
-    store.add([
+    """State and city filters narrow the serve. Each probe gets its own pool:
+    with a one-shot serve the same rows cannot be probed twice (the first
+    serve owns them, and owned rows serve to nobody)."""
+    rows = [
         _rec("5031110001", "A", city="VANCOUVER", state="WA"),
         _rec("5031110002", "B", city="SEATTLE", state="WA"),
         _rec("5121110003", "C", city="AUSTIN", state="TX"),
-    ])
-    assert [l["business_name"] for l in store.serve("", "WA", "", 10, "u1")] \
+    ]
+    by_state = PhoneLeadsStore(db_path=str(tmp_path / "state.db"))
+    by_state.add(rows)
+    assert [l["business_name"] for l in by_state.serve("", "WA", "", 10, "u1")] \
         == ["A", "B"]
-    assert [l["business_name"] for l in store.serve("", "WA", "seattle", 10, "u1")] \
+
+    by_city = PhoneLeadsStore(db_path=str(tmp_path / "city.db"))
+    by_city.add(rows)
+    assert [l["business_name"] for l in by_city.serve("", "WA", "seattle", 10, "u1")] \
         == ["B"]
 
 
 def test_serve_is_exclusive_across_users(tmp_path):
-    """The dossier_owners rule: once a lead serves to a user, it is that
-    user's inventory — a second user's search never re-serves it."""
+    """One-shot serve: once a lead serves to a user it never serves again —
+    not to a second user, and not back to the first one."""
     store = PhoneLeadsStore(db_path=str(tmp_path / "phones.db"))
     store.add([_rec("5031110001"), _rec("5031110002")])
     alice = store.serve("gc", "", "", 1, "alice")
@@ -115,10 +179,12 @@ def test_serve_is_exclusive_across_users(tmp_path):
     bob = store.serve("gc", "", "", 10, "bob")
     assert [l["id"] for l in bob] != [alice[0]["id"]]
     assert len(bob) == 1
-    # Alice's own re-search still serves her lead back (idempotent claim) —
-    # and now that bob owns the other, it is the ONLY thing she can get.
-    assert [l["id"] for l in store.serve("gc", "", "", 10, "alice")] == \
-        [alice[0]["id"]]
+    # The user's OWN re-search is empty too — the pool has nothing FRESH for
+    # her, and her earlier lead is not served back (one-shot serve, the
+    # user's policy: purana data kisi ko bhi na mile).
+    assert store.serve("gc", "", "", 10, "alice") == []
+    # Her claim is untouched by that: the lead is still hers to dial.
+    assert [l["id"] for l in store.list_owned("alice")] == [alice[0]["id"]]
     # Nobody left after both are claimed.
     assert store.serve("gc", "", "", 10, "carol") == []
     assert store.unclaimed_count("gc") == 0
@@ -136,6 +202,60 @@ def test_serve_exclude_ids_prevents_run_duplicates(tmp_path):
     assert len(first) + len(second) == 2
 
 
+def test_list_owned_shows_all_todays_batches(tmp_path):
+    """Today's call sheet retains claims from multiple searches."""
+    store = PhoneLeadsStore(db_path=str(tmp_path / "phones.db"))
+    store.add([_rec("5031110001", "One"), _rec("5031110002", "Two"),
+               _rec("5031110003", "Three")])
+    first = store.serve("gc", "", "", 2, "alice")
+    assert {l["business_name"] for l in store.list_owned("alice")} == \
+        {"One", "Two"}
+    second = store.serve("gc", "", "", 5, "alice")  # only the fresh one left
+    assert [l["business_name"] for l in second] == ["Three"]
+    assert {l["business_name"] for l in store.list_owned("alice")} == {"One", "Two", "Three"}
+
+
+def test_twice_in_one_second_is_still_two_batches(tmp_path):
+    """Two searches in the same wall-clock second must not collapse into one
+    batch: the stamp's microsecond + random suffix makes every serve call its
+    own batch. Without this, a fast repeat click would show the union."""
+    store = PhoneLeadsStore(db_path=str(tmp_path / "phones.db"))
+    store.add([_rec("5031110001"), _rec("5031110002")])
+    store.serve("gc", "", "", 1, "alice")
+    store.serve("gc", "", "", 1, "alice")
+    mine = store.list_owned("alice")
+    assert len(mine) == 2
+
+
+def test_replaced_batch_numbers_still_exclusive(tmp_path):
+    """Hidden does not mean released: numbers a second search pushed off the
+    sheet still serve to nobody — the ownership row lives on."""
+    store = PhoneLeadsStore(db_path=str(tmp_path / "phones.db"))
+    store.add([_rec("5031110001"), _rec("5031110002"), _rec("5031110003")])
+    store.serve("gc", "", "", 2, "alice")   # batch 1: ids 1, 2
+    store.serve("gc", "", "", 5, "alice")   # batch 2: id 3
+    # Fresh pool is now empty even for a never-before-seen user.
+    assert store.serve("gc", "", "", 10, "carol") == []
+    assert store.unclaimed_count("gc") == 0
+    stats = store.pool_stats()
+    assert stats["claimed"] == 3 and stats["unclaimed"] == 0
+
+
+def test_claim_visibility_by_user_reports_hidden(tmp_path):
+    """The admin report's honest split: what each user's sheet SHOWS (their
+    latest batch) vs the stock hiding behind it (still owned, not shown).
+    """
+    store = PhoneLeadsStore(db_path=str(tmp_path / "phones.db"))
+    store.add([_rec("5031110001"), _rec("5031110002"), _rec("5031110003")])
+    store.serve("gc", "", "", 2, "alice")
+    store.serve("gc", "", "", 5, "alice")   # pushes the first 2 off-screen
+    rows = {r["user_id"]: r for r in store.claim_visibility_by_user()}
+    assert rows["alice"]["total"] == 3
+    assert rows["alice"]["visible"] == 3
+    assert rows["alice"]["hidden"] == 0
+    assert "bob" not in rows
+
+
 def test_list_owned_and_pool_stats(tmp_path):
     store = PhoneLeadsStore(db_path=str(tmp_path / "phones.db"))
     store.add([_rec("5031110001"), _rec("5031110002", trade="PAINTING")])
@@ -148,6 +268,59 @@ def test_list_owned_and_pool_stats(tmp_path):
     assert stats["claimed"] == 1
     assert stats["unclaimed"] == 1
     assert stats["by_trade"]["gc"] == 1
+
+
+def test_servable_by_state_counts_only_fresh_rows(tmp_path):
+    """The Location counts ("is location mein kitna naya data hai"): per
+    state, the rows that would serve RIGHT NOW. A state whose numbers were
+    already handed out reads 0 while the pool file still holds them — the
+    two numbers are deliberately different, never conflated."""
+    store = PhoneLeadsStore(db_path=str(tmp_path / "phones.db"))
+    store.add([
+        _rec("5031110001", "WA one", state="WA"),
+        _rec("5031110002", "WA two", state="WA"),
+        _rec("5121110003", "TX one", state="TX"),
+        _rec("5121110004", "TX two", state="TX"),
+    ])
+    assert store.servable_by_state() == {"WA": 2, "TX": 2}
+
+    # Claim both WA rows: nothing fresh is left there, and TX is untouched.
+    served = store.serve("", "WA", "", 10, "alice")
+    assert len(served) == 2
+    assert store.servable_by_state() == {"TX": 2}
+    # The raw pool still holds them (by_state) — the honest difference.
+    assert store.pool_stats()["by_state"]["WA"] == 2
+    # A state the pool never stocked is absent from the map, not "unknown".
+    assert "OR" not in store.servable_by_state()
+
+
+def test_servable_by_state_excludes_parked_rows(tmp_path):
+    """A voicemail-parked number is resting: it serves to nobody during the
+    cooldown, so it must not be advertised as available either."""
+    store = PhoneLeadsStore(db_path=str(tmp_path / "phones.db"))
+    store.add([_rec("5031110001", state="WA")])
+    lead = store.serve("", "WA", "", 10, "alice")[0]
+    store.mark_voicemail(lead["id"], "alice")
+    assert store.servable_by_state() == {}
+
+
+def test_pool_stats_counts_do_not_drift(tmp_path):
+    """claimed + unclaimed must equal total EXACTLY, before and after a
+    retirement: the numbers are counted over one row set, never derived by
+    subtracting an ownership count that a retired lead can inflate (29 stale
+    ownership rows were found live on 2026-09-16)."""
+    store = PhoneLeadsStore(db_path=str(tmp_path / "phones.db"))
+    store.add([_rec("5031110001", state="WA"), _rec("5031110002", state="TX")])
+    lead = store.serve("", "WA", "", 10, "alice")[0]
+    stats = store.pool_stats()
+    assert stats["total"] == 2 and stats["claimed"] == 1
+    assert stats["claimed"] + stats["unclaimed"] == stats["total"]
+
+    store.mark_lead(lead["id"], "alice")  # ✓Lead — the row leaves the pool
+    stats = store.pool_stats()
+    assert stats["total"] == 1 and stats["claimed"] == 0
+    assert stats["claimed"] + stats["unclaimed"] == stats["total"] == 1
+    assert stats["unclaimed"] == 1
 
 
 # ---------------------------------------------------------------------------

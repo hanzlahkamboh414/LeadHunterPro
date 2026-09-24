@@ -213,7 +213,7 @@ class OvertureStore:
             return {}
         try:
             import duckdb
-            from app.phones.enrich import _clean_emails
+            from app.email.email_cleaner import clean_emails
 
             con = duckdb.connect(self._db_path, read_only=True)
             try:
@@ -228,11 +228,12 @@ class OvertureStore:
             logger.info("overture lookup unavailable — honest empty",
                         exc_info=True)
             return {}
-        # The same page-furniture rules the crawl applies (§14 reuse):
-        # an example.com placeholder in Overture is as worthless as one
-        # scraped off a website.
+        # The same page-furniture rules the crawl applies (§14 reuse) — now
+        # the SHARED gate in ``app.email.email_cleaner`` rather than a private
+        # name reached across packages, which is what let the two rule lists
+        # drift apart in the first place.
         return {
             phone: {"email": email, "website": website or ""}
             for phone, email, website in rows
-            if _clean_emails([email])
+            if clean_emails([email])
         }

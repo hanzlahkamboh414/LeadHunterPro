@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.engines.verification.location_verifier import LocationVerifier
+from app.engines.verification.location_verifier import LocationVerifier, state_from_text
 from app.engines.verification.models import VerificationStatus
 
 
@@ -301,3 +301,154 @@ class TestDeterminismAndShape:
             "is_reliable",
         ):
             assert key in ev
+
+
+# ---------------------------------------------------------------------------
+# The canonical free-text -> state fold (added 2026-09-21)
+# ---------------------------------------------------------------------------
+
+
+class TestStateFromText:
+    """``state_from_text`` is the ONE answer to "which state is this?".
+
+    It exists because two other answers had grown: the scorer's
+    ``"texas" in loc or "tx" in loc`` substring test and ``harvester.store``'s
+    own tail-reading fold. The scorer's version credited any string merely
+    CONTAINING "tx" and read a bare state name anywhere in a compound string
+    as proof — measured live, that handed the Texas service-area signal to 14
+    dossiers whose real home is elsewhere.
+
+    The rule pinned here is: exactly one state, or "". A string naming two is
+    ambiguous and this module's standing policy for conflicting location
+    evidence is to claim neither.
+    """
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            # the forms the live store actually carries
+            ("Houston, TX", "TX"),
+            ("Dallas, TX", "TX"),
+            ("Houston, Texas", "TX"),
+            ("Texas", "TX"),
+            ("New York, NY", "NY"),
+            ("Miami, FL", "FL"),
+            # forms the OLD tail-reading fold already handled — pinned so the
+            # delegation in harvester.store is a no-op for them
+            ("Dallas TX", "TX"),
+            ("Vancouver, WA", "WA"),
+            ("austin tx", "TX"),
+            ("washington", "WA"),
+            ("Harris County, Texas", "TX"),
+            # forms it MISSED — these are why the fold moved to this module
+            ("Plano TX 75024", "TX"),
+            ("Houston, TX 77002", "TX"),
+            ("Plano TX 75024-1234", "TX"),
+            ("Texas, USA", "TX"),
+            ("Texas, US", "TX"),
+            ("Texas, United States", "TX"),
+        ],
+    )
+    def test_a_single_state_is_folded(self, text, expected):
+        assert state_from_text(text) == expected
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "",
+            "   ",
+            "London",
+            "Smith Jones",
+            "unverified",
+            "Netherlands",
+            # a US code we do not know is still not a US state
+            "Niagara Falls, ON",
+            "Toronto, Canada",
+        ],
+    )
+    def test_a_string_naming_no_us_state_is_an_honest_miss(self, text):
+        assert state_from_text(text) == ""
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # THE rule: two US states is ambiguous, so neither is claimed.
+            # All four were measured on the live store, and every one is a
+            # company whose real headquarters is elsewhere.
+            "Dallas, TX (corporate HQ: Tustin, CA)",
+            "Seattle, WA (headquarters); offices in Houston, TX and other US cities",
+            "Allentown, PA (HQ); Houston, TX (operational presence)",
+            # a state name inside a city name is still a mention of that state
+            "Kansas City, MO",
+        ],
+    )
+    def test_a_string_naming_two_states_is_not_resolved(self, text):
+        assert state_from_text(text) == ""
+
+    def test_a_compound_string_about_one_state_still_folds(self):
+        """The counter-case to the rule above: verbosity is not ambiguity.
+
+        Every place named here is in Texas, so the string is not ambiguous and
+        the fold must still resolve it — a rule that rejected any compound
+        string would be a different, worse rule.
+        """
+        assert state_from_text(
+            "Lubbock, TX (with additional offices in Dallas, TX and San Angelo, TX)"
+        ) == "TX"
+        assert state_from_text(
+            "Texas (offices in Grand Prairie, Houston, and Buda)"
+        ) == "TX"
+
+    def test_a_non_us_home_with_a_us_office_names_that_one_state(self):
+        """An honest LIMIT, pinned so nobody reads it as a guarantee.
+
+        "Amsterdam, Netherlands (with Dallas, TX office)" names exactly ONE
+        US state, so the fold returns TX — by its own contract it reports the
+        US state a string names, not where the company is headquartered. It
+        cannot detect "home elsewhere, US office here" when the other place is
+        not a US state, because a non-US place is not a state it knows.
+
+        That is a limitation of a US-state fold, not a defect in it, and the
+        live store holds exactly one such dossier. Detecting it would need a
+        non-US place gazetteer, which is not what this module is for.
+        """
+        text = "Amsterdam, Netherlands (with Dallas, TX office)"
+        assert state_from_text(text) == "TX"
+
+    def test_service_area_language_is_not_location_evidence(self):
+        """The module's standing rule, applied to the fold as well.
+
+        A company that SERVES Texas is not a company IN Texas.
+        """
+        assert state_from_text("TX area") == ""
+        assert state_from_text("Dallas-Fort Worth metroplex") == ""
+
+    def test_a_word_ending_in_a_state_code_is_not_that_state(self):
+        """``\b`` on both sides is load-bearing.
+
+        Without it "Berlin" reads as IN (Indiana) and every location ending in
+        a two-letter US code becomes a coin flip.
+        """
+        assert state_from_text("Berlin") == ""
+        assert state_from_text("Dublin") == ""
+        assert state_from_text("Turin") == ""
+
+    def test_a_real_trailing_code_still_folds(self):
+        """The counter-case: the boundary must not abolish the form."""
+        assert state_from_text("Portland OR") == "OR"
+        assert state_from_text("Portland, OR") == "OR"
+
+    def test_the_harvester_fold_delegates_to_this_one(self):
+        """One implementation, two names — the whole point of the change.
+
+        If these ever disagree, the scorer and the serve-time filter are
+        answering the same question differently again.
+        """
+        from app.harvester.store import state_from_location
+
+        for text in (
+            "Houston, TX", "Plano TX 75024", "Texas, USA", "Dallas TX",
+            "Seattle, WA (headquarters); offices in Houston, TX",
+            "Niagara Falls, ON", "", "London", "unverified",
+        ):
+            assert state_from_location(text) == state_from_text(text), text

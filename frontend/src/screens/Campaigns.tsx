@@ -134,7 +134,7 @@ export default function Campaigns() {
   });
 
   return (
-    <div className="px-8 py-7 max-w-4xl">
+    <div className="workspace-page page-focused">
       <PageHeader
         eyebrow="LeadHunter Pro"
         title="Campaigns"
@@ -190,9 +190,10 @@ export default function Campaigns() {
       {campaigns.isLoading && (
         <p className="mt-6 text-[13px] text-slate-500">Loading campaigns…</p>
       )}
+      {campaigns.isError && <div role="alert" className="mt-5 rounded-xl border border-rose-400/20 bg-rose-500/10 p-4 text-sm text-rose-200">Campaigns could not be loaded. <button className="underline ml-2" onClick={() => void campaigns.refetch()}>Try again</button></div>}
 
       {campaigns.data && campaigns.data.length === 0 && !building && (
-        <div className="mt-6 rounded-xl border border-white/5 bg-white/[0.02] p-8 text-center">
+        <div className="mt-6 ui-panel rounded-xl border border-white/5 bg-white/[0.02] p-8 text-center">
           <Send className="w-8 h-8 text-slate-600 mx-auto" />
           <p className="mt-3 text-[14px] text-slate-400">No campaigns yet.</p>
           <p className="mt-1 text-[12.5px] text-slate-500">
@@ -263,7 +264,7 @@ function CampaignCard({
   });
 
   return (
-    <div className="rounded-xl border border-white/5 bg-white/[0.02] p-5">
+    <div className="ui-panel rounded-xl border border-white/5 bg-white/[0.02] p-5">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex items-center gap-2.5">

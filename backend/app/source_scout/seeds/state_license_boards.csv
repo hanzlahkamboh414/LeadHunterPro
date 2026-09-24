@@ -5,7 +5,7 @@ TX,TDLR,Dept of Licensing & Regulation,https://www.tdlr.texas.gov,"electrical,me
 NY,,none,,none,4,51349,,no state-level contractor license (NYC DOB covers NYC)
 IL,IDFPR,Dept of Financial & Professional Regulation,https://www.idfpr.illinois.gov,roofing,5,29457,,"state licenses roofers; GC is local-only; url_unverified"
 PA,,none,,none,6,28752,,no state-level license; Home Improvement registration via AG
-NC,GLB,Licensing Board for General Contractors,,gc,7,28390,,"NC licenses GC only; url_unverified"
+NC,GLB,Licensing Board for General Contractors,,gc,7,28390,,"NC licenses GC only; https://www.nclbgc.org/ says full mailing list costs $25; free bulk feed pending"
 WA,LNI,Dept of Labor & Industries,https://lni.wa.gov,all_trades,8,27190,open_data_api,"soda m8qx-ubtq verified live; 115k+ records"
 NJ,DCA,Div of Consumer Affairs,https://nj.gov/dca,gc,9,22502,,"Home Improvement Contractor registration, not a GC license"
 GA,SOS-PDB,Office of Secretary of State,https://sos.ga.gov,gc,10,22475,,"Professional Licensing Boards Division licenses GCs"
@@ -14,8 +14,8 @@ OH,,none,,none,12,21399,,no state-level license (local)
 MI,,none,,none,13,21298,,no state-level license (local)
 VA,,none,,none,14,21118,,no state-level GC license (DPOR covers some trades)
 CO,,none,,none,15,20473,,no state-level license (local)
-MN,DLI,Dept of Labor & Industry,https://www.dli.mn.gov,"gc,electrical,mechanical,plumbing",16,17568,,"residential building contractor + licensed trades; url verification pass pending"
-AZ,ROC,Registrar of Contractors,https://www.azroc.gov,all_trades,17,15551,,
+MN,DLI,Dept of Labor & Industry,https://secure.doli.state.mn.us/ccld/data/MNDLILicRegCertExport_Contractor_Registrations.csv,"gc,electrical,mechanical,plumbing",16,17568,bulk_file,"official nightly contractor registrations; phone present; trade unclassified; hand-verified state-only importer stocks without guessing trade"
+AZ,ROC,Registrar of Contractors,,all_trades,17,15551,,"https://roc.az.gov/posting-list lists free active-contractor CSV; automated fetch returns 403 challenge; pending reliable public download path"
 IN,,none,,none,18,14935,,no state-level license (local)
 OR,CCB,Construction Contractors Board,https://www.oregon.gov/ccb,all_trades,19,14907,open_data_api,"socrata g77e-6bhs verified; already promoted"
 WI,,none,,none,20,14679,,no state-level license (local)
@@ -23,12 +23,12 @@ MO,,none,,none,21,14570,,no state-level license (local)
 MD,DLLR,Div of Labor & Reg,https://www.dllr.maryland.gov,gc,22,14528,,"MHIC — home improvement contracting"
 UT,DOPL,Division of Professional Licensing,https://dopl.utah.gov,"electrical,mechanical,plumbing",23,13022,,"no state GC license"
 TN,BC,Board for Licensing Contractors,https://www.tn.gov/commerce,gc,24,12692,,
-SC,LLR,Dept of Labor Licensing & Reg,https://llr.sc.gov,gc,25,11981,,"GC + residential; specialty licenses exist"
+SC,LLR,Dept of Labor Licensing & Reg,https://llr.sc.gov,gc,25,11981,,"GC + residential; specialty licenses exist; official licensee-list request form; free bulk feed pending"
 ID,,none,,none,26,9895,,no state-level contractor license (local)
 IA,,none,,none,27,9067,,no state-level license (local)
 AL,ALBCB,Licensing Board for General Contractors,,gc,28,8982,,"url_unverified"
 OK,CIB,Construction Industries Board,https://ok.gov/cib,"gc,electrical,mechanical,plumbing",29,8966,,
-LA,LSLBC,State Licensing Board for Contractors,https://www.lslbc.louisiana.gov,all_trades,30,8900,,
+LA,LSLBC,State Licensing Board for Contractors,https://www.lslbc.louisiana.gov,all_trades,30,8900,,"official roster request portal; free bulk feed pending"
 KY,DHBC,Dept of Housing Buildings & Construction,https://dhbc.ky.gov,"electrical,mechanical,plumbing",31,8201,,
 CT,DCP,Dept of Consumer Protection,https://portal.ct.gov/DCP,gc,32,8152,,"home improvement contractor"
 KS,,none,,none,33,7398,,no state-level license (local)

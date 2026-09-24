@@ -27,7 +27,7 @@ import threading
 from typing import Any, Callable
 
 from app.lead_research.service import PendingLeadsStore
-from app.phones.enrich import enrich_lead
+from app.phones.enrich import enrich_lead, resolve_trade
 from app.phones.store import PhoneLeadsStore
 
 logger = logging.getLogger(__name__)
@@ -36,6 +36,8 @@ logger = logging.getLogger(__name__)
 INTERVAL_S = 15.0
 #: How many leads one pass may enrich (gentle on the crawl + search rate).
 BATCH_SIZE = 5
+TRADE_BATCH_SIZE = 3
+TRADE_INTERVAL_S = 60.0
 #: Consecutive hard errors before a lead is set aside for this process.
 _MAX_FAILURES = 3
 
@@ -50,17 +52,25 @@ class PhoneEnrichmentWorker:
         pending_store: PendingLeadsStore,
         *,
         enrich: Callable[[dict[str, Any]], dict[str, str]] | None = None,
+        resolve_trade_fn: Callable[[dict[str, Any]], dict[str, str]] | None = None,
         interval_s: float = INTERVAL_S,
         batch_size: int = BATCH_SIZE,
+        trade_batch_size: int = TRADE_BATCH_SIZE,
+        trade_interval_s: float = TRADE_INTERVAL_S,
     ) -> None:
         self._phone_store = phone_store
         self._pending_store = pending_store
         self._enrich = enrich or enrich_lead
+        self._resolve_trade = resolve_trade_fn or resolve_trade
         self._interval_s = interval_s
         self._batch_size = batch_size
+        self._trade_batch_size = trade_batch_size
+        self._trade_interval_s = trade_interval_s
         self._fail_counts: dict[int, int] = {}
+        self._trade_fail_counts: dict[int, int] = {}
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._trade_thread: threading.Thread | None = None
 
     # -- lifecycle -------------------------------------------------------------
 
@@ -71,7 +81,12 @@ class PhoneEnrichmentWorker:
         self._thread = threading.Thread(
             target=self._run_forever, name="phone-enricher", daemon=True,
         )
+        self._trade_thread = threading.Thread(
+            target=self._run_trade_forever, name="phone-trade-enricher",
+            daemon=True,
+        )
         self._thread.start()
+        self._trade_thread.start()
         logger.info(
             "phone enrichment worker started (interval %ss, batch %d)",
             self._interval_s, self._batch_size,
@@ -89,7 +104,49 @@ class PhoneEnrichmentWorker:
                     "phone enrichment pass failed — retrying next pass"
                 )
 
+    def _run_trade_forever(self) -> None:
+        while not self._stop.wait(self._trade_interval_s):
+            try:
+                self.run_trade_once()
+            except Exception:  # noqa: BLE001 — trade failures cannot stop email work
+                logger.exception("phone trade pass failed — retrying next pass")
+
     # -- one pass ---------------------------------------------------------------
+
+    def run_trade_once(self) -> dict[str, int]:
+        """Check raw, unclaimed businesses before they reach a user search."""
+        stats = {"considered": 0, "verified": 0, "unverified": 0,
+                 "errors": 0, "skipped_poison": 0}
+        leads = self._phone_store.pending_trade_enrichment(
+            self._trade_batch_size * 2)
+        for lead in leads:
+            if stats["considered"] >= self._trade_batch_size:
+                break
+            lead_id = lead["id"]
+            if self._trade_fail_counts.get(lead_id, 0) >= _MAX_FAILURES:
+                stats["skipped_poison"] += 1
+                continue
+            stats["considered"] += 1
+            try:
+                outcome = self._resolve_trade(lead)
+                promoted = self._phone_store.set_trade_resolution(
+                    lead_id, trade=outcome.get("trade", ""),
+                    evidence_url=outcome.get("evidence_url", ""),
+                    evidence_kind=outcome.get("evidence_kind", ""),
+                )
+            except Exception:  # noqa: BLE001 — isolate one failing lead
+                stats["errors"] += 1
+                self._trade_fail_counts[lead_id] = (
+                    self._trade_fail_counts.get(lead_id, 0) + 1)
+                logger.exception("trade evidence check failed for lead %s", lead_id)
+                continue
+            if promoted:
+                stats["verified"] += 1
+            else:
+                stats["unverified"] += 1
+        if stats["considered"] or stats["skipped_poison"]:
+            logger.info("phone trade pass: %s", stats)
+        return stats
 
     def run_once(self) -> dict[str, int]:
         """One enrichment pass; returns what happened (logs + tests)."""

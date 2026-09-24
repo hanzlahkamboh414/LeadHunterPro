@@ -72,21 +72,30 @@ US_STATE_NAMES: dict[str, str] = {
 def state_from_location(location: str) -> str:
     """The 2-letter state code from a free-text location, or ''.
 
-    Handles the trailing-code form ("Dallas TX", "Vancouver, WA") and the
-    full-name form ("Texas", "Harris County, Texas"). Anything unparsable
-    is an honest '' — a guessed state would silently mis-rank demand.
+    Handles the trailing-code form ("Dallas TX", "Vancouver, WA"), the
+    full-name form ("Texas", "Harris County, Texas"), a trailing ZIP
+    ("Plano TX 75024") and a trailing country ("Texas, USA"). Anything
+    unparsable, or naming more than one state, is an honest '' — a guessed
+    state would silently mis-rank demand.
+
+    DELEGATES to :func:`app.engines.verification.location_verifier.state_from_text`
+    (2026-09-21). This used to be a second, independent fold, and the scorer
+    grew a third (`scoring._is_service_area`'s `"tx" in loc` substring test).
+    Three answers to "which state is this?" is how one string gets scored as
+    Texas and served to a Colorado run, so the location module now owns the
+    single answer and this name is kept only because two callers and their
+    tests already use it (the demand hook in ``api/v1/leads`` and
+    ``serve_shared``'s serve-time filter).
+
+    The delegation is behaviour-preserving for every form this function
+    already folded, and strictly more informed for the ones it did not: a
+    compound string like "Seattle, WA (headquarters); offices in Houston, TX"
+    now folds to '' (ambiguous) where the tail-reading happened to agree by
+    accident, and "Plano TX 75024" now folds to 'TX' where it used to miss.
     """
-    s = (location or "").strip()
-    if not s:
-        return ""
-    tail = s.rsplit(",", 1)[-1].strip()
-    if len(tail) == 2 and tail.upper() in _STATE_ABBRS:
-        return tail.upper()
-    if len(s) >= 2 and s[-2:].upper() in _STATE_ABBRS and not s[-3].isalpha():
-        return s[-2:].upper()
-    if tail.lower() in US_STATE_ABBRS:
-        return US_STATE_ABBRS[tail.lower()]
-    return ""
+    from app.engines.verification.location_verifier import state_from_text
+
+    return state_from_text(location)
 
 
 def _now() -> str:
@@ -202,6 +211,22 @@ class HarvesterStore:
                     working INTEGER NOT NULL DEFAULT 0,
                     last_seen TEXT NOT NULL DEFAULT '',
                     PRIMARY KEY (source_id, segment)
+                )
+            """)
+            # Offset paging position per (source, pair). Without it every
+            # run re-read the SAME first page of the matching set, so a
+            # pair stocked once and then reported 100% duplicates forever
+            # (measured live 2026-09-23: WA gc had 55,184 matching rows and
+            # the lane had only ever read the first 250).
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS source_cursor (
+                    source_id TEXT NOT NULL,
+                    trade TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    next_offset INTEGER NOT NULL DEFAULT 0,
+                    sweeps INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL DEFAULT '',
+                    PRIMARY KEY (source_id, trade, state)
                 )
             """)
             conn.commit()
@@ -543,6 +568,57 @@ class HarvesterStore:
             conn.execute(
                 "DELETE FROM source_yield WHERE source_id = ? AND segment = ?",
                 (source_id, segment),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    # -- source cursor (offset paging) -----------------------------------------
+
+    def cursor_get(self, source_id: str, trade: str, state: str) -> int:
+        """The next ``$offset`` to read for this (source, trade, state).
+
+        0 means either "never read" or "the last sweep wrapped" — both are
+        honestly the same thing to the caller: start from the top.
+        """
+        if not source_id:
+            return 0
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT next_offset FROM source_cursor "
+                "WHERE source_id = ? AND trade = ? AND state = ?",
+                (source_id, trade, state),
+            ).fetchone()
+        finally:
+            conn.close()
+        return int(row[0]) if row else 0
+
+    def cursor_advance(self, source_id: str, trade: str, state: str,
+                       next_offset: int, swept: bool = False) -> None:
+        """Move the cursor after a successful fetch consumed one window.
+
+        ``swept`` records that this window was the END of the matching set,
+        which is why ``next_offset`` is 0 again. The count is kept so the
+        full passes over a source stay observable rather than looking like
+        a cursor that never moved.
+        """
+        if not source_id:
+            return
+        conn = self._conn()
+        try:
+            conn.execute(
+                """
+                INSERT INTO source_cursor
+                    (source_id, trade, state, next_offset, sweeps, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_id, trade, state) DO UPDATE SET
+                    next_offset = excluded.next_offset,
+                    sweeps = sweeps + excluded.sweeps,
+                    updated_at = excluded.updated_at
+                """,
+                (source_id, trade, state, max(0, int(next_offset)),
+                 1 if swept else 0, _now()),
             )
             conn.commit()
         finally:

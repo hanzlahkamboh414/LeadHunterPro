@@ -10,6 +10,8 @@ The three exit criteria of Phase 1, tested at the store:
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from app.source_scout.store import (
@@ -21,6 +23,7 @@ from app.source_scout.store import (
     STATUS_PROMOTED,
     STATUS_UNTRIED,
     ScoutStore,
+    servable_for,
 )
 
 
@@ -189,3 +192,90 @@ def test_reseed_never_resurrects(tmp_path):
     store.mark_blocked("state_CA_board", "403")
     _seed_phone(store)  # same metadata re-seeded — status must survive
     assert store.get("state_CA_board")["status"] == STATUS_BLOCKED
+
+
+# ---------------------------------------------------------------------------
+# the serving gate — the capability claim the CONSUMER must honour too.
+#
+# promoted_for_vertical gates the registry read; servable_for is the same
+# verdict for the lanes that actually fetch (soda.servable_promoted), so a
+# promoted source cannot be promised as coverage the lane then fails.
+# ---------------------------------------------------------------------------
+
+def _promote(store: ScoutStore, source_id: str,
+             capabilities: dict | None = None) -> dict:
+    """One source through the V2 ladder to promoted, optionally claiming
+    capabilities (the V2 vocabulary — a V1 row never has any)."""
+    store.seed_upsert(source_id, seed_domain="phones", state="CA",
+                      name="CSLB", endpoint="https://www.cslb.ca.gov",
+                      seed_meta={"trade_scope": "all_trades"})
+    store.start_probing(source_id)
+    store.mark_adapter_draft(source_id)
+    store.enter_probation(source_id)
+    store.promote(source_id)
+    if capabilities is not None:
+        conn = store._conn()
+        conn.execute(
+            "UPDATE sources SET capabilities = ? WHERE source_id = ?",
+            (json.dumps(capabilities), source_id))
+        conn.commit()
+        conn.close()
+    return store.get(source_id)
+
+
+def test_servable_for_treats_silence_as_unknown_never_false(tmp_path):
+    """A promoted row with NO capability claim is legacy (the V1 ladder
+    never spoke this vocabulary and verified a phone column instead).
+    Reading that silence as present:false would invent evidence —
+    accuracy Rule 8: no evidence is unknown, not false."""
+    store = _store(tmp_path)
+    row = _promote(store, "or_ccb_license")
+    assert row["capabilities"] == "{}"
+    assert servable_for(row, "phone") is True
+    # ... and the router gate agrees, so the two reads cannot diverge
+    assert [r["source_id"] for r in store.promoted_for_vertical("phone")] == \
+        ["or_ccb_license"]
+
+
+def test_servable_for_refuses_a_false_capability(tmp_path):
+    store = _store(tmp_path)
+    row = _promote(store, "tx_tdlr_mech",
+                   {"phone": {"present": False}, "email": {"present": True}})
+    assert servable_for(row, "phone") is False
+    assert servable_for(row, "email") is True
+    assert store.promoted_for_vertical("phone") == []
+
+
+def test_servable_for_ignores_unpromoted_rows(tmp_path):
+    """Same claim, wrong state: promotion is still required."""
+    store = _store(tmp_path)
+    _seed_phone(store)
+    store.start_probing("state_CA_board")
+    store.mark_adapter_draft("state_CA_board")
+    store.enter_probation("state_CA_board")
+    row = store.get("state_CA_board")
+    assert row["status"] == "probation"
+    assert servable_for(row, "phone") is False
+
+
+def test_servable_promoted_is_the_gated_view_of_promoted_payloads(tmp_path):
+    """The consumer's map excludes what the lane cannot honestly serve,
+    while the raw registry view still shows every promoted row — that
+    difference IS the gate (and why the gated reader exists)."""
+    store = _store(tmp_path)
+    _promote(store, "or_ccb_license")                       # legacy: served
+    _promote(store, "wa_lni_board", {"phone": {"present": True}})
+    _promote(store, "tx_tdlr_mech", {"phone": {"present": False}})
+
+    assert sorted(store.promoted_payloads()) == [
+        "or_ccb_license", "tx_tdlr_mech", "wa_lni_board"]
+    assert sorted(store.servable_promoted("phone")) == [
+        "or_ccb_license", "wa_lni_board"]
+
+
+def test_servable_promoted_returns_parsed_payloads(tmp_path):
+    store = _store(tmp_path)
+    _promote(store, "or_ccb_license", {"phone": {"present": True}})
+    payload = store.servable_promoted("phone")["or_ccb_license"]
+    assert isinstance(payload, dict)              # parsed, never a JSON str
+    assert payload["seed"]["trade_scope"] == "all_trades"

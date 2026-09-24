@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
-import { Building2, Users, Target, Gauge, TrendingUp, ArrowRight } from "lucide-react";
+import { Building2, Users, Target, Gauge, Search, ArrowRight } from "lucide-react";
 import { api } from "../api/client";
 import { Spinner } from "../components/StatusChip";
 import { PageHeader } from "../components/PageHeader";
@@ -39,7 +39,7 @@ export default function Dashboard() {
     // folder="*" = every place (inbox + all folders): foldering a lead is a
     // MOVE out of the default Companies inbox, but the Dashboard overview must
     // still count the whole researched universe.
-    queryFn: () => api.listLeads({ folder: "*", limit: 1000 }),
+    queryFn: () => api.pageLeads({ folder: "*", limit: 1000 }),
   });
   const jobsQ = useQuery({
     queryKey: ["dash-jobs"],
@@ -47,7 +47,8 @@ export default function Dashboard() {
     refetchInterval: 60_000, // refresh every 60s so timestamps stay current
   });
 
-  const leads = leadsQ.data ?? [];
+  const leads = leadsQ.data?.rows ?? [];
+  const totalCompanies = leadsQ.data?.total ?? 0;
   const jobs = jobsQ.data ?? [];
 
   const stats: Stat[] = useMemo(() => {
@@ -60,7 +61,7 @@ export default function Dashboard() {
     return [
       {
         label: "Total Companies",
-        value: leads.length.toLocaleString(),
+        value: totalCompanies.toLocaleString(),
         sub: "researched leads",
         icon: Building2,
         to: "/leads?folder=*",
@@ -87,7 +88,7 @@ export default function Dashboard() {
         to: "/leads?folder=*",
       },
     ];
-  }, [leads]);
+  }, [leads, totalCompanies]);
 
   const topLeads = useMemo(
     () =>
@@ -106,13 +107,16 @@ export default function Dashboard() {
   const loading = leadsQ.isLoading || jobsQ.isLoading;
 
   return (
-    <div className="px-8 py-7 max-w-6xl">
-      <PageHeader
-        eyebrow="The Best Estimator LLC"
-        title="Dashboard"
-        subtitle="Welcome to LeadHunter Pro AI"
+    <div className="workspace-page">
+      <div className="dashboard-hero"><PageHeader
+        eyebrow="Your sales workspace"
+        title="Your next opportunity starts here."
+        subtitle="Discover companies, understand their activity, and turn research into better conversations."
         large
-      />
+      /><button className="primary-action" onClick={() => navigate("/research")}><Search size={16} /> New research <ArrowRight size={15} /></button></div>
+      <div className="screen-tip"><span><b>01</b> Discover companies</span><span><b>02</b> Review the evidence</span><span><b>03</b> Start a conversation</span></div>
+      {(leadsQ.isError || jobsQ.isError) && <div role="alert" className="my-4 rounded-xl border border-rose-400/25 bg-rose-500/10 p-4 text-sm text-rose-200">Some workspace data could not be loaded. <button className="underline ml-2" onClick={() => { void leadsQ.refetch(); void jobsQ.refetch(); }}>Try again</button></div>}
+      {totalCompanies > leads.length && <p className="text-xs text-slate-400">Charts and other metrics use the latest {leads.length.toLocaleString()} loaded companies; Total Companies counts the complete collection.</p>}
 
       {loading ? (
         <div className="flex items-center gap-2 text-slate-500 text-sm py-16 justify-center">
@@ -123,10 +127,11 @@ export default function Dashboard() {
           {/* Stats */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mt-6">
             {stats.map(({ label, value, sub, icon: Icon, to }) => (
-              <div
+              <button
+                type="button"
                 key={label}
                 onClick={() => navigate(to)}
-                className="cursor-pointer rounded-xl border border-white/5 bg-white/[0.02] p-5 hover:bg-white/[0.04] hover:border-indigo-500/30 transition-colors"
+                className="metric-card cursor-pointer ui-panel rounded-xl border border-white/5 bg-white/[0.02] p-5 hover:bg-white/[0.04] hover:border-indigo-500/30 transition-colors"
               >
                 <div className="flex items-start justify-between">
                   <span className="text-[13px] text-slate-400">{label}</span>
@@ -136,10 +141,10 @@ export default function Dashboard() {
                 </div>
                 <div className="text-[28px] font-semibold text-white mt-3">{value}</div>
                 <div className="flex items-center gap-1 mt-2 text-[12.5px] text-emerald-400">
-                  <TrendingUp className="w-3.5 h-3.5" />
+                  <ArrowRight className="w-3.5 h-3.5" />
                   {sub}
                 </div>
-              </div>
+              </button>
             ))}
           </div>
 
@@ -214,7 +219,7 @@ export default function Dashboard() {
           {/* Bottom row */}
           <div className="grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-5 mt-6">
             {/* Recent runs */}
-            <div className="rounded-xl border border-white/5 bg-white/[0.02] p-5">
+            <div className="ui-panel rounded-xl border border-white/5 bg-white/[0.02] p-5">
               <div className="flex items-center justify-between mb-4">
                 <h2 className="text-[16px] font-semibold text-white">Recent Runs</h2>
                 <button
@@ -249,7 +254,7 @@ export default function Dashboard() {
             </div>
 
             {/* Qualified pipeline */}
-            <div className="rounded-xl border border-white/5 bg-white/[0.02] p-5">
+            <div className="ui-panel rounded-xl border border-white/5 bg-white/[0.02] p-5">
               <h2 className="text-[16px] font-semibold text-white mb-4">
                 Contact Now <span className="text-slate-500 font-normal">({topLeads.length})</span>
               </h2>

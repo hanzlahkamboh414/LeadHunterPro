@@ -167,6 +167,8 @@ class AdminUserOut(BaseModel):
     is_admin: bool
     created_at: str
     name: str = ""
+    phone_daily_limit: int = 600
+    phone_daily_used: int = 0
 
 
 class AdminUsersOut(BaseModel):
@@ -188,6 +190,12 @@ class AdminPasswordIn(BaseModel):
 
 class AdminAuthModeIn(BaseModel):
     """Toggle the login page on/off (the open-site mode switch)."""
+    enabled: bool
+
+
+class AdminGmailInboxModeIn(BaseModel):
+    """Toggle the Gmail-like browsing interface on/off. The address export
+    always stays on — this only gates browse/read/send."""
     enabled: bool
 
 
@@ -225,3 +233,74 @@ class AdminUserSummaryOut(BaseModel):
     unfiled: int = 0
     total: int = 0
     dates: list[str] = Field(default_factory=list)
+
+
+class AdminPhoneClaimRow(BaseModel):
+    """One user's phone claim summary: how many the sheet shows vs hidden."""
+    user_id: str
+    username: str = ""
+    total: int = 0
+    visible: int = 0
+    hidden: int = 0
+    first_claimed: str = ""
+    last_claimed: str = ""
+
+
+class AdminPhoneClaimsOut(BaseModel):
+    """Phone claims report — per user visible vs hidden claims.
+
+    Hidden claims are still owned (nobody gets the number) but the sheet
+    replaced them when a newer search landed. The admin needs this view
+    to manage data at main deploy.
+    """
+    total_claims: int = 0
+    total_hidden: int = 0
+    by_user: list[AdminPhoneClaimRow] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Admin — harvester AI-lane schedule (which lane runs, and for how long).
+# ---------------------------------------------------------------------------
+
+class AdminLaneScheduleIn(BaseModel):
+    """The admin screen's save payload for the lane schedule.
+
+    ``mode`` is one of both/phones/emails/auto (the vocabulary is owned by
+    app/harvester/lane_schedule.py and validated there — a bad value answers
+    an honest 422, never a silently-stored no-op schedule).
+    """
+    mode: str
+    phone_min: float = 30.0
+    email_min: float = 90.0
+    phone_first: bool = True
+    repeat: Literal["day", "once"] = "day"
+
+
+class AdminLaneStatusOut(BaseModel):
+    """What the harvester is actually doing right now, plus the stored
+    schedule. ``effective_mode`` is the lane the NEXT pass will run —
+    for an ``auto`` spec it is the slot the clock is currently inside
+    (never ``auto`` itself), and it reads ``both`` once a one-time cycle
+    has finished."""
+
+    mode: str
+    repeat: str
+    phone_min: float
+    email_min: float
+    phone_first: bool
+    started_at: str = ""
+
+    effective_mode: str
+    in_phone_slot: bool | None = None
+    cycle_s: float = 0.0
+    position_s: float = 0.0
+    seconds_to_switch: float | None = None
+    next_switch_at: str = ""
+    one_time_done: bool = False
+
+    # Environment context — the operator needs to know whether the schedule
+    # is even reaching a running worker, and how soon a change lands.
+    harvester_enabled: bool = True
+    interval_s: float = 300.0
+    #: Honest limits, stated in the payload so the UI never has to invent them.
+    notes: list[str] = Field(default_factory=list)

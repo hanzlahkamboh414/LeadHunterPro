@@ -1,16 +1,15 @@
 """The background harvester — the 24/7 stocker (P6, big-bang plan).
 
-One daemon thread (the campaign-scheduler pattern: started by the app
-lifespan, NEVER at import time so pytest never spawns a real harvest
-loop). Every pass, under admission control so it never competes with
-live user searches:
+Two daemon lanes (started by the app lifespan, NEVER at import time)
+run under admission control so live user searches take priority. The
+phone lane keeps its own interval while email research is running:
 
-    PHONES lane   pick the neediest trade×state pair from the SODA
-                  coverage map — ranked by user demand, then pool
-                  deficit, then oldest harvest — and stock it with a
+    PHONES lane   pick the oldest unvisited trade×state pair from the SODA
+                  coverage map, then use demand and pool deficit to break
+                  ties, and stock it with a
                   free license-board fetch. One pair every
-                  HARVEST_PAIR_COOLDOWN_S at most; daily quota 5,000
-                  stocked rows (the big-bang number).
+                  HARVEST_PAIR_COOLDOWN_S when configured; no daily
+                  phone ceiling by default.
     EMAILS lane   harvest-time AI: for the most-demanded trade×state
                   pair nobody has harvested recently, run the full
                   research pipeline (``run_full``) with ``user_id=""``
@@ -18,7 +17,7 @@ live user searches:
                   serve them instantly. Runs ONLY on logged demand: the
                   AI lane never spends without a signal. Daily quota
                   2,000 researched leads.
-    RE-VERIFY     when both lanes come back empty, drain the staleness
+    RE-VERIFY     when the phone lane comes back empty, drain the staleness
                   queue (pairs whose stock has gone stale) — a fresh
                   harvest for one queued pair per idle pass.
 
@@ -38,6 +37,14 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from app.discovery.tradefold import trade_label
+from app.harvester.lane_schedule import (
+    LaneDecision,
+    LaneSpec,
+    MODE_BOTH,
+    MODE_EMAILS,
+    MODE_PHONES,
+    resolve,
+)
 from app.harvester.store import (
     HarvesterStore,
     US_STATE_NAMES,
@@ -91,18 +98,23 @@ class HarvesterWorker:
         phone_batch: int = 250,
         email_batch: int = 25,
         email_budget_s: float = 2700.0,
-        pair_cooldown_s: float = 21600.0,
+        pair_cooldown_s: float = 0.0,
         min_pool_floor: int = 100,
         staleness_days: int = 30,
-        daily_phone_quota: int = 5000,
+        daily_phone_quota: int = 0,
         daily_email_quota: int = 2000,
+        lane_mode: str = "both",
+        phone_slot_s: float = 1800.0,
+        email_slot_s: float = 5400.0,
+        phone_first: bool = True,
+        lane_source: Callable[[], LaneDecision] | None = None,
     ) -> None:
         self._store = store
         self._phone_store = phone_store
         self._lead_store = lead_store
         self._pending_store = pending_store
-        # The phones lane's SODA fetch (source_id, slug, city, limit);
-        # tests inject a fake so no pass ever touches the network.
+        # The phones lane's SODA fetch (source_id, slug, city, limit,
+        # offset=); tests inject a fake so no pass ever touches the network.
         self._fetch = fetch or fetch_license_records
         # The emails lane's research pipeline (run_full wired to the real
         # stores in get_worker); tests inject a fake.
@@ -123,6 +135,27 @@ class HarvesterWorker:
         self._staleness_days = staleness_days
         self._daily_phone_quota = daily_phone_quota
         self._daily_email_quota = daily_email_quota
+        # Lane control. Two sources feed ONE resolver (lane_schedule.resolve):
+        #
+        # * ``lane_source`` — production: the admin screen's live schedule
+        #   (app/harvester/lane_schedule.py), re-read at the top of every
+        #   pass, so an operator change lands on the next pass with no
+        #   restart and no worker rebuild.
+        # * the constructor args below — the boot default from .env, used by
+        #   tests and by any deployment with no saved schedule (both lanes).
+        #
+        # Modes: "both" (both lanes), "phones" (emails blocked, zero AI),
+        # "emails" (phones blocked), "auto" (alternate on a clock — the slot
+        # lengths decide how long each lane runs; an ``auto`` schedule saved
+        # with repeat="once" runs exactly one cycle then falls back to both).
+        self._default_lane_mode = lane_mode
+        self._default_phone_slot_s = phone_slot_s
+        self._default_email_slot_s = email_slot_s
+        self._default_phone_first = phone_first
+        self._lane_source = lane_source or self._fallback_lane_source
+        #: The lane the LAST pass actually ran — for the phase-transition log.
+        self._was_in_phone_slot: bool | None = None
+        self._one_time_logged = False
         # Emails-lane wall-clock deadline for the CURRENT pass (a
         # monotonic timestamp, or None when no pass is running). Set by
         # _harvest_emails, read by _budget_expired through run_full's
@@ -131,6 +164,7 @@ class HarvesterWorker:
         self._email_deadline: float | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._email_thread: threading.Thread | None = None
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -139,12 +173,18 @@ class HarvesterWorker:
             return
         self._stop.clear()
         self._thread = threading.Thread(
-            target=self._run_forever, name="harvester", daemon=True,
+            target=self._run_forever, name="harvester-phones", daemon=True,
+        )
+        self._email_thread = threading.Thread(
+            target=self._run_emails_forever, name="harvester-emails",
+            daemon=True,
         )
         self._thread.start()
+        self._email_thread.start()
         logger.info(
-            "background harvester started (interval %ss, quotas %d phones / "
-            "%d emails per day)", self._interval_s, self._daily_phone_quota,
+            "background harvester started (interval %ss, phone quota %s / "
+            "email quota %d per day)", self._interval_s,
+            self._daily_phone_quota or "unlimited",
             self._daily_email_quota,
         )
 
@@ -154,9 +194,35 @@ class HarvesterWorker:
     def _run_forever(self) -> None:
         while not self._stop.wait(self._interval_s):
             try:
-                self.run_once()
+                if not self._enabled or self._active_jobs() >= self._max_active:
+                    continue
+                decision = self._current_lane()
+                if decision.mode == MODE_EMAILS:
+                    continue
+                phones = self._harvest_phones()
+                if not phones["stocked"]:
+                    self._process_reverify()
+                self._enqueue_stale_pairs()
+                self._log_phase_state(decision.in_phone_slot)
             except Exception:  # noqa: BLE001 — one bad pass must not kill the loop
-                logger.exception("harvester pass failed — retrying next pass")
+                logger.exception("harvester phone pass failed — retrying next pass")
+
+    def _run_emails_forever(self) -> None:
+        while not self._stop.wait(self._interval_s):
+            try:
+                if not self._enabled or self._active_jobs() >= self._max_active:
+                    continue
+                if self._current_lane().mode != MODE_PHONES:
+                    self._harvest_emails()
+            except Exception:  # noqa: BLE001 — one failed AI pass cannot stop phones
+                logger.exception("harvester email pass failed — retrying next pass")
+
+    def _current_lane(self) -> LaneDecision:
+        try:
+            return self._lane_source()
+        except Exception:  # noqa: BLE001 — a broken schedule must not stop stocking
+            logger.exception("harvester lane schedule unreadable — running both lanes")
+            return LaneDecision(mode=MODE_BOTH, spec=LaneSpec())
 
     # -- one pass --------------------------------------------------------------
 
@@ -175,8 +241,39 @@ class HarvesterWorker:
             stats["skipped"] = "busy"
             return stats
 
-        stats["phones"] = self._harvest_phones()
-        stats["emails"] = self._harvest_emails()
+        # Lane control — resolved fresh EVERY pass, so an admin-screen change
+        # lands on the next pass without a restart. A broken schedule source
+        # degrades to "both" (never a stopped harvester) and says so.
+        decision = self._current_lane()
+
+        if decision.mode == MODE_BOTH:
+            stats["phones"] = self._harvest_phones()
+            stats["emails"] = self._harvest_emails()
+        elif decision.mode == MODE_PHONES:
+            # Emails blocked: this is the zero-AI pass by construction, since
+            # the phones lane is pure SODA and never calls the model.
+            stats["emails"] = {"pair": None, "target": 0, "stocked": 0,
+                               "skipped": "lane_schedule_phones"}
+            stats["phones"] = self._harvest_phones()
+        else:  # MODE_EMAILS
+            stats["phones"] = {"pair": None, "stocked": 0,
+                               "skipped": "lane_schedule_emails"}
+            stats["emails"] = self._harvest_emails()
+
+        # Log phase transitions (visible in backend.log as a human cue).
+        try:
+            self._log_phase_state(decision.in_phone_slot)
+            if decision.one_time_done and not self._one_time_logged:
+                self._one_time_logged = True
+                logger.info(
+                    "harvester lane schedule: one-time cycle finished "
+                    "(%g min) — back to both lanes",
+                    decision.cycle_s / 60.0,
+                )
+            elif not decision.one_time_done:
+                self._one_time_logged = False  # a fresh save re-arms the cue
+        except Exception:  # noqa: BLE001 — a log failure must never crash the loop
+            logger.exception("phase-state log failed")
 
         # Idle (nothing stocked by either lane) -> drain the staleness queue.
         if (not stats["phones"]["stocked"]) and (not stats["emails"]["stocked"]):
@@ -188,15 +285,51 @@ class HarvesterWorker:
                         stats["phones"], stats["emails"])
         return stats
 
+    # -- lane control helpers --------------------------------------------------
+
+    def _fallback_lane_source(self) -> LaneDecision:
+        """The boot-default schedule (constructor args / .env).
+
+        Used when no ``lane_source`` was injected: tests, and any deployment
+        with no saved runtime schedule. Anchored at the current midnight UTC
+        — the original phase_lock semantics, where slot boundaries are the
+        same on every server sharing the clock. A saved admin schedule
+        anchors at its own save time instead (lane_schedule.resolve).
+        """
+        now = self._now()
+        midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        spec = LaneSpec(
+            mode=self._default_lane_mode,
+            phone_min=self._default_phone_slot_s / 60.0,
+            email_min=self._default_email_slot_s / 60.0,
+            phone_first=self._default_phone_first,
+            started_at=midnight.isoformat(timespec="seconds"),
+        )
+        return resolve(spec, now)
+
+    def _log_phase_state(self, in_phone_slot: bool | None) -> None:
+        """Emit one INFO per phase transition so the operator can see the
+        cycle turn in backend.log without hunting for lane-specific lines.
+        Called once per pass; ``None`` means no cycle is being tracked
+        (pinned mode) and also clears the memory, so switching out of
+        ``auto`` and back never reports a transition that did not happen."""
+        if in_phone_slot is None:
+            self._was_in_phone_slot = None
+            return
+        was_phone = self._was_in_phone_slot
+        self._was_in_phone_slot = in_phone_slot
+        if was_phone is not None and was_phone != in_phone_slot:
+            lane = "phones → emails" if was_phone else "emails → phones"
+            logger.info("harvester phase: %s", lane)
+
     # -- phones lane (free SODA fetches into the pool) ----------------------------
 
     def _pick_phone_pair(self) -> tuple[str, str] | None:
-        """The neediest harvestable trade×state pair, or None.
+        """The longest-waiting harvestable trade×state pair, or None.
 
-        Rank: user demand (weight) first, then pool deficit against the
-        floor, then the longest-since-harvested. Pairs inside the cooldown
-        window are skipped; a pair whose pool is at/over the floor AND has
-        no demand is not worth a fetch at all.
+        A national sweep must visit pairs even after their pool reaches the
+        old floor. Untouched pairs go first; demand and deficit break age
+        ties. Explicit cooldowns still apply when configured.
 
         P7.5: trade-less searches record STATE-level demand rows (trade='').
         Their weight boosts EVERY covered pair of that state — a phone user
@@ -212,7 +345,7 @@ class HarvesterWorker:
             d["state"]: d["weight"]
             for d in rows if not d["trade"] and d["state"]
         }
-        candidates: list[tuple[float, int, str, str, str]] = []
+        candidates: list[tuple[str, float, int, str, str]] = []
         coverage = fetchable_trade_coverage()
         for slug in sorted(coverage):
             for state in sorted(coverage[slug]):
@@ -234,23 +367,23 @@ class HarvesterWorker:
                     slug, state)
                 weight = (demand.get((slug, state), 0.0)
                           + state_demand.get(state, 0.0))
-                if deficit <= 0 and weight <= 0:
-                    continue
-                candidates.append((weight, deficit, last, slug, state))
+                candidates.append((last, weight, deficit, slug, state))
         if not candidates:
             return None
-        candidates.sort(key=lambda c: (-c[0], -c[1], c[2]))
+        candidates.sort(key=lambda c: (c[0], -c[1], -c[2], c[3], c[4]))
         _, _, _, slug, state = candidates[0]
         return slug, state
 
     def _harvest_phone_pair(self, slug: str, state: str) -> dict[str, Any]:
-        """Fetch + stock one trade×state pair (reused by the re-verify lane;
-        the cooldown does NOT apply there — a stale pair is re-checked on
-        purpose). Quota still applies: re-verify never bursts past the
-        daily cap."""
+        """Fetch + stock one trade×state pair (also used by re-verify).
+
+        Re-verify bypasses pair cooldown; an explicit positive phone quota
+        still limits a deployment that chooses to configure one.
+        """
         outcome = {"pair": (slug, state), "fetched": 0, "stocked": 0,
                    "skipped": ""}
-        room = self._store.quota_room("phones", self._daily_phone_quota)
+        room = (self._store.quota_room("phones", self._daily_phone_quota)
+                if self._daily_phone_quota > 0 else self._phone_batch)
         if room <= 0:
             outcome["skipped"] = "quota_exhausted"
             return outcome
@@ -287,13 +420,21 @@ class HarvesterWorker:
                 "skipped", slug, state, source_id,
             )
             return outcome
+        # The cursor is what makes repeated runs worth anything: without it
+        # every run asked the source for the same first page and reported
+        # 100% duplicates (measured live 2026-09-23 — WA gc has 55,184
+        # matching rows and only the first 250 had ever been read).
+        offset = self._store.cursor_get(source_id, slug, state)
+        limit = min(self._phone_batch, room)
         status, records, meta = self._fetch(
-            source_id, slug, "", min(self._phone_batch, room),
+            source_id, slug, "", limit, offset=offset,
         )
         if status.value != "success":
             # Honest failure + backoff: the run is recorded, so the pair
             # cools down instead of being retried every pass. NOT a yield
             # trial — hard failures are the scout circuit breaker's domain.
+            # The cursor deliberately does NOT move: the window was never
+            # read, so the next attempt must ask for the same one.
             self._store.record_run(
                 "phones", slug, state, "source_error", 0,
                 detail=str(meta.get("error", status.value))[:200],
@@ -305,27 +446,48 @@ class HarvesterWorker:
                 slug, state, source_id, meta.get("error", ""),
             )
             return outcome
+        # A page SHORTER than the one we asked for is the only honest proof
+        # that the matching set ended here, so the cursor wraps to 0 and the
+        # next run opens a fresh pass. Boards issue new licences weekly — a
+        # frozen cursor would never see them.
+        fetched_rows = int(meta.get("rows_fetched", len(records)))
+        swept = fetched_rows < limit
         # P10: a successful fetch is one yield trial for (source, pair);
         # the working credit lands only if it stocked something NEW.
         seg = source_segment(slug, state)
-        self._store.record_source_dispatch(source_id, seg)
         counts = self._phone_store.add(records)
+        self._store.record_source_dispatch(source_id, seg)
         if counts["inserted"]:
             self._store.record_source_working(source_id, seg)
         self._store.record_stocked("phones", counts["inserted"])
         self._store.record_run(
             "phones", slug, state, "success", counts["inserted"],
-            detail=(f"source={source_id} fetched={len(records)} "
+            detail=(f"source={source_id} offset={offset} "
+                    f"fetched={len(records)} "
                     f"dup={counts['duplicate']} "
                     f"dropped={counts['dropped_bad_phone']}"),
             source=source_id,
         )
+        # The page is acknowledged only after it has reached the pool.
+        # On a failed write, retry the same window; duplicates are benign.
+        self._store.cursor_advance(
+            source_id, slug, state,
+            next_offset=0 if swept else offset + fetched_rows,
+            swept=swept,
+        )
+        if swept and offset > 0:
+            logger.info(
+                "harvester phones lane: %s/%s sweep complete at offset %d "
+                "(%d rows) — cursor wrapped to 0",
+                slug, state, offset, fetched_rows,
+            )
         outcome["fetched"] = len(records)
         outcome["stocked"] = counts["inserted"]
+        outcome["offset"] = offset
         logger.info(
             "harvester phones lane: stocked %d row(s) for %s/%s "
-            "(fetched %d, dup %d, dropped %d)",
-            counts["inserted"], slug, state, len(records),
+            "(offset %d, fetched %d, dup %d, dropped %d)",
+            counts["inserted"], slug, state, offset, len(records),
             counts["duplicate"], counts["dropped_bad_phone"],
         )
         return outcome
@@ -529,6 +691,7 @@ def get_worker() -> HarvesterWorker:
         if _worker is None:
             from app.core.config import settings
             from app.api.v1.leads import _manager
+            from app.harvester.lane_schedule import get_lane_store
             from app.lead_research.service import (
                 LeadResearchStore,
                 PendingLeadsStore,
@@ -550,5 +713,13 @@ def get_worker() -> HarvesterWorker:
                 staleness_days=settings.HARVEST_STALENESS_DAYS,
                 daily_phone_quota=settings.DAILY_PHONE_QUOTA,
                 daily_email_quota=settings.DAILY_EMAIL_QUOTA,
+                lane_mode=settings.HARVEST_LANE_MODE,
+                phone_slot_s=settings.HARVEST_PHONE_SLOT_S,
+                email_slot_s=settings.HARVEST_EMAIL_SLOT_S,
+                phone_first=settings.HARVEST_PHONE_FIRST,
+                # The admin screen's LIVE schedule — read once per pass, so a
+                # change there needs no restart and no worker rebuild. Falls
+                # back to the .env defaults above when nothing is saved.
+                lane_source=lambda: get_lane_store().resolve(_utcnow()),
             )
         return _worker

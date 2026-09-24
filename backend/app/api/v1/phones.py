@@ -8,8 +8,8 @@ Endpoints
 ---------
 POST /phones/search              pure-SQL instant serve (trade-less since
                                  P7.5: state + quantity is the whole form)
-GET  /phones/leads               the caller's own (claimed) call sheet
-GET  /phones/stats               honest pool inventory (totals + per-trade/state)
+GET  /phones/leads               today's still-owned call sheet (UTC)
+GET  /phones/stats               eligible states; inventory counts admin-only
 POST /phones/leads/{id}/lead     ✓Lead — person said "project doonga": snapshot
                                  to My Leads, retire the number for good
 POST /phones/leads/{id}/voicemail ☃Voicemail — park 14/30/60 days, 4th retires
@@ -23,6 +23,7 @@ DELETE /phones/saved/{id}        delete a saved lead/contact (user's own rows)
 from __future__ import annotations
 
 import logging
+from datetime import date
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -80,6 +81,10 @@ class PhoneSearchIn(BaseModel):
 
 class NoteIn(BaseModel):
     note: str = Field("", max_length=2000)
+
+
+class PhoneEventIn(BaseModel):
+    action: str = Field(..., pattern="^(dialed|copied|not_interested|follow_up|no_answer|wrong_number)$")
 
 
 class PhoneLeadOut(BaseModel):
@@ -198,10 +203,17 @@ def search(
             detail=f"User accounts are limited to {MAX_USER_TARGET_PHONES} "
                    "phone leads per search (the admin account is unlimited).",
         )
+    if not user.is_admin and body.target > _store.daily_remaining(user.id):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Only {_store.daily_remaining(user.id)} phone numbers remain "
+                   "in today's allowance (UTC).",
+        )
     outcome = phone_search(
         _store,
         trade=body.trade, state=body.state, city=body.city,
         target=body.target, user_id=user.id,
+        enforce_quota=not user.is_admin,
     )
     logger.info(
         "POST /phones/search -> %d lead(s) for %s (trade=%s state=%s city=%r "
@@ -245,10 +257,15 @@ def list_leads(
     trade: str = Query("", max_length=60),
     state: str = Query("", max_length=2),
     city: str = Query("", max_length=60),
-    limit: int = Query(200, ge=1, le=1000),
+    limit: int = Query(1000, ge=1, le=1000),
     user: User = Depends(require_phone_category),
 ) -> list[PhoneLeadOut]:
-    """The caller's own call sheet (claimed at serve)."""
+    """Today's still-owned claims from all searched states (UTC).
+
+    Yesterday's rows leave the active sheet at midnight UTC, but ownership
+    and dated call history remain. The 1000-row response cap exceeds a normal
+    user's 600/day allowance; admin accounts may exceed it.
+    """
     from app.discovery.tradefold import normalize_trade
 
     leads = _store.list_owned(
@@ -259,13 +276,58 @@ def list_leads(
 
 
 @router.get("/stats")
-def stats(user: User = Depends(require_phone_category)) -> dict:
-    """Honest pool inventory — what the vertical holds, per trade and state."""
-    pool = _store.pool_stats()
-    return {
-        **pool,
+def stats(
+    target: int = Query(25, ge=1, le=5000),
+    user: User = Depends(require_phone_category),
+) -> dict:
+    """Eligible states for users; full inventory counts only for admins."""
+    servable = _store.servable_by_state()
+    common = {
         "mine": len(_store.list_owned(user.id, limit=1000)),
+        "eligible_states": sorted(
+            state for state, count in servable.items() if count >= target
+        ),
+        "daily_limit": None if user.is_admin else _store.daily_limit(user.id),
+        "daily_used": _store.daily_usage(user.id),
+        "daily_remaining": None if user.is_admin else _store.daily_remaining(user.id),
     }
+    if user.is_admin:
+        return {
+            **_store.pool_stats(), **common,
+            "servable_by_state": servable,
+            "servable_total": sum(servable.values()),
+        }
+    return common
+
+
+@router.get("/activity")
+def call_activity(
+    day: str = Query("", alias="date", max_length=10),
+    user: User = Depends(require_phone_category),
+) -> dict:
+    if day:
+        try:
+            date.fromisoformat(day)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="date must be YYYY-MM-DD") from exc
+    return _store.call_activity(user.id, day)
+
+
+@router.get("/activity/days")
+def call_days(user: User = Depends(require_phone_category)) -> list[str]:
+    return _store.call_days(user.id)
+
+
+@router.post("/leads/{lead_id}/event")
+def record_call_event(
+    lead_id: int, body: PhoneEventIn,
+    user: User = Depends(require_phone_category),
+) -> dict:
+    if body.action == "wrong_number":
+        result = _store.mark_wrong_number(lead_id, user.id)
+    else:
+        result = _store.record_call_event(lead_id, user.id, body.action)
+    return _act(lead_id, user, body.action, result)
 
 
 # ---------------------------------------------------------------------------

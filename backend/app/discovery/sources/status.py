@@ -18,7 +18,7 @@ class SourceStatus(str, Enum):
     adding near-synonyms (a separate "source error" beside ``ERROR``, a
     "no data" beside ``EMPTY``) would create two vocabularies meaning the
     same thing. Finer distinctions belong in ``metadata["reason"]`` — see
-    :class:`SourceFailureReason`.
+    :class:`SourceReason`.
     """
 
     #: Source executed successfully and returned companies.
@@ -44,7 +44,7 @@ class SourceHealth(str, Enum):
     UNKNOWN = "unknown"
 
 
-class SourceFailureReason(str, Enum):
+class SourceReason(str, Enum):
     """WHY a source call ended as it did (``metadata["reason"]``).
 
     :class:`SourceStatus` answers "can the orchestrator use this result?",

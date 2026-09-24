@@ -14,7 +14,19 @@ import { PageHeader } from "../components/PageHeader";
 import { Select } from "../components/Select";
 import { useAuth } from "../contexts/AuthContext";
 import { US_STATE_CODES, US_STATES } from "../data/locations";
-import type { PhoneLead, PhoneSaved, PhoneSearchResult } from "../types";
+import type {
+  PhoneCallActivity,
+  PhoneCallAction,
+  PhoneLead,
+  PhonePoolStats,
+  PhoneSaved,
+  PhoneSearchResult,
+} from "../types";
+
+/** The sheet endpoint's hard cap — also the honest "there may be more"
+ *  threshold below. The backend default is the same number: the sheet is the
+ *  user's own inventory and must never be silently cut short. */
+const SHEET_LIMIT = 1000;
 
 /** +15039573452 -> (503) 957-3452 for display; raw E.164 for copy/tel links. */
 function prettyPhone(e164: string): string {
@@ -25,7 +37,7 @@ function prettyPhone(e164: string): string {
   return e164 || "—";
 }
 
-type Tab = "sheet" | "leads" | "contacts";
+type Tab = "sheet" | "leads" | "contacts" | "history";
 
 /** A tiny inline note editor — one open at a time (a lead id or saved id). */
 function NoteEditor({
@@ -96,14 +108,37 @@ export default function Phones() {
   const [tab, setTab] = useState<Tab>("sheet");
   const [mine, setMine] = useState<PhoneLead[]>([]); // the call sheet
   const [saved, setSaved] = useState<PhoneSaved[]>([]); // leads + contacts
+  const [stats, setStats] = useState<PhonePoolStats | null>(null);
   const [noteLeadId, setNoteLeadId] = useState<number | null>(null);
   const [noteSavedId, setNoteSavedId] = useState<number | null>(null);
+  const [selectedDay, setSelectedDay] = useState(() => new Date().toISOString().slice(0, 10));
+  const [activity, setActivity] = useState<PhoneCallActivity | null>(null);
+  const [activityDays, setActivityDays] = useState<string[]>([]);
 
   const stateCode = US_STATE_CODES[stateName] || "";
+  //: Fresh numbers per state — "is location mein kitna naya data hai". A state
+  //: missing from the map has nothing fresh (not "unknown").
+  const freshByState = stats?.servable_by_state || {};
+  const eligibleStates = stats?.eligible_states || [];
+  const freshForPick = freshByState[stateCode] || 0;
+  const remaining = stats?.daily_remaining;
+
+  const refreshStats = useCallback(() => {
+    api
+      .phoneStats(target)
+      .then(setStats)
+      .catch(() => undefined); // the search below surfaces real errors
+  }, [target]);
+
+  useEffect(() => {
+    if (stats && stateName && !eligibleStates.includes(stateCode)) {
+      setStateName("");
+    }
+  }, [stats, stateName, stateCode, eligibleStates]);
 
   const refreshMine = useCallback(() => {
     api
-      .phoneLeads()
+      .phoneLeads({ limit: SHEET_LIMIT })
       .then(setMine)
       .catch(() => undefined); // the search below surfaces real errors
   }, []);
@@ -115,17 +150,29 @@ export default function Phones() {
       .catch(() => undefined);
   }, []);
 
+  const refreshActivity = useCallback(() => {
+    api.phoneActivity(selectedDay).then(setActivity).catch(() => undefined);
+    api.phoneActivityDays().then(setActivityDays).catch(() => undefined);
+  }, [selectedDay]);
+
   useEffect(() => {
     refreshMine();
     refreshSaved();
-  }, [refreshMine, refreshSaved]);
+    refreshStats();
+    refreshActivity();
+  }, [refreshMine, refreshSaved, refreshStats, refreshActivity]);
 
   // The background enricher stamps emails on claimed leads continuously —
-  // poll so the Email column fills in live while the screen is open.
+  // poll so the Email column fills in live while the screen is open. The
+  // Location counts ride along: they drop as numbers are served.
   useEffect(() => {
-    const t = setInterval(refreshMine, 15000);
+    const t = setInterval(() => {
+      refreshMine();
+      refreshStats();
+      refreshActivity();
+    }, 15000);
     return () => clearInterval(t);
-  }, [refreshMine]);
+  }, [refreshMine, refreshStats, refreshActivity]);
 
   const runSearch = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -141,6 +188,8 @@ export default function Phones() {
       setResult(res);
       setTab("sheet");
       refreshMine();
+      // The search just consumed numbers — the Location counts are stale now.
+      refreshStats();
     } catch (err: any) {
       setError(err?.message || "Phone search failed");
     } finally {
@@ -166,6 +215,7 @@ export default function Phones() {
     } finally {
       refreshMine();
       refreshSaved();
+      refreshActivity();
     }
   };
 
@@ -181,6 +231,7 @@ export default function Phones() {
       setError(err?.message || "Could not record the voicemail");
     } finally {
       refreshMine();
+      refreshActivity();
     }
   };
 
@@ -227,6 +278,24 @@ export default function Phones() {
     }
   };
 
+  const recordEvent = async (
+    id: number,
+    action: Exclude<PhoneCallAction, "lead" | "voicemail">,
+  ) => {
+    try {
+      await api.phoneRecordEvent(id, action);
+      refreshActivity();
+      if (action === "wrong_number") {
+        refreshMine();
+        say("Wrong number archived. It is off your sheet; admin can recover it.");
+      } else if (action !== "dialed" && action !== "copied") {
+        say("Call outcome saved to your daily history.");
+      }
+    } catch (err: any) {
+      setError(err?.message || "Could not save the call event");
+    }
+  };
+
   // Live email state by lead id: a search result is a snapshot, but the
   // enrichment outcome arrives later — the polled my-leads rows are the
   // truth for any lead shown.
@@ -261,33 +330,83 @@ export default function Phones() {
 
   const myLeads = saved.filter((s) => s.kind === "lead");
   const myContacts = saved.filter((s) => s.kind === "contact");
+  const lastTouch = activity?.events.find((e) => e.action === "dialed" || e.action === "copied");
+  const callMetrics = [
+    ["Dial attempts", activity?.dialed ?? 0, "bg-indigo-400"],
+    ["Leads", activity?.outcomes.lead ?? 0, "bg-emerald-400"],
+    ["Voicemail", activity?.outcomes.voicemail ?? 0, "bg-amber-400"],
+    ["Not interested", activity?.outcomes.not_interested ?? 0, "bg-rose-400"],
+    ["Follow up", activity?.outcomes.follow_up ?? 0, "bg-sky-400"],
+    ["Wrong number", activity?.outcomes.wrong_number ?? 0, "bg-orange-400"],
+    ["No answer", activity?.outcomes.no_answer ?? 0, "bg-slate-400"],
+  ] as const;
+  const chartMax = Math.max(1, ...callMetrics.map(([, count]) => count));
 
   return (
-    <div className="max-w-6xl mx-auto px-6 py-8 space-y-6">
+    <div className="workspace-page space-y-6">
       <PageHeader
         eyebrow="Phones"
         title="Call Sheet"
         subtitle="Call contractors across your state — every number on your sheet is exclusively yours. Mark what happens on each call."
       />
+      {!isAdmin && <p className="text-sm text-slate-300" role="status">
+        Today (UTC): <span className="font-semibold text-white">{remaining ?? "…"}</span> of {stats?.daily_limit ?? 600} phone numbers remaining.
+        {remaining !== null && remaining !== undefined && target > remaining &&
+          <span className="ml-2 text-amber-300">Reduce the request to {remaining} or less.</span>}
+      </p>}
+      <section className="ui-panel rounded-xl border border-white/5 bg-[#0D1017] p-5" aria-label="Daily calling progress">
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+          <div><h2 className="text-base font-semibold text-white">Daily calling progress</h2>
+            <p className="text-xs text-slate-500">Dial attempts are Zoom link clicks, not verified connected calls. Times use UTC.</p></div>
+          <select aria-label="Progress date" value={selectedDay} onChange={(e) => setSelectedDay(e.target.value)}
+            className="rounded-lg border border-white/10 bg-[#151923] px-3 py-2 text-sm text-white">
+            {[...new Set([selectedDay, new Date().toISOString().slice(0, 10), ...activityDays])].sort().reverse().map((day) =>
+              <option key={day} value={day}>{day}</option>)}
+          </select>
+        </div>
+        <div className="grid gap-2">
+          {callMetrics.map(([label, count, color]) => <div key={label} className="grid grid-cols-[110px_1fr_50px] items-center gap-3 text-xs">
+            <span className="text-slate-400">{label}</span>
+            <div className="h-2 rounded-full bg-white/[0.06]"><div className={`h-2 rounded-full ${color}`} style={{ width: `${Math.max(0, count / chartMax * 100)}%` }} /></div>
+            <span className="text-right font-medium text-white">{count}</span>
+          </div>)}
+        </div>
+      </section>
 
       {/* Search form — trade-less by design (P7.5): state + quantity */}
       <form
         onSubmit={runSearch}
-        className="bg-[#0D1017] border border-white/5 rounded-xl p-5 space-y-4"
+        className="ui-panel bg-[#0D1017] border border-white/5 rounded-xl p-5 space-y-4"
       >
         <div className="grid gap-4 sm:grid-cols-2">
           <div>
-            <label className="block text-[12px] text-slate-400 mb-1.5">State</label>
+            <label className="block text-[12px] text-slate-400 mb-1.5">
+              Location — fresh numbers
+            </label>
             <Select
               value={stateName}
               onChange={setStateName}
               options={[
                 { value: "", label: "Select state…" },
-                ...US_STATES.map((s) => ({ value: s, label: s })),
+                // The count next to each state is what would SERVE right now:
+                // a state whose numbers are already on someone's sheet reads
+                // "none" even though the pool file still holds them.
+                ...US_STATES.filter((s) =>
+                  isAdmin || ((remaining === null || remaining === undefined || target <= remaining) &&
+                    eligibleStates.includes(US_STATE_CODES[s] || "")),
+                ).map((s) => {
+                  const fresh = freshByState[US_STATE_CODES[s] || ""] || 0;
+                  return { value: s, label: isAdmin ? `${s} — ${fresh || "none"}` : s };
+                }),
               ]}
               placeholder="Select state…"
               ariaLabel="State"
             />
+            <p className="mt-1.5 text-[11px] text-slate-500">
+              {isAdmin
+                ? (!stateName ? `${stats?.servable_total ?? 0} fresh numbers across stocked states.` : `${stateName}: ${freshForPick} fresh numbers.`)
+                : `Only states with at least ${target} available numbers are shown. Stock counts are admin-only.`}
+            </p>
           </div>
           <div>
             <label className="block text-[12px] text-slate-400 mb-1.5">
@@ -296,7 +415,7 @@ export default function Phones() {
             <input
               type="number"
               min={1}
-              max={isAdmin ? 5000 : 1000}
+              max={isAdmin ? 5000 : Math.min(1000, remaining ?? 600)}
               value={target}
               onChange={(e) => setTarget(Number(e.target.value) || 1)}
               className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-2.5 text-[13px] text-slate-200 focus:outline-none focus:border-indigo-500/50"
@@ -313,7 +432,7 @@ export default function Phones() {
         <div className="flex items-center gap-3">
           <button
             type="submit"
-            disabled={loading}
+            disabled={loading || (!isAdmin && remaining !== null && remaining !== undefined && target > remaining)}
             className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-indigo-500 hover:bg-indigo-400 text-white text-[13px] font-medium transition-colors disabled:opacity-50"
           >
             <Search className="w-4 h-4" />
@@ -328,7 +447,7 @@ export default function Phones() {
 
       {/* Honest serve telemetry + transient action feedback */}
       {result && (
-        <div className="bg-[#0D1017] border border-white/5 rounded-xl px-4 py-3 flex flex-wrap gap-x-6 gap-y-1.5 text-[12.5px] text-slate-400">
+        <div className="ui-panel bg-[#0D1017] border border-white/5 rounded-xl px-4 py-3 flex flex-wrap gap-x-6 gap-y-1.5 text-[12.5px] text-slate-400">
           <span>
             <span className="text-white font-medium">{result.leads.length}</span> number
             {result.leads.length === 1 ? "" : "s"} served
@@ -352,7 +471,7 @@ export default function Phones() {
       )}
 
       {/* Tabs: Call Sheet / My Leads / My Contacts */}
-      <div className="bg-[#0D1017] border border-white/5 rounded-xl overflow-hidden">
+      <div className="ui-panel bg-[#0D1017] border border-white/5 rounded-xl overflow-hidden">
         <div className="flex items-center justify-between px-4 py-2 border-b border-white/5">
           <div className="flex gap-1">
             {(
@@ -360,6 +479,7 @@ export default function Phones() {
                 ["sheet", "Call Sheet", mine.length],
                 ["leads", "My Leads", myLeads.length],
                 ["contacts", "My Contacts", myContacts.length],
+                ["history", "Call History", activity?.events.length ?? 0],
               ] as [Tab, string, number][]
             ).map(([key, label, count]) => (
               <button
@@ -387,6 +507,15 @@ export default function Phones() {
           )}
         </div>
 
+        {/* A capped sheet says so out loud — the silent 200-row cut once hid
+            49 claimed Texas numbers from the screen they were dialed from. */}
+        {tab === "sheet" && mine.length >= SHEET_LIMIT && (
+          <div className="px-4 py-2 text-[11.5px] text-amber-300/90 bg-amber-500/[0.06] border-b border-amber-500/10">
+            Showing the first {SHEET_LIMIT} numbers — your sheet holds more.
+            Filter by state to work through the rest.
+          </div>
+        )}
+
         {/* -- Call Sheet tab ------------------------------------------------- */}
         {tab === "sheet" && (
           mine.length === 0 ? (
@@ -395,12 +524,12 @@ export default function Phones() {
                 ? "No numbers could be served for this search."
                 : "Pick a state and get numbers — your claimed sheet appears here."}
             </div>
-          ) : (
-            <div className="overflow-x-auto">
+          ) : (            <div className="overflow-x-auto">
               <table className="w-full text-[12.5px]">
                 <thead>
                   <tr className="text-slate-500 text-left border-b border-white/5">
                     <th className="px-4 py-2.5 font-medium">Name</th>
+                    <th className="px-4 py-2.5 font-medium">#</th>
                     <th className="px-4 py-2.5 font-medium">Business</th>
                     <th className="px-4 py-2.5 font-medium">Trade</th>
                     <th className="px-4 py-2.5 font-medium">Phone</th>
@@ -410,20 +539,24 @@ export default function Phones() {
                   </tr>
                 </thead>
                 <tbody>
-                  {mine.map((l) => (
-                    <tr key={l.id} className="border-b border-white/[0.03] hover:bg-white/[0.02]">
+                  {mine.map((l, index) => (
+                    <tr key={l.id} className={`border-b border-white/[0.03] hover:bg-white/[0.02] ${lastTouch?.lead_id === l.id ? "bg-indigo-500/10" : ""}`}>
                       <td className="px-4 py-2.5 text-slate-300">{l.person_name || "—"}</td>
+                      <td className="px-4 py-2.5 text-slate-500">{index + 1}</td>
                       <td className="px-4 py-2.5 text-slate-200">{l.business_name || "—"}</td>
                       <td className="px-4 py-2.5 text-slate-400 capitalize">{l.trade || "—"}</td>
                       <td className="px-4 py-2.5">
                         <span className="inline-flex items-center gap-1.5">
                           <a
-                            href={`tel:${l.phone}`}
+                            href={`zoomphonecall://${l.phone}`}
+                            title="Open in Zoom Phone"
+                            onClick={() => { void recordEvent(l.id, "dialed"); }}
                             className="text-indigo-300 hover:text-indigo-200"
                           >
                             {prettyPhone(l.phone)}
                           </a>
-                          <CopyButton value={l.phone} label="phone" />
+                          <CopyButton value={l.phone} label="phone" onCopied={() => { void recordEvent(l.id, "copied"); }} />
+                          {lastTouch?.lead_id === l.id && <span className="text-[10px] text-indigo-300">Last {lastTouch.action}</span>}
                         </span>
                       </td>
                       <td className="px-4 py-2.5">
@@ -478,7 +611,7 @@ export default function Phones() {
                             onCancel={() => setNoteLeadId(null)}
                           />
                         ) : (
-                          <div className="flex items-center gap-1.5">
+                          <div className="flex flex-wrap items-center gap-1.5">
                             <button
                               title="Lead — person said a project is coming"
                               onClick={() => markLead(l.id)}
@@ -508,6 +641,14 @@ export default function Phones() {
                             >
                               <StickyNote className="w-3 h-3" /> Note
                             </button>
+                            <button title="Not interested" onClick={() => recordEvent(l.id, "not_interested")}
+                              className="rounded-md bg-rose-500/10 px-2 py-1 text-[11.5px] text-rose-300">Not interested</button>
+                            <button title="Call again later" onClick={() => recordEvent(l.id, "follow_up")}
+                              className="rounded-md bg-sky-500/10 px-2 py-1 text-[11.5px] text-sky-300">Follow up</button>
+                            <button title="No answer" onClick={() => recordEvent(l.id, "no_answer")}
+                              className="rounded-md bg-white/[0.06] px-2 py-1 text-[11.5px] text-slate-300">No answer</button>
+                            <button title="Wrong or nonexistent number; remove from my sheet" onClick={() => recordEvent(l.id, "wrong_number")}
+                              className="rounded-md bg-orange-500/10 px-2 py-1 text-[11.5px] text-orange-300">Wrong number</button>
                           </div>
                         )}
                       </td>
@@ -520,7 +661,14 @@ export default function Phones() {
         )}
 
         {/* -- My Leads / My Contacts tabs ------------------------------------ */}
-        {tab !== "sheet" && (
+        {tab === "history" && <div className="p-4 space-y-2">
+          {(activity?.events ?? []).length === 0 && <p className="text-sm text-slate-500">No recorded call activity on this date.</p>}
+          {(activity?.events ?? []).map((event) => <div key={event.id} className="flex flex-wrap justify-between gap-2 border-b border-white/5 py-2 text-xs">
+            <span className="text-slate-300">{event.business_name || event.person_name || "—"} · {prettyPhone(event.phone)} · {event.state}</span>
+            <span className="text-slate-400">{event.action.replace(/_/g, " ")} · {event.created_at.slice(11, 16)} UTC</span>
+          </div>)}
+        </div>}
+        {(tab === "leads" || tab === "contacts") && (
           (() => {
             const rows = tab === "leads" ? myLeads : myContacts;
             if (rows.length === 0) {

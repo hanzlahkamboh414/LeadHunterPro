@@ -1900,7 +1900,7 @@ class PendingLeadsStore:
         historical rows; this guard stops NEW free-mail from ever occupying a
         cached surplus slot again (the permanent half of the total fix).
         """
-        from app.email.email_cleaner import is_crawl_artifact, is_free_mail_domain
+        from app.email.email_cleaner import is_acceptable_email, is_free_mail_domain
         from app.company_profile import get_profile
 
         conn = self._conn()
@@ -1911,13 +1911,16 @@ class PendingLeadsStore:
                 continue
             if is_free_mail_domain(email):
                 continue
-            # Crawl artifacts (Sentry DSNs, example.com placeholders,
-            # mailing-list ids) are machine strings scraped off raw page
-            # source — never a contact, so they never take a pool slot
-            # (observed live 2026-09-15: 17 of 1645 pending rows).
-            if is_crawl_artifact(email):
+            # Machine strings scraped off raw page source (Sentry DSNs,
+            # example.com and template placeholders, mailing-list ids) and
+            # addresses that are real but never a contact (no-reply boxes,
+            # social platforms) never take a pool slot — the full gate, not
+            # just the artifact half, so this pool and the crawl cannot
+            # disagree about what an address is (observed live 2026-09-15:
+            # 17 of 1645 pending rows; ``test@email.com`` live 2026-09-21).
+            if not is_acceptable_email(email):
                 logger.info(
-                    "Pending drop (crawl artifact): %s from %s",
+                    "Pending drop (not a contact address): %s from %s",
                     email,
                     (lead.get("source_url") or "")[:90],
                 )

@@ -67,6 +67,7 @@ def test_trade_less_coverage_is_anything_stocking_the_state(tmp_path):
                            target=5, user_id="alice")
     assert set(out_any["coverage"]) == {
         "wa_license", "tdlr_license", "cslb_portal",
+        "mn_dli_registration", "nyc_dcwp_hic",
     }
 
 

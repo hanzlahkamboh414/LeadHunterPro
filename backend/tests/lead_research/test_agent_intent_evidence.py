@@ -145,6 +145,24 @@ def test_existing_event_coverage_skips_a_second_ai_call(enabled):
 
 
 def test_pain_call_runs_once_and_stores_the_gated_hypothesis(enabled):
+    """One AI call, one stored hypothesis — and the gate now actually rules.
+
+    THIS TEST USED TO ASSERT THE DEFECT. Until 2026-09-21 it required
+    ``verdict == "BLOCKED"`` and ``"company identity" in blocked_by``, which
+    was not a statement about this fixture's evidence — it was the
+    ``company_match`` defect showing through. No production path ever set
+    that field, so every supporting record read ``unknown`` and the gate's
+    identity condition failed for EVERY hypothesis ever proposed. The old
+    assertions pinned that as correct behaviour, which is why the fix had to
+    change them rather than work around them.
+
+    The evidence here genuinely names its company ("Acme broke ground on the
+    Riverside project.", read off acme.com), so it now classifies
+    ``CONFIRMED`` and the gate moves on to the conditions that are actually
+    about this hypothesis. Its verdict is ``LIKELY``, not ``VERIFIED``:
+    there is one signal and no direct pain evidence, so it does not clear the
+    verified basis — the identity condition was never what made this thin.
+    """
     import json
 
     event_calls: list[str] = []
@@ -194,12 +212,35 @@ def test_pain_call_runs_once_and_stores_the_gated_hypothesis(enabled):
     hypotheses = store.pain_hypotheses_for_company(company.company_id)
     assert len(hypotheses) == 1
     assert hypotheses[0].pain_type.value == "project_volume"
-    assert hypotheses[0].verdict.value == "BLOCKED"
-    assert any("company identity" in item for item in hypotheses[0].blocked_by)
+    assert hypotheses[0].verdict.value == "LIKELY"
+    assert not any(
+        "company identity" in item for item in hypotheses[0].blocked_by
+    ), (
+        "the evidence names its company, so the identity condition must be "
+        "satisfied — this assertion is the regression test for the field that "
+        "nothing used to set"
+    )
     assert "pain_inference" in dossier.sources_checked
     assert dossier.signal_intelligence["company_id"] == company.company_id
-    assert dossier.signal_intelligence["outreach_trigger"]["strength"] == "none"
-    assert dossier.signal_intelligence["recommended_angle"] == "General Estimating Support"
+
+    # The downstream half of the same defect. A BLOCKED hypothesis is not
+    # ``eligible`` in ``build_outreach_trigger``, so with every hypothesis
+    # blocked the trigger fell through to its generic branch — angle "General
+    # Estimating Support", basis "No licensed current pain", strength "none".
+    # That is what this test used to assert, and it was the symptom, not the
+    # contract: the whole signal -> pain -> outreach chain was ending every
+    # company at the same fallback sentence. A LIKELY hypothesis IS eligible,
+    # so the trigger now carries the angle its licensed pain actually implies.
+    trigger = dossier.signal_intelligence["outreach_trigger"]
+    assert trigger["strength"] == "weak_inference", (
+        "LIKELY (not VERIFIED, no direct evidence) is exactly weak_inference"
+    )
+    assert trigger["basis"] == "project_volume"
+    assert dossier.signal_intelligence["recommended_angle"] == "Project Estimating Support"
+    assert trigger["wording"] == (
+        "As project activity picks up, flexible estimating support can help."
+    ), "the weak-inference wording variant, chosen by the same index"
+    assert trigger["evidence_ids"], "a licensed trigger names the evidence it rests on"
     assert store.outreach_trigger_for_company(company.company_id) is not None
 
 

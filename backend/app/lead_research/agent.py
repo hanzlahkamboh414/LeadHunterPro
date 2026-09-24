@@ -479,7 +479,15 @@ class AILeadResearchAgent:
                         f"Estimating services are not for them."
                     )
                 dossier.recommendation = "skip"
-                sources_checked.append("scoring")
+                # NOTE (RC-8, fixed 2026-09-22): this shortcut used to append
+                # "scoring" to sources_checked although it returns BEFORE Stage
+                # 4 — the scorer never ran, so the marker was a claim of work
+                # never done, shown to the user as evidence that had been
+                # gathered (and it made 397 stored rows look like scored leads
+                # whose potential_score had been measured). No pre-scoring gate
+                # records a source: ``test_triage_free_mail_goes_to_nurture``
+                # pins that convention, and ``has_measured_score`` reads the
+                # absence to tell a real measurement from the dataclass default.
                 # Reinforce the loop with this proven non-buyer, then finalize.
                 self._record_fit(dossier, source_url, kept=False)
                 dossier.sources_checked = sources_checked

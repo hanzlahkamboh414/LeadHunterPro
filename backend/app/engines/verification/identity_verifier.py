@@ -27,6 +27,13 @@ Reuses existing production code (CLAUDE.md §14):
 The default fetcher issues a single GET so both liveness AND page text are
 available for the name-on-page check; tests inject a stub fetcher for
 deterministic, offline runs.
+
+Two pure helpers here are PUBLIC and imported elsewhere —
+:func:`name_tokens` and :func:`name_on_page`. They answer "is this company
+named in this text?", which the research adapters (``CompanyMatch``) and the
+google_news relevance check both need; publishing them keeps one answer
+instead of three approximations of it (CLAUDE.md §14). Everything else in
+this module stays private to the verifier.
 """
 
 from __future__ import annotations
@@ -321,8 +328,15 @@ def _has_directory_path(path: str) -> bool:
     return bool(segments & _DIRECTORY_PATH_TOKENS)
 
 
-def _name_tokens(company_name: str) -> list[str]:
-    """Significant tokens from a company name (drops corporate suffixes)."""
+def name_tokens(company_name: str) -> list[str]:
+    """Significant tokens from a company name (drops corporate suffixes).
+
+    PUBLIC, and deliberately so (2026-09-21): "does this text name this
+    company?" is asked in two more places now — the research adapters
+    classifying ``CompanyMatch`` and the google_news plugin refusing a
+    headline that does not name the company it was searched for. Both reuse
+    this rather than growing a fourth private tokenizer (CLAUDE.md §14).
+    """
     raw = re.split(r"[^A-Za-z0-9]+", company_name.lower())
     return [t for t in raw if len(t) >= 3 and t not in _CORPORATE_SUFFIXES]
 
@@ -343,7 +357,7 @@ def _domain_overlap(company_name: str, host: str) -> float:
     appear as substrings of the single label). ``bestshingles.com`` for the
     same name -> 0.0.
     """
-    name_toks = _name_tokens(company_name)
+    name_toks = name_tokens(company_name)
     if not name_toks:
         return 0.0
     labels = _domain_labels(host)
@@ -351,13 +365,23 @@ def _domain_overlap(company_name: str, host: str) -> float:
     return matched / len(name_toks)
 
 
-def _name_on_page(
-    company_name: str, name_tokens: list[str], page_text: str
-) -> bool:
-    """True when the company name appears on the page.
+def name_on_page(company_name: str, tokens: list[str], page_text: str) -> bool:
+    """True when the company name appears in *page_text*.
 
     A distinctive (non-generic-trade) token such as ``atlas`` is enough;
     generic words like ``roofing`` alone are not.
+
+    PUBLIC for the same reason as :func:`name_tokens` — this is THE answer to
+    "is the company named here?", and the research adapters and the
+    google_news relevance check both need exactly that answer, from the same
+    rules, rather than three approximations of it.
+
+    Args:
+        company_name: The name to look for (matched whole, then by token).
+        tokens: :func:`name_tokens` of that name — passed in rather than
+            recomputed, because the caller usually needs the tokens for
+            other checks too.
+        page_text: Any text: a page body, a headline, a snippet.
     """
     if not page_text:
         return False
@@ -365,8 +389,8 @@ def _name_on_page(
     full = (company_name or "").strip().lower()
     if len(full) >= 3 and full in text:
         return True
-    distinctive = [t for t in name_tokens if t not in _GENERIC_TRADE_WORDS]
-    candidates = distinctive or name_tokens
+    distinctive = [t for t in tokens if t not in _GENERIC_TRADE_WORDS]
+    candidates = distinctive or tokens
     return any(tok in text for tok in candidates)
 
 
@@ -438,14 +462,14 @@ class IdentityVerifier:
         evidence: list[FieldEvidence] = []
         tier = tier_for_source(source, source_type)
 
-        name_tokens = _name_tokens(company_name)
-        name_credible = bool(name_tokens)  # >=1 significant token => plausible name
+        name_tokens_list = name_tokens(company_name)
+        name_credible = bool(name_tokens_list)  # >=1 significant token => plausible name
 
         website_status = VerificationStatus.unknown
         official_site_confirmed = False
         normalized_website = ""
         overlap = 0.0
-        name_on_page = False
+        name_found = False
 
         raw_website = (website or "").strip()
         if raw_website:
@@ -481,10 +505,10 @@ class IdentityVerifier:
                             f"— not verified, company not judged fake"
                         )
                     else:
-                        name_on_page = _name_on_page(
-                            company_name, name_tokens, outcome.page_text
+                        name_found = name_on_page(
+                            company_name, name_tokens_list, outcome.page_text
                         )
-                        if overlap >= _OVERLAP_MIN and name_on_page:
+                        if overlap >= _OVERLAP_MIN and name_found:
                             official_site_confirmed = True
                             website_status = VerificationStatus.verified
                             reasons.append(

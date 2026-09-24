@@ -71,7 +71,12 @@ def test_is_placeholder_or_fake_domain_empty_is_junk():
 # Full pipeline
 # ---------------------------------------------------------------------------
 
-def _make_agent(ai_response=None):
+def _make_agent(
+    ai_response=None,
+    intent_evidence_plugins=None,
+    event_ai_ask=None,
+    pain_ai_ask=None,
+):
     """Build an agent with all fake seams."""
     if ai_response is None:
         ai_response = {
@@ -124,6 +129,14 @@ def _make_agent(ai_response=None):
         intent_analyzer=intent,
         scorer=scorer,
         domain_delivers_email=_MX_OK,
+        # Phase 1 evidence-intake seam. Defaults to None (production: use the
+        # registry/built-ins); the repo-wide autouse fixture keeps the feature
+        # flag OFF, so no existing test reaches the live endpoints either way.
+        intent_evidence_plugins=intent_evidence_plugins,
+        event_ai_ask=event_ai_ask or (lambda _: '{"events": []}'),
+        pain_ai_ask=pain_ai_ask or (
+            lambda _: '{"candidate_signals":[],"candidate_pain_hypotheses":[]}'
+        ),
     )
 
 
@@ -723,6 +736,19 @@ def test_pre_verdict_kill_switch(monkeypatch):
     assert dossier.recommendation == "skip"
     assert "company_research" in dossier.sources_checked
     assert "company_pre_verdict" not in dossier.sources_checked
+
+    # RC-8 regression (fixed 2026-09-22): the not-a-client shortcut returns
+    # BEFORE Stage 4, so the scorer never ran and this gate must not claim it
+    # did. It used to append "scoring" here — a marker of work never done, and
+    # the reason 397 stored rows looked like scored leads whose
+    # potential_score had been measured rather than abandoned.
+    assert "scoring" not in dossier.sources_checked
+    assert dossier.fit.startswith("Not our client — ")
+    # …which is exactly what the RC-5 discriminator reads to refuse to invent
+    # a score for a lead that was never scored.
+    from app.lead_research.scoring import has_measured_score
+
+    assert has_measured_score(dossier) is False
 
 
 def test_learned_domain_skips_before_any_network():

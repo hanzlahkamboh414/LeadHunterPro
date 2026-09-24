@@ -51,6 +51,7 @@ from app.source_scout.store import (
     STATUS_PROMOTED,
     ScoutStore,
     default_db_path as _scout_db_path,
+    servable_for,
 )
 
 logger = logging.getLogger(__name__)
@@ -107,6 +108,10 @@ TRADE_COVERAGE: dict[str, dict[str, str]] = {
 #: pairs from fetch selection — it can never stock them itself.
 BROWSER_SYNCED_SOURCES = frozenset({"cslb_portal"})
 
+# Daily scout imports with no trustworthy trade field. These sources may
+# cover state-only searches, but never a trade-filtered demand pair.
+STATE_ONLY_SOURCES = {"MN": "mn_dli_registration", "NY": "nyc_dcwp_hic"}
+
 
 def _scout_store() -> ScoutStore | None:
     """The scout store, or None when its DB file doesn't exist yet.
@@ -125,24 +130,41 @@ def _scout_store() -> ScoutStore | None:
 
 
 def _promoted_scout_coverage() -> dict[str, dict[str, str]]:
-    """``{slug: {state: source_id}}`` from PROMOTED scout sources.
+    """``{slug: {state: source_id}}`` from SERVABLE promoted scout sources.
 
     One indexed SQLite read per lookup (the codebase's per-call idiom), so
     a promotion or circuit-breaker retirement is visible to the very next
     coverage question — no cache window serving a source that just died.
     Any read failure degrades to ``{}`` (lead serving never breaks for a
     scout-store reason).
+
+    ``servable_promoted`` applies the capability gate: a source whose
+    MEASURED ``capabilities.phone.present`` is false can never be promised
+    as phone coverage the lane then fails to fetch (Phase-1's router gate,
+    now honoured at the production consumer too).
     """
     store = _scout_store()
     if store is None:
         return {}
     coverage: dict[str, dict[str, str]] = {}
     try:
-        for source_id, payload in store.promoted_payloads().items():
+        for source_id, payload in store.servable_promoted("phone").items():
             state = str(payload.get("state", "") or "").upper()
             if not state:
                 continue  # a stateless proposal cannot sit on the grid
-            for slug in payload.get("trade_values", {}):
+            slugs = payload.get("trade_values", {})
+            if not slugs:
+                # Promoted and servable, yet this lane cannot read its
+                # contract — it contributes NO coverage. Say so: a silent
+                # skip here is exactly how "promoted but serving nothing"
+                # hides (CLAUDE.md §6).
+                logger.warning(
+                    "scout source %s is promoted and servable but carries "
+                    "no trade_values mapping — the phones lane cannot serve "
+                    "it, contributing no coverage", source_id,
+                )
+                continue
+            for slug in slugs:
                 coverage.setdefault(slug, {})[state] = source_id
     except Exception as exc:  # noqa: BLE001 — degrade, never raise
         logger.warning("scout coverage read failed: %s", exc)
@@ -202,9 +224,12 @@ def state_sources(state: str) -> list[str]:
     st = (state or "").strip().upper()
     if not st:
         return sorted({src for m in effective_trade_coverage().values()
-                       for src in m.values()})
-    return sorted({src for m in effective_trade_coverage().values()
-                   for s, src in m.items() if s == st})
+                       for src in m.values()} | set(STATE_ONLY_SOURCES.values()))
+    sources = {src for m in effective_trade_coverage().values()
+               for s, src in m.items() if s == st}
+    if st in STATE_ONLY_SOURCES:
+        sources.add(STATE_ONLY_SOURCES[st])
+    return sorted(sources)
 
 
 def _soql_quote(value: str) -> str:
@@ -286,6 +311,23 @@ def _parse_tdlr_row(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _page_params(where: str, limit: int, offset: int) -> dict[str, str]:
+    """One SODA page window: the filter, its size, and its position.
+
+    ``$order=:id`` is REQUIRED, not cosmetic. ``$offset`` is only sound over
+    a stable order, and a dataset's DEFAULT order is not guaranteed stable
+    between requests — without an explicit order, consecutive pages can skip
+    rows or repeat them. Verified live 2026-09-23 against data.wa.gov,
+    data.texas.gov and all three promoted scout datasets: an identical
+    window read twice returns identical rows, and windows 0 and 250 are
+    disjoint.
+    """
+    params = {"$where": where, "$limit": str(limit), "$order": ":id"}
+    if offset > 0:
+        params["$offset"] = str(offset)
+    return params
+
+
 def _fetch_page(
     url: str, params: dict[str, Any], pinned_ip: str = "",
 ) -> tuple[SourceStatus, list[dict[str, Any]], str]:
@@ -339,24 +381,32 @@ def _fetch_page(
         return SourceStatus.UNAVAILABLE, [], f"pinned_retry_failed: {exc}"
 
 
-def _scout_promoted_source(source_id: str) -> dict[str, Any] | None:
-    """The PROMOTED scout source row (payload parsed) or None.
+def _scout_promoted_source(source_id: str
+                           ) -> tuple[dict[str, Any] | None, str]:
+    """``(row, "")`` for a PROMOTED, phone-SERVABLE scout source, else
+    ``(None, honest reason)``.
 
     Only promoted sources are servable — everything else in the scout
     store is quarantine by construction, and asking for it here is the
-    same honest "unknown source" as asking for a source that never existed.
+    same honest "unknown source" as asking for a source that never
+    existed. Promotion alone is not enough either: ``servable_for``
+    refuses a source whose MEASURED ``capabilities.phone.present`` is
+    false, because fetching it could only yield phone-less rows.
     """
     store = _scout_store()
     if store is None:
-        return None
+        return None, f"unknown_source: {source_id}"
     try:
         row = store.get(source_id)
     except Exception as exc:  # noqa: BLE001 — degrade, never raise
         logger.warning("scout lookup for %s failed: %s", source_id, exc)
-        return None
+        return None, f"unknown_source: {source_id}"
     if row and row["status"] == STATUS_PROMOTED:
-        return row
-    return None
+        if not servable_for(row, "phone"):
+            return None, (f"not_servable: {source_id} "
+                          "(measured phone capability is false)")
+        return row, ""
+    return None, f"unknown_source: {source_id}"
 
 
 def _parse_scout_row(row: dict[str, Any], payload: dict[str, Any],
@@ -398,7 +448,7 @@ def _record_scout_outcome(source_id: str, ok: bool, detail: str = "") -> None:
 
 
 def _fetch_scout_records(
-    source_id: str, slug: str, city: str, limit: int,
+    source_id: str, slug: str, city: str, limit: int, offset: int = 0,
 ) -> tuple[SourceStatus, list[dict[str, Any]], dict[str, Any]]:
     """Fetch + normalize one promoted scout source's rows for a trade slug.
 
@@ -406,10 +456,9 @@ def _fetch_scout_records(
     (verified mechanically + judged on probation) — never re-invented
     here. Every outcome feeds the circuit breaker.
     """
-    row = _scout_promoted_source(source_id)
+    row, why = _scout_promoted_source(source_id)
     if row is None:
-        return (SourceStatus.ERROR, [],
-                {"error": f"unknown_source: {source_id}"})
+        return (SourceStatus.ERROR, [], {"error": why})
     payload = row["payload"]
     values = payload.get("trade_values", {}).get(slug)
     if not values:
@@ -423,12 +472,13 @@ def _fetch_scout_records(
     if city and city_col:
         where += (f" AND {city_col} LIKE "
                   f"'{_soql_quote(city.strip().upper())}%'")
-    params = {"$where": where, "$limit": str(limit)}
+    params = _page_params(where, limit, offset)
     status, rows, reason = _fetch_page(
         row["endpoint"], params,
         pinned_ip=str(payload.get("pinned_ip", "")),
     )
-    meta: dict[str, Any] = {"source": source_id, "dataset": "scout"}
+    meta: dict[str, Any] = {"source": source_id, "dataset": "scout",
+                            "offset": max(0, int(offset))}
     if status != SourceStatus.SUCCESS:
         _record_scout_outcome(source_id, False, reason)
         meta["error"] = reason
@@ -441,23 +491,29 @@ def _fetch_scout_records(
     ]
     meta["rows_fetched"] = len(rows)
     _record_scout_outcome(source_id, True)
-    logger.info("scout source %s: %d rows for trade slug %r city=%r",
-                source_id, len(rows), slug, city)
+    logger.info("scout source %s: %d rows for trade slug %r city=%r offset=%d",
+                source_id, len(rows), slug, city, max(0, int(offset)))
     return status, records, meta
 
 
 def fetch_license_records(
     source_id: str, slug: str, city: str = "", limit: int = 200,
+    offset: int = 0,
 ) -> tuple[SourceStatus, list[dict[str, Any]], dict[str, Any]]:
-    """Fetch one source's records for a canonical trade slug.
+    """Fetch one WINDOW of one source's records for a canonical trade slug.
+
+    ``offset`` is the position in the source's ordered matching set: the
+    caller (the harvester cursor) walks it forward so consecutive runs read
+    NEW rows instead of re-reading the same first page forever.
 
     Returns (status, normalized phone-lead records, metadata). Records with
     no usable phone are still returned — the store's add() honestly drops
     and counts them (never a silent mangle).
     """
     limit = max(1, min(limit, 5000))
+    offset = max(0, int(offset))
     if source_id == "wa_license":
-        params = {"$where": _wa_where(slug, city), "$limit": str(limit)}
+        params = _page_params(_wa_where(slug, city), limit, offset)
         status, rows, reason = _fetch_page(WA_DATASET, params)
         meta = {"source": "wa_license", "dataset": "m8qx-ubtq"}
     elif source_id == "tdlr_license":
@@ -468,7 +524,7 @@ def fetch_license_records(
         if city:
             where += (f" AND business_city_state_zip LIKE "
                       f"'{_soql_quote(city.strip().upper())}%'")
-        params = {"$where": where, "$limit": str(limit)}
+        params = _page_params(where, limit, offset)
         status, rows, reason = _fetch_page(TDLR_DATASET, params, TDLR_PINNED_IP)
         meta = {"source": "tdlr_license", "dataset": "7358-krk7"}
     elif source_id == "cslb_portal":
@@ -482,15 +538,16 @@ def fetch_license_records(
     else:
         # P9: anything else must be a PROMOTED scout source — quarantine
         # and retired sources get the same honest unknown_source refusal.
-        return _fetch_scout_records(source_id, slug, city, limit)
+        return _fetch_scout_records(source_id, slug, city, limit, offset)
 
     if status == SourceStatus.SUCCESS:
         parse = _parse_wa_row if source_id == "wa_license" else _parse_tdlr_row
         records = [parse(r) for r in rows]
         meta["rows_fetched"] = len(rows)
+        meta["offset"] = offset
         logger.info(
-            "SODA %s: %d rows for trade slug %r city=%r",
-            source_id, len(rows), slug, city,
+            "SODA %s: %d rows for trade slug %r city=%r offset=%d",
+            source_id, len(rows), slug, city, offset,
         )
         return status, records, meta
     meta["error"] = reason

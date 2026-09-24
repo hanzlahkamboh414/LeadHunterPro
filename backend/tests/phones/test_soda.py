@@ -48,6 +48,13 @@ def test_coverage_state_filter():
     assert covered_sources("electrical", "TX") == ["tdlr_license"]
 
 
+def test_state_only_importers_are_state_coverage_not_trade_coverage():
+    assert "mn_dli_registration" in soda.state_sources("MN")
+    assert "nyc_dcwp_hic" in soda.state_sources("NY")
+    assert covered_sources("gc", "MN") == []
+    assert "nyc_dcwp_hic" not in covered_sources("gc", "NY")
+
+
 def test_coverage_unsold_trades_are_honest_empty():
     """Trades no license board covers (lumber, mep) return NO source —
     never a fake fetch. (finishes gained CSLB's C-6 in P8 part 2.)"""

@@ -31,6 +31,7 @@ import pytest
 
 from app.research.adapters import (
     check_legacy_mapping,
+    classify_company_match,
     event_type_for_legacy_intent,
     evidence_type_for_source,
     from_ai_evidence,
@@ -39,8 +40,10 @@ from app.research.adapters import (
     plan_legacy_migration,
     promotion_guard,
 )
+from app.research.models import CanonicalEvidence
 from app.research.taxonomy import (
     BID_AWARD_CHAIN,
+    CompanyMatch,
     EventType,
     EvidenceType,
     chain_rank,
@@ -411,6 +414,204 @@ def test_mappers_reject_evidence_with_no_source_url():
         from_intent_evidence(
             _LegacyIntent(type="hiring", source_url=""), company_id="cmp_1"
         )
+
+
+# --- company_match: the field nothing ever set ----------------------------
+
+
+class TestClassifyCompanyMatch:
+    """The defect: no production path ever set ``company_match``.
+
+    Measured live 2026-09-21 in the local ``research_evidence.db``: 224 of
+    224 rows read ``unknown``, because ``company_match=`` appeared only in
+    tests. The pain gate requires ``CONFIRMED`` on every supporting record,
+    so all 22 hypotheses were blocked structurally — the gate was answering a
+    question nobody had ever given it data for.
+
+    The two states are the taxonomy's own definitions applied literally:
+    ``CONFIRMED`` is "the company is NAMED in the source itself",
+    ``INFERRED`` is "matched by domain/address, not by name".
+    """
+
+    NAME = "Turner Construction"
+    DOMAIN = "turnerconstruction.com"
+
+    def _classify(self, url, text, name=None, domain=None):
+        return classify_company_match(
+            company_name=self.NAME if name is None else name,
+            domain=self.DOMAIN if domain is None else domain,
+            source_url=url,
+            text=text,
+        )
+
+    def test_a_record_that_names_the_company_is_confirmed(self):
+        assert self._classify(
+            "https://news.google.com/rss/articles/A",
+            "Turner discloses data breach of salary info - Construction Dive",
+        ) is CompanyMatch.CONFIRMED
+
+    def test_the_companys_own_award_record_names_it(self):
+        """The real usaspending shape, verbatim from the store."""
+        assert self._classify(
+            "https://www.usaspending.gov/award/W9128F23C0023",
+            "TURNER CONSTRUCTION COMPANY · $393,700,142 · "
+            "Department of Defense",
+        ) is CompanyMatch.CONFIRMED
+
+    def test_a_record_on_the_companys_own_domain_is_inferred(self):
+        """A domain is an inference, not a naming — the taxonomy's own split."""
+        assert self._classify(
+            "https://www.turnerconstruction.com/careers", "Join our team"
+        ) is CompanyMatch.INFERRED
+
+    def test_a_subdomain_of_the_company_is_the_same_company(self):
+        assert self._classify(
+            "https://careers.turnerconstruction.com/ops", "Join our team"
+        ) is CompanyMatch.INFERRED
+
+    def test_a_namesake_in_another_tld_is_not_the_same_company(self):
+        """The strictness is the point — ``co.uk`` is a different company.
+
+        A looser name-similarity rule would call this INFERRED, which is the
+        failure the taxonomy keeps a separate ``MISMATCH`` state for.
+        """
+        assert self._classify(
+            "https://turnerconstruction.co.uk/about", "Join our team"
+        ) is CompanyMatch.UNKNOWN
+
+    def test_an_unrelated_headline_that_never_names_the_company_is_unknown(self):
+        """Measured live: 42 of 198 stored Turner rows were exactly this.
+
+        Google News matches a quoted name loosely, so the feed returns
+        articles that mention the company in the body while the headline —
+        the only text we keep — names somebody else.
+        """
+        assert self._classify(
+            "https://news.google.com/rss/articles/J",
+            "Jacobs wins role on $1.7B New York public health lab",
+        ) is CompanyMatch.UNKNOWN
+
+    def test_nothing_known_is_unknown_not_a_flattering_guess(self):
+        assert classify_company_match(
+            source_url="https://news.google.com/rss/articles/X", text="Something"
+        ) is CompanyMatch.UNKNOWN
+
+    def test_a_generic_trade_word_alone_does_not_name_the_company(self):
+        """``construction`` is in the name and in every headline.
+
+        Without the generic-trade guard, most of the 42 off-company Turner
+        rows would have passed on the word "Construction" alone.
+        """
+        assert self._classify(
+            "https://news.google.com/rss/articles/C",
+            "Construction worker dies at site of Broncos new training facility",
+        ) is CompanyMatch.UNKNOWN
+
+    def test_a_garbage_url_never_equals_a_garbage_key(self):
+        """``extract_host`` passes unparseable input through unchanged."""
+        assert classify_company_match(
+            company_name="", domain="not a url", source_url="not a url", text=""
+        ) is CompanyMatch.UNKNOWN
+
+    @pytest.mark.parametrize(
+        "url,text",
+        [
+            ("https://news.google.com/rss/articles/A", "Turner wins a contract"),
+            ("https://www.turnerconstruction.com/", "Join our team"),
+            ("https://turnerconstruction.co.uk/", "Turner wins a contract"),
+            ("https://usaspending.gov/award/1", "Some other firm"),
+            ("", ""),
+        ],
+    )
+    def test_mismatch_is_never_returned(self, url, text):
+        """MISMATCH deletes evidence by refusal, and cannot be established.
+
+        Proving a record is about a DIFFERENT company needs that other
+        company's name, which the row does not carry. ``UNKNOWN`` says
+        "could not be established", which is the true statement; a guess
+        here would either destroy real evidence or launder a stranger's
+        evidence into ours.
+        """
+        assert self._classify(url, text) is not CompanyMatch.MISMATCH
+
+    def test_the_three_mappers_classify_from_their_own_text(self):
+        """Each mapper judges the text IT stores, not a neighbour's.
+
+        The AI mapper puts its claim in ``title`` and leaves ``excerpt``
+        empty; the other two do the opposite. All three must still land on
+        the same verdict for the same company.
+        """
+        ai = from_ai_evidence(
+            _AIEvidence(
+                claim="Turner Construction opened a new office in Dallas",
+                source_url="https://news.example.com/turner-dallas",
+            ),
+            company_id="cmp_1",
+            retrieved_at="2026-09-21T10:00:00",
+            company_name=self.NAME,
+            domain=self.DOMAIN,
+        )
+        intent = from_intent_evidence(
+            _LegacyIntent(
+                type="hiring",
+                snippet="Turner is hiring in Dallas.",
+                source_url="https://news.example.com/turner-hiring",
+            ),
+            company_id="cmp_1",
+            company_name=self.NAME,
+            domain=self.DOMAIN,
+        )
+        field = from_field_evidence(
+            _FieldEvidence(
+                snippet="Turner Construction - Contact",
+                page_url="https://www.turnerconstruction.com/contact",
+            ),
+            company_id="cmp_1",
+            company_name=self.NAME,
+            domain=self.DOMAIN,
+        )
+        assert ai.company_match is CompanyMatch.CONFIRMED
+        assert intent.company_match is CompanyMatch.CONFIRMED
+        assert field.company_match is CompanyMatch.CONFIRMED
+
+    def test_the_intent_mapper_infers_from_the_companys_own_page(self):
+        """The live company_site shape: a snippet that never says the name."""
+        record = from_intent_evidence(
+            _LegacyIntent(
+                type="hiring",
+                snippet="fulfilling career awaits you at our firm! Join our team",
+                source_url="https://www.turnerconstruction.com/careers",
+            ),
+            company_id="cmp_1",
+            company_name=self.NAME,
+            domain=self.DOMAIN,
+        )
+        assert record.company_match is CompanyMatch.INFERRED
+
+    def test_without_an_identity_the_field_stays_unknown(self):
+        """The pre-existing call shape must not start inventing a verdict.
+
+        A caller that knows only a ``company_id`` genuinely cannot classify,
+        and ``unknown`` is that fact stated — the same reason the column has
+        a default.
+        """
+        record = from_intent_evidence(
+            _LegacyIntent(type="hiring", snippet="Turner is hiring."),
+            company_id="cmp_1",
+        )
+        assert record.company_match is CompanyMatch.UNKNOWN
+
+    def test_the_classified_state_survives_the_store_round_trip(self):
+        record = from_intent_evidence(
+            _LegacyIntent(type="hiring", snippet="Turner is hiring."),
+            company_id="cmp_1",
+            company_name=self.NAME,
+            domain=self.DOMAIN,
+        )
+        assert record.to_row()["company_match"] == "confirmed"
+        assert CanonicalEvidence.from_row(
+            record.to_row()
+        ).company_match is CompanyMatch.CONFIRMED
 
 
 # --- dry-run migration report --------------------------------------------

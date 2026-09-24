@@ -8,6 +8,8 @@ staleness re-verify queue.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import threading
+import time
 
 from app.harvester.store import HarvesterStore
 from app.harvester.worker import HarvesterWorker
@@ -47,8 +49,8 @@ class FakeFetch:
         self.n = n
         self.fail = fail
 
-    def __call__(self, source_id, slug, city, limit):
-        self.calls.append((source_id, slug, city, limit))
+    def __call__(self, source_id, slug, city, limit, offset=0):
+        self.calls.append((source_id, slug, city, limit, offset))
         if self.fail:
             return SourceStatus.UNAVAILABLE, [], {"error": "source down"}
         state = "WA" if source_id == "wa_license" else "TX"
@@ -130,6 +132,33 @@ def test_busy_worker_defers_to_user_searches(tmp_path):
     assert fetch.calls == [] and research.calls == []
 
 
+def test_background_phone_pulses_continue_while_email_research_runs(tmp_path):
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_research(query):
+        entered.set()
+        release.wait(2.0)
+        return {"leads_found": 0, "working_leads": 0, "shortfall": 0}
+
+    fetch = FakeFetch(n=1)
+    worker = _worker(
+        tmp_path, fetch=fetch, research=slow_research,
+        interval_s=0.01, pair_cooldown_s=0,
+    )
+    worker._store.record_demand("roofing", "TX")
+    worker.start()
+    try:
+        assert entered.wait(2.0)
+        deadline = time.monotonic() + 2.0
+        while len(fetch.calls) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert len(fetch.calls) >= 2
+    finally:
+        release.set()
+        worker.stop()
+
+
 # ---------------------------------------------------------------------------
 # phones lane
 # ---------------------------------------------------------------------------
@@ -144,10 +173,12 @@ def test_phones_lane_stocks_the_emptiest_pair(tmp_path):
     assert phones["pair"] is not None
     assert phones["fetched"] == 1
     assert phones["stocked"] == 1
-    # The fetch went to a genuinely covered pair, within the batch limit.
-    source_id, slug, city, limit = fetch.calls[0]
+    # The fetch went to a genuinely covered pair, within the batch limit,
+    # from the top of that pair's cursor (nothing read yet).
+    source_id, slug, city, limit, offset = fetch.calls[0]
     assert TRADE_COVERAGE[slug] and source_id in TRADE_COVERAGE[slug].values()
     assert limit == 250
+    assert offset == 0
     # The row is genuinely in that pair's pool, and the quota counter moved.
     p_slug, p_state = phones["pair"]
     assert worker._phone_store.unclaimed_count(p_slug, p_state) == 1
@@ -159,6 +190,20 @@ def test_phones_lane_prefers_demanded_pair(tmp_path):
     worker = _worker(tmp_path)
     worker._store.record_demand("roofing", "WA")  # covered (WA licenses roofing)
     assert worker._pick_phone_pair() == ("roofing", "WA")
+
+
+def test_never_touched_pair_precedes_a_previously_harvested_pair(tmp_path):
+    worker = _worker(tmp_path, pair_cooldown_s=0)
+    worker._store.record_demand("roofing", "WA")
+    worker._store.record_run("phones", "roofing", "WA", "success", 250)
+
+    assert worker._pick_phone_pair() != ("roofing", "WA")
+
+
+def test_full_sweep_keeps_pairs_without_demand_or_pool_deficit(tmp_path):
+    worker = _worker(tmp_path, min_pool_floor=0, pair_cooldown_s=0)
+
+    assert worker._pick_phone_pair() is not None
 
 
 def test_phones_lane_state_demand_boosts_whole_state(tmp_path):
@@ -190,6 +235,18 @@ def test_phones_lane_daily_quota_is_hard(tmp_path):
     stats = worker.run_once()
     assert stats["phones"]["skipped"] == "quota_exhausted"
     assert stats["phones"]["stocked"] == 0
+
+
+def test_phones_lane_has_no_daily_ceiling_when_quota_is_zero(tmp_path):
+    fetch = FakeFetch(n=1)
+    worker = _worker(tmp_path, fetch=fetch, daily_phone_quota=0)
+    worker._store.record_stocked("phones", 5000)
+
+    stats = worker.run_once()
+
+    assert stats["phones"]["stocked"] == 1
+    assert fetch.calls[0][3] == 250
+    assert worker._store.quota_used("phones") == 5001
 
 
 def test_phones_lane_source_error_backs_off(tmp_path):

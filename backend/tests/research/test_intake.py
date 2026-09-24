@@ -16,11 +16,11 @@ from __future__ import annotations
 
 import pytest
 
-from app.discovery.sources.status import SourceFailureReason, SourceStatus
+from app.discovery.sources.status import SourceReason, SourceStatus
 from app.engines.lead.lead_models import IntentEvidence, IntentEvidenceType
 from app.research.intake import collect_company_evidence
 from app.research.store import ResearchEvidenceStore
-from app.research.taxonomy import EventType, ResearchState
+from app.research.taxonomy import CompanyMatch, EventType, ResearchState
 
 
 # --- stand-in plugins -----------------------------------------------------
@@ -141,6 +141,55 @@ def test_the_evidence_keeps_its_traceable_url(store):
     assert stored[0].excerpt
 
 
+# --- company identity reaches the stored row ------------------------------
+
+
+def test_the_intake_classifies_company_match_from_the_identity(store):
+    """The bridge the defect was missing: the intake knows WHO the company is.
+
+    ``company_match`` was never set on the live path, so every stored row
+    read ``unknown`` and the pain gate blocked all hypotheses structurally.
+    The intake is the one place that holds both the record and the company's
+    name and domain, so it is where the two have to meet.
+    """
+    row = _evidence()  # snippet: "Acme broke ground on the Riverside project."
+    result = _run(store, [_Plugin("usaspending", items=[row])])
+
+    stored = store.evidence_for_company(result.company_id)
+    assert len(stored) == 1
+    assert stored[0].company_match is CompanyMatch.CONFIRMED
+
+
+def test_evidence_that_never_names_the_company_is_unknown(store):
+    """An honest "cannot establish", never a guess in the company's favour."""
+    row = IntentEvidence(
+        type=IntentEvidenceType.news,
+        source_url="https://news.example.com/someone-else",
+        snippet="Jacobs wins role on a New York public health lab.",
+        date="2026-09-11",
+        source="google_news",
+    )
+    result = _run(store, [_Plugin("google_news", items=[row])])
+
+    stored = store.evidence_for_company(result.company_id)
+    assert stored[0].company_match is CompanyMatch.UNKNOWN
+
+
+def test_a_record_on_the_companys_own_domain_is_inferred(store):
+    """A domain is an inference, not a naming — and the gate honours that."""
+    row = IntentEvidence(
+        type=IntentEvidenceType.hiring,
+        source_url="https://www.acme.com/careers",
+        snippet="Join our team",
+        date="2026-09-11",
+        source="company_site",
+    )
+    result = _run(store, [_Plugin("company_site", items=[row])])
+
+    stored = store.evidence_for_company(result.company_id)
+    assert stored[0].company_match is CompanyMatch.INFERRED
+
+
 # --- the honest states never collapse -------------------------------------
 
 
@@ -225,7 +274,7 @@ def test_a_rejected_request_is_never_described_as_unreachable(store):
         _Plugin(
             "usaspending",
             status=SourceStatus.ERROR,
-            reason=SourceFailureReason.REQUEST_ERROR.value,
+            reason=SourceReason.REQUEST_ERROR.value,
         ),
     ])
 
@@ -240,7 +289,7 @@ def test_a_genuine_access_failure_is_still_described_as_unreachable(store):
         _Plugin(
             "usaspending",
             status=SourceStatus.UNAVAILABLE,
-            reason=SourceFailureReason.ACCESS_ERROR.value,
+            reason=SourceReason.ACCESS_ERROR.value,
         ),
     ])
 

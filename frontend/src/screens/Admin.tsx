@@ -9,14 +9,17 @@ import {
   KeyRound,
   LockKeyhole,
   LockOpen,
+  Mail,
+  Phone,
   RefreshCw,
   Share2,
   ShieldCheck,
+  Timer,
   Trash2,
   UserPlus,
   Users as UsersIcon,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { api } from "../api/client";
 import { DELETE_REASONS } from "../components/DeleteReasonDialog";
@@ -24,6 +27,8 @@ import { Select } from "../components/Select";
 import { Spinner } from "../components/StatusChip";
 import type {
   AdminDeletedRow,
+  AdminLaneMode,
+  AdminLaneRepeat,
   AdminLeadScope,
   AdminLeadScopeKind,
   AdminUser,
@@ -31,7 +36,7 @@ import type {
 } from "../types";
 
 const cardClass =
-  "rounded-xl border border-white/5 bg-white/[0.02] p-5";
+  "ui-panel rounded-xl border border-white/5 bg-white/[0.02] p-5";
 
 const inputClass =
   "w-full rounded-lg border border-white/10 bg-black/20 px-2.5 py-1.5 text-[13px] text-slate-200 placeholder:text-slate-600 focus:border-indigo-400/60 focus:outline-none";
@@ -40,12 +45,13 @@ function count(values: Record<string, number>, key: string): string {
   return (values[key] ?? 0).toLocaleString();
 }
 
-type Tab = "overview" | "users" | "data" | "keys" | "caches" | "audit";
+type Tab = "overview" | "users" | "data" | "lanes" | "keys" | "caches" | "audit";
 
 const TABS: { id: Tab; label: string; icon: typeof ShieldCheck }[] = [
   { id: "overview", label: "Overview", icon: Gauge },
   { id: "users", label: "Users & Activity", icon: UsersIcon },
   { id: "data", label: "Data Control", icon: EyeOff },
+  { id: "lanes", label: "AI Lanes", icon: Timer },
   { id: "keys", label: "API Keys", icon: KeyRound },
   { id: "caches", label: "Caches", icon: Database },
   { id: "audit", label: "Audit Log", icon: ActivityIcon },
@@ -136,7 +142,7 @@ export default function Admin() {
   };
 
   return (
-    <div className="px-8 py-7 max-w-6xl">
+    <div className="workspace-page">
       {/* Header */}
       <div className="flex items-start justify-between gap-4">
         <div>
@@ -412,6 +418,14 @@ export default function Admin() {
 
       {/* -------------------------------------------------------------- */}
       {/* API KEYS */}
+      {/* -------------------------------------------------------------- */}
+      {/* -------------------------------------------------------------- */}
+      {/* AI LANES                                                       */}
+      {/* -------------------------------------------------------------- */}
+      {tab === "lanes" && <LaneSchedulePanel />}
+
+      {/* -------------------------------------------------------------- */}
+      {/* API KEYS                                                       */}
       {/* -------------------------------------------------------------- */}
       {tab === "keys" && (
         <section className={`${cardClass} mt-6`}>
@@ -775,6 +789,11 @@ function UsersTab({
     mutationFn: ({ userId, password }: { userId: string; password: string }) =>
       api.adminResetUserPassword(userId, password),
   });
+  const setPhoneLimit = useMutation({
+    mutationFn: ({ userId, limit }: { userId: string; limit: number }) =>
+      api.adminSetPhoneLimit(userId, limit),
+    onSuccess: invalidateUsers,
+  });
 
   // Login-auth ON/OFF — the open-site switch. OFF means: no login page,
   // visitors share one account, and THIS panel is reachable only through the
@@ -786,6 +805,30 @@ function UsersTab({
   const toggleAuth = useMutation({
     mutationFn: (enabled: boolean) => api.adminSetAuthMode(enabled),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["auth-mode"] }),
+  });
+
+  // Gmail-inbox interface ON/OFF — the Gmail-app-like browse/read/send screen.
+  // OFF means: Email screen shows only the address XLSX export (which always
+  // works); ON brings the full inbox interface back.
+  const gmailMode = useQuery({
+    queryKey: ["gmail-mode"],
+    queryFn: () => api.gmailMode(),
+  });
+  const toggleGmailInbox = useMutation({
+    mutationFn: (enabled: boolean) => api.adminSetGmailInboxMode(enabled),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["gmail-mode"] }),
+  });
+  const claims = useQuery({
+    queryKey: ["admin-phone-claims"],
+    queryFn: () => api.adminPhoneClaimsReport(),
+  });
+  const wrongPhones = useQuery({
+    queryKey: ["admin-wrong-phones"],
+    queryFn: () => api.adminWrongPhones(),
+  });
+  const recoverWrong = useMutation({
+    mutationFn: (id: number) => api.adminRecoverWrongPhone(id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["admin-wrong-phones"] }),
   });
 
   function flipAuth() {
@@ -854,6 +897,111 @@ function UsersTab({
             Toggle failed: {(toggleAuth.error as Error).message}
           </p>
         )}
+      </section>
+
+      {/* Gmail inbox interface toggle */}
+      <section className={`${cardClass} mt-6`}>
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <div className="flex items-center gap-2">
+            <Mail className="h-4 w-4 text-emerald-400" />
+            <h2 className="text-[16px] font-semibold text-white">Gmail inbox interface</h2>
+            <span
+              className={`rounded-full px-2 py-0.5 text-[11.5px] font-medium ${
+                (gmailMode.data?.inbox_enabled ?? true)
+                  ? "bg-emerald-500/10 text-emerald-300"
+                  : "bg-amber-500/10 text-amber-300"
+              }`}
+            >
+              {(gmailMode.data?.inbox_enabled ?? true)
+                ? "ON — full inbox"
+                : "OFF — address export only"}
+            </span>
+          </div>
+          <button
+            onClick={() => toggleGmailInbox.mutate(!(gmailMode.data?.inbox_enabled ?? true))}
+            disabled={toggleGmailInbox.isPending || gmailMode.isLoading}
+            className={`rounded-lg px-3.5 py-2 text-[12.5px] font-medium disabled:opacity-50 ${
+              (gmailMode.data?.inbox_enabled ?? true)
+                ? "border border-amber-500/40 text-amber-300 hover:bg-amber-500/10"
+                : "bg-emerald-600 text-white hover:bg-emerald-500"
+            }`}
+          >
+            {toggleGmailInbox.isPending
+              ? "Saving…"
+              : (gmailMode.data?.inbox_enabled ?? true)
+                ? "Turn OFF (export only)"
+                : "Turn ON (full inbox)"}
+          </button>
+        </div>
+        <p className="mt-1 text-[12px] text-slate-500">
+          {(gmailMode.data?.inbox_enabled ?? true)
+            ? "Email screen par poora Gmail interface hai — inbox, sent, padhna, reply, compose. OFF karne par sirf email addresses ki XLSX export bachegi (jo hamesha chalti rehti hai)."
+            : "Gmail interface OFF hai — Email screen par sirf email addresses ki XLSX export available hai. ON karne par poora inbox interface wapas aa jayega."}
+        </p>
+        {toggleGmailInbox.isError && (
+          <p className="mt-2 text-[12px] text-rose-300">
+            Toggle failed: {(toggleGmailInbox.error as Error).message}
+          </p>
+        )}
+      </section>
+
+      {/* Phone call sheets — the hidden-stock report */}
+      <section className={`${cardClass} mt-6`}>
+        <div className="flex items-center gap-2">
+          <svg className="h-4 w-4 text-cyan-400" viewBox="0 0 20 20" fill="currentColor">
+            <path d="M2 3a1 1 0 011-1h2.153a1 1 0 01.986.836l.74 4.435a1 1 0 01-.54 1.06l-1.548.773a11.037 11.037 0 006.105 6.105l.774-1.548a1 1 0 011.059-.54l4.435.74a1 1 0 01.836.986V17a1 1 0 01-1 1h-2C7.82 18 2 12.18 2 5V3z" />
+          </svg>
+          <h2 className="text-[16px] font-semibold text-white">Phone call sheets</h2>
+        </div>
+        <p className="mt-1 text-[12px] text-slate-500">
+          A user's sheet shows today's still-owned numbers across all states. Older claims stay
+          exclusive and are counted as hidden here; their call history remains available by date.
+        </p>
+        {claims.isLoading ? (
+          <p className="mt-3 text-[12px] text-slate-500">Loading…</p>
+        ) : claims.isError ? (
+          <p className="mt-3 text-[12px] text-rose-400">Failed to load: {(claims.error as Error).message}</p>
+        ) : claims.data && (
+          <>
+            <p className="mt-2 text-[12.5px] text-slate-400">
+              <b className="text-white">{claims.data.total_claims}</b> total claims ·{" "}
+              <b className="text-amber-400">{claims.data.total_hidden}</b> hidden
+            </p>
+            <table className="mt-3 w-full text-left text-[12.5px]">
+              <thead>
+                <tr className="text-slate-500">
+                  <th className="pb-1 pr-3 font-medium">User</th>
+                  <th className="pb-1 pr-3 font-medium text-right">Sheet</th>
+                  <th className="pb-1 pr-3 font-medium text-right">Hidden</th>
+                  <th className="pb-1 font-medium text-right">Last claimed</th>
+                </tr>
+              </thead>
+              <tbody>
+                {claims.data.by_user.map((row) => (
+                  <tr key={row.user_id} className="border-t border-slate-800/60">
+                    <td className="py-1.5 pr-3 text-white">{row.username || row.user_id.slice(0, 8)}</td>
+                    <td className="py-1.5 pr-3 text-right text-slate-300">{row.visible}</td>
+                    <td className="py-1.5 pr-3 text-right text-amber-400">{row.hidden}</td>
+                    <td className="py-1.5 pr-3 text-right text-slate-500">{row.last_claimed.slice(0, 10) || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </>
+        )}
+      </section>
+
+      <section className={`${cardClass} mt-6`}>
+        <h2 className="text-[16px] font-semibold text-white">Wrong-number archive</h2>
+        <p className="mt-1 text-[12px] text-slate-500">Removed from caller sheets and blocked from harvesting. Records stay here beyond seven weeks until you recover them.</p>
+        {wrongPhones.isError && <p className="mt-2 text-xs text-rose-300">Archive unavailable: {(wrongPhones.error as Error).message}</p>}
+        {(wrongPhones.data ?? []).map((row) => <div key={row.id} className="mt-2 flex flex-wrap items-center justify-between gap-2 border-b border-white/5 py-2 text-xs">
+          <span className="text-slate-300">{row.phone} · {row.created_at.slice(0, 10)} · {row.user_id}</span>
+          <button type="button" disabled={recoverWrong.isPending} onClick={() => recoverWrong.mutate(row.id)}
+            className="rounded-md bg-indigo-500/15 px-2.5 py-1 text-indigo-200 disabled:opacity-50">Recover</button>
+        </div>)}
+        {wrongPhones.data?.length === 0 && <p className="mt-2 text-xs text-slate-500">No wrong numbers in archive.</p>}
+        {recoverWrong.isError && <p className="mt-2 text-xs text-rose-300">Recovery failed: {(recoverWrong.error as Error).message}</p>}
       </section>
 
       {/* Create account */}
@@ -928,6 +1076,8 @@ function UsersTab({
                     }
                   }}
                   deletePending={deleteUser.isPending}
+                  onSetPhoneLimit={(limit) => setPhoneLimit.mutate({ userId: u.id, limit })}
+                  phoneLimitPending={setPhoneLimit.isPending}
                 />
               ))}
               {users.length === 0 && !usersLoading && (
@@ -1077,6 +1227,8 @@ function UserRow({
   resetPending,
   onDelete,
   deletePending,
+  onSetPhoneLimit,
+  phoneLimitPending,
 }: {
   user: AdminUser;
   expanded: boolean;
@@ -1087,7 +1239,11 @@ function UserRow({
   resetPending: boolean;
   onDelete: () => void;
   deletePending: boolean;
+  onSetPhoneLimit: (limit: number) => void;
+  phoneLimitPending: boolean;
 }) {
+  const [phoneLimit, setPhoneLimit] = useState(user.phone_daily_limit);
+  useEffect(() => { setPhoneLimit(user.phone_daily_limit); }, [user.phone_daily_limit]);
   return (
     <>
       <tr className={`border-t border-white/5 ${expanded ? "bg-white/[0.02]" : "hover:bg-white/[0.02]"}`}>
@@ -1133,6 +1289,16 @@ function UserRow({
       {expanded && (
         <tr className="border-t border-white/5 bg-black/20">
           <td colSpan={5} className="px-4 py-3">
+            {!user.is_admin && <div className="flex flex-wrap items-center gap-2 mb-3 text-[12px] text-slate-300">
+              <label htmlFor={`phone-limit-${user.id}`}>Phone numbers per day (UTC)</label>
+              <input id={`phone-limit-${user.id}`} type="number" min={0} max={5000}
+                value={phoneLimit} onChange={(e) => setPhoneLimit(Number(e.target.value))}
+                className="w-24 rounded-md border border-white/10 bg-white/[0.04] px-2 py-1 text-white" />
+              <button type="button" disabled={phoneLimitPending || !Number.isInteger(phoneLimit) || phoneLimit < 0 || phoneLimit > 5000}
+                onClick={() => onSetPhoneLimit(phoneLimit)}
+                className="rounded-md bg-indigo-500/20 px-2.5 py-1 text-indigo-200 disabled:opacity-50">Save limit</button>
+              <span className="text-slate-500">{user.phone_daily_used} used today</span>
+            </div>}
             {summaryLoading && (
               <div className="flex items-center gap-2 text-[13px] text-slate-500">
                 <Spinner /> Loading {user.username}'s data…
@@ -1308,6 +1474,341 @@ function KeyRow({
         </div>
       </td>
     </tr>
+  );
+}
+
+function LaneSchedulePanel() {
+  const qc = useQueryClient();
+  const lane = useQuery({
+    queryKey: ["admin-lane"],
+    queryFn: () => api.adminLaneStatus(),
+    refetchInterval: 10_000,
+  });
+  const save = useMutation({
+    mutationFn: (body: {
+      mode: AdminLaneMode;
+      phone_min?: number;
+      email_min?: number;
+      phone_first?: boolean;
+      repeat?: AdminLaneRepeat;
+    }) => api.adminSetLaneSchedule(body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["admin-lane"] });
+      qc.invalidateQueries({ queryKey: ["admin-activity"] });
+    },
+  });
+
+  // Local draft — seeded from the server the first time it answers, then
+  // owned by the operator. NOT re-seeded on every 10s poll, or a half-typed
+  // "40" would be overwritten by the still-saved "90" mid-edit.
+  const [draft, setDraft] = useState<{
+    mode: AdminLaneMode;
+    phone_min: number;
+    email_min: number;
+    phone_first: boolean;
+    repeat: AdminLaneRepeat;
+  } | null>(null);
+  const seeded = lane.data;
+  if (draft === null && seeded) {
+    setDraft({
+      mode: seeded.mode,
+      phone_min: seeded.phone_min,
+      email_min: seeded.email_min,
+      phone_first: seeded.phone_first,
+      repeat: seeded.repeat,
+    });
+  }
+
+  const d = draft;
+  const submit = (body: Parameters<typeof save.mutate>[0]) => save.mutate(body);
+
+  const nextSwitch = seeded?.seconds_to_switch;
+  const laneLabel = (m: string) =>
+    m === "phones" ? "Phone numbers" : m === "emails" ? "Emails" : "Both lanes together";
+
+  return (
+    <section className={`${cardClass} mt-6`}>
+      <div className="flex items-center gap-2">
+        <Timer className="h-4 w-4 text-indigo-300" />
+        <h2 className="text-[16px] font-semibold text-white">AI lane schedule</h2>
+      </div>
+      <p className="mt-1 text-[12px] text-slate-500">
+        Control which harvester lane runs — <span className="text-slate-300">phones</span> is free
+        license-board fetching (zero AI spend), <span className="text-slate-300">emails</span> is the
+        AI research lane. Saved settings are picked up on the next harvester pass — no restart.
+      </p>
+
+      {lane.isLoading && (
+        <div className="mt-4 flex items-center gap-2 py-4 text-[13px] text-slate-500">
+          <Spinner /> Loading lane schedule…
+        </div>
+      )}
+      {lane.isError && (
+        <p className="mt-3 rounded-lg bg-rose-500/10 px-3 py-2 text-[13px] text-rose-300">
+          Lane schedule unavailable: {(lane.error as Error).message}
+        </p>
+      )}
+
+      {seeded && d && (
+        <>
+          {/* Live status */}
+          <div className="mt-4 grid grid-cols-1 gap-2 rounded-lg border border-white/5 bg-black/20 p-3 text-[12.5px] sm:grid-cols-2 lg:grid-cols-4">
+            <span className="text-slate-500">
+              Running now:{" "}
+              <span className="text-slate-200">{laneLabel(seeded.effective_mode)}</span>
+            </span>
+            <span className="text-slate-500">
+              Saved mode: <span className="text-slate-200">{laneLabel(seeded.mode)}</span>
+            </span>
+            <span className="text-slate-500">
+              Next switch:{" "}
+              <span className="text-slate-200">
+                {typeof nextSwitch === "number"
+                  ? `in ${Math.floor(nextSwitch / 60)}m ${Math.round(nextSwitch % 60)}s`
+                  : "— (no cycle)"}
+              </span>
+            </span>
+            <span className="text-slate-500">
+              Harvester:{" "}
+              <span className={seeded.harvester_enabled ? "text-emerald-300" : "text-rose-300"}>
+                {seeded.harvester_enabled
+                  ? `enabled · pass every ${Math.round(seeded.interval_s / 60)} min`
+                  : "disabled in .env"}
+              </span>
+            </span>
+          </div>
+
+          {seeded.one_time_done && (
+            <p className="mt-2 rounded-lg bg-amber-500/10 px-3 py-2 text-[12.5px] text-amber-200">
+              The one-time cycle has finished — both lanes are running again. Save again to start a
+              new cycle.
+            </p>
+          )}
+          {!seeded.harvester_enabled && (
+            <p className="mt-2 rounded-lg bg-rose-500/10 px-3 py-2 text-[12.5px] text-rose-200">
+              HARVESTER_ENABLED is false — no schedule can take effect until the harvester is on.
+            </p>
+          )}
+
+          {/* Mode */}
+          <div className="mt-5">
+            <p className="text-[12.5px] font-medium text-slate-300">Which lane should run?</p>
+            <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
+              <LaneModeCard
+                active={d.mode === "both"}
+                icon={<Share2 className="h-3.5 w-3.5" />}
+                title="Both lanes"
+                hint="Phones + emails every pass (default)"
+                onClick={() => setDraft({ ...d, mode: "both" })}
+              />
+              <LaneModeCard
+                active={d.mode === "phones"}
+                icon={<Phone className="h-3.5 w-3.5" />}
+                title="Phones only"
+                hint="Emails blocked — zero AI spend"
+                onClick={() => setDraft({ ...d, mode: "phones" })}
+              />
+              <LaneModeCard
+                active={d.mode === "emails"}
+                icon={<Mail className="h-3.5 w-3.5" />}
+                title="Emails only"
+                hint="AI research lane only"
+                onClick={() => setDraft({ ...d, mode: "emails" })}
+              />
+              <LaneModeCard
+                active={d.mode === "auto"}
+                icon={<Timer className="h-3.5 w-3.5" />}
+                title="Automatic cycle"
+                hint="Alternate the lanes on a timer"
+                onClick={() => setDraft({ ...d, mode: "auto" })}
+              />
+            </div>
+          </div>
+
+          {/* Auto-cycle detail */}
+          {d.mode === "auto" && (
+            <div className="mt-4 rounded-lg border border-white/5 bg-black/20 p-3">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                <label className="text-[12.5px] text-slate-400">
+                  Phone minutes
+                  <input
+                    type="number"
+                    min={1}
+                    max={720}
+                    value={d.phone_min}
+                    onChange={(e) =>
+                      setDraft({ ...d, phone_min: Number(e.target.value) })
+                    }
+                    className={`${inputClass} mt-1`}
+                  />
+                </label>
+                <label className="text-[12.5px] text-slate-400">
+                  Email minutes
+                  <input
+                    type="number"
+                    min={1}
+                    max={720}
+                    value={d.email_min}
+                    onChange={(e) =>
+                      setDraft({ ...d, email_min: Number(e.target.value) })
+                    }
+                    className={`${inputClass} mt-1`}
+                  />
+                </label>
+                <label className="text-[12.5px] text-slate-400">
+                  Which lane starts the cycle?
+                  <Select
+                    value={d.phone_first ? "phones" : "emails"}
+                    onChange={(v) => setDraft({ ...d, phone_first: v === "phones" })}
+                    options={[
+                      { value: "phones", label: "Phone numbers first" },
+                      { value: "emails", label: "Emails first" },
+                    ]}
+                    className="mt-1"
+                  />
+                </label>
+              </div>
+
+              <div className="mt-3 flex flex-wrap items-center gap-1.5">
+                <span className="text-[11.5px] text-slate-500">Presets:</span>
+                {[
+                  { p: 10, e: 40 },
+                  { p: 30, e: 90 },
+                  { p: 60, e: 60 },
+                  { p: 120, e: 120 },
+                ].map(({ p, e }) => (
+                  <button
+                    key={`${p}-${e}`}
+                    onClick={() => setDraft({ ...d, phone_min: p, email_min: e })}
+                    className="rounded-lg border border-white/10 px-2 py-1 text-[11.5px] text-slate-300 hover:bg-white/[0.04]"
+                  >
+                    {p}m phones / {e}m emails
+                  </button>
+                ))}
+              </div>
+
+              <div className="mt-4">
+                <p className="text-[12.5px] font-medium text-slate-300">How long should it run?</p>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <RepeatCard
+                    active={d.repeat === "day"}
+                    title="Full day (repeats)"
+                    hint="The cycle keeps alternating all day"
+                    onClick={() => setDraft({ ...d, repeat: "day" })}
+                  />
+                  <RepeatCard
+                    active={d.repeat === "once"}
+                    title="One time only"
+                    hint="Runs a single cycle, then back to both lanes"
+                    onClick={() => setDraft({ ...d, repeat: "once" })}
+                  />
+                </div>
+              </div>
+
+              <p className="mt-3 text-[11.5px] text-slate-500">
+                {d.mode === "auto" && Number.isFinite(d.phone_min) && Number.isFinite(d.email_min)
+                  ? `Cycle = ${d.phone_min + d.email_min} min — starts the moment you save.`
+                  : ""}
+              </p>
+            </div>
+          )}
+
+          <div className="mt-4 flex flex-wrap items-center gap-2">
+            <button
+              onClick={() => submit(d)}
+              disabled={save.isPending}
+              className="rounded-lg bg-indigo-500/90 px-3.5 py-2 text-[13px] font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+            >
+              {save.isPending ? "Saving…" : "Save schedule"}
+            </button>
+            <button
+              onClick={() => {
+                // Send the full draft with mode=both: the slot minutes are
+                // unused in a pinned mode, so this resets WHICH lane runs
+                // without throwing away the timings the operator set up.
+                const reset = { ...d, mode: "both" as AdminLaneMode };
+                setDraft(reset);
+                submit(reset);
+              }}
+              disabled={save.isPending}
+              className="rounded-lg border border-white/10 px-3.5 py-2 text-[13px] text-slate-300 hover:bg-white/[0.04] disabled:opacity-50"
+            >
+              Reset to both lanes
+            </button>
+            {save.isSuccess && !save.isPending && (
+              <span className="text-[12px] text-emerald-300">
+                Saved — applies on the next pass.
+              </span>
+            )}
+          </div>
+          {save.isError && (
+            <p className="mt-2 rounded-lg bg-rose-500/10 px-3 py-2 text-[12.5px] text-rose-300">
+              Rejected: {(save.error as Error).message}
+            </p>
+          )}
+
+          <ul className="mt-4 space-y-1 text-[11.5px] text-slate-500">
+            {seeded.notes.map((n) => (
+              <li key={n}>• {n}</li>
+            ))}
+          </ul>
+        </>
+      )}
+    </section>
+  );
+}
+
+function LaneModeCard({
+  active,
+  icon,
+  title,
+  hint,
+  onClick,
+}: {
+  active: boolean;
+  icon: ReactNode;
+  title: string;
+  hint: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`rounded-lg border p-3 text-left transition-colors ${
+        active
+          ? "border-indigo-400/60 bg-indigo-500/10"
+          : "border-white/10 hover:bg-white/[0.03]"
+      }`}
+    >
+      <span className="flex items-center gap-1.5 text-[13px] text-slate-200">
+        {icon} {title}
+      </span>
+      <span className="mt-1 block text-[11.5px] text-slate-500">{hint}</span>
+    </button>
+  );
+}
+
+function RepeatCard({
+  active,
+  title,
+  hint,
+  onClick,
+}: {
+  active: boolean;
+  title: string;
+  hint: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`rounded-lg border px-3 py-2 text-left transition-colors ${
+        active ? "border-indigo-400/60 bg-indigo-500/10" : "border-white/10 hover:bg-white/[0.03]"
+      }`}
+    >
+      <span className="block text-[12.5px] text-slate-200">{title}</span>
+      <span className="block text-[11.5px] text-slate-500">{hint}</span>
+    </button>
   );
 }
 

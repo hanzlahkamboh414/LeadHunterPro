@@ -30,8 +30,8 @@ class ScoutFetch:
         self.calls: list[tuple] = []
         self.fail = fail
 
-    def __call__(self, source_id, slug, city, limit):
-        self.calls.append((source_id, slug, city, limit))
+    def __call__(self, source_id, slug, city, limit, offset=0):
+        self.calls.append((source_id, slug, city, limit, offset))
         if self.fail:
             from app.discovery.sources.status import SourceStatus
             return SourceStatus.UNAVAILABLE, [], {"error": "source down"}

@@ -46,11 +46,12 @@ def _row_email_name(d: Any) -> list[str]:
     ]
 
 
-def _row_full(d: Any, rec: str = "") -> list[str]:
+def _row_full(d: Any, rec: str = "", score: float | None = None) -> list[str]:
     """Flatten one LeadDossier into a full CSV row.
 
-    ``rec`` is the CURRENT deterministic recommendation (re-gated at read time)
-    — a stale AI-era label is never exported as-is.
+    ``rec``/``score`` are TODAY'S verdict for the row (re-gated at read time) —
+    a stale AI-era label and the stale number that justified it are never
+    exported as-is.
     """
     return [
         d.email or "",
@@ -61,7 +62,7 @@ def _row_full(d: Any, rec: str = "") -> list[str]:
         d.person.name or "",
         d.person.role or "",
         "yes" if d.person.bound else "no",
-        _num(d.potential_score),
+        _num(d.potential_score if score is None else score),
         rec or d.recommendation or "",
         d.intent.needs_estimation if d.intent else "",
         d.timing.window if d.timing else "",
@@ -80,19 +81,24 @@ def dossiers_to_csv(
     dossiers: Iterable[Any],
     full: bool = False,
     rec_of: dict[str, str] | None = None,
+    score_of: dict[str, float] | None = None,
 ) -> str:
     """Render a list of LeadDossiers as a CSV string (header + rows).
 
-    ``rec_of`` maps ``email -> current deterministic recommendation`` (re-gated
-    at read time); when absent, the stored label is used as-is.
+    ``rec_of``/``score_of`` map ``email -> today's verdict for that row``
+    (re-gated at read time, :func:`~app.lead_research.scoring.regate_verdict`);
+    when absent, the stored values are used as-is.
     """
     rec_of = rec_of or {}
+    score_of = score_of or {}
     buf = io.StringIO()
     writer = csv.writer(buf)
     if full:
         writer.writerow(_COLUMNS_FULL)
         for d in dossiers:
-            writer.writerow(_row_full(d, rec_of.get(d.email, "")))
+            writer.writerow(
+                _row_full(d, rec_of.get(d.email, ""), score_of.get(d.email))
+            )
     else:
         writer.writerow(_COLUMNS_EMAIL_NAME)
         for d in dossiers:
@@ -130,9 +136,11 @@ def export_csv(
     all columns (default: email+name only).
 
     The recommendation / skip decisions are re-gated with TODAY'S deterministic
-    gate (never a stale AI-era label) — row-level, after the SQL subset.
+    gate (never a stale AI-era label) — row-level, after the SQL subset. The
+    ``score`` column is re-derived in the SAME pass (:func:`regate_verdict`),
+    so the exported number is the one that produced the exported verdict.
     """
-    from app.lead_research.scoring import regate_recommendation
+    from app.lead_research.scoring import regate_verdict
 
     # When the user picked specific emails, export EXACTLY those (incl. any in
     # the skip/junk set they might have inspected) — hidden=0 still applies (a
@@ -148,7 +156,10 @@ def export_csv(
         user_id=user_id, is_admin=is_admin, include_legacy=include_legacy,
     )
     dossiers = [m["dossier"] for m in matched]
-    rec_map = {d.email: regate_recommendation(d) for d in dossiers}
+    # ONE pass for both numbers: the verdict and the score it was gated on.
+    verdicts = {d.email: regate_verdict(d) for d in dossiers}
+    rec_map = {e: v[0] for e, v in verdicts.items()}
+    score_map = {e: v[1] for e, v in verdicts.items()}
     if emails:
         email_set = {e.lower() for e in emails}
         dossiers = [d for d in dossiers if d.email.lower() in email_set]
@@ -164,4 +175,4 @@ def export_csv(
         dossiers = [
             d for d in dossiers if rec_map.get(d.email, d.recommendation) != "skip"
         ]
-    return dossiers_to_csv(dossiers, full=full, rec_of=rec_map)
+    return dossiers_to_csv(dossiers, full=full, rec_of=rec_map, score_of=score_map)

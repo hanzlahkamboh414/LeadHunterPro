@@ -64,7 +64,7 @@ export default function History() {
   })();
 
   return (
-    <div className="px-8 py-7 max-w-4xl">
+    <div className="workspace-page page-focused">
       <div className="flex items-center justify-between flex-wrap gap-3">
         <PageHeader
           eyebrow="LeadHunter Pro"
@@ -120,7 +120,7 @@ export default function History() {
             />
           </div>
 
-          <section className="mt-4 rounded-xl border border-white/5 bg-white/[0.02] p-5">
+          <section className="mt-4 ui-panel rounded-xl border border-white/5 bg-white/[0.02] p-5">
             <h2 className="text-[16px] font-semibold text-white mb-1">Delivery — last 14 days</h2>
             <p className="text-[12px] text-slate-500 mb-3">
               Working leads delivered per day (only completed/paused runs contribute their totals).
@@ -310,7 +310,7 @@ function HistoryRow({ job }: { job: JobSummary }) {  const [open, setOpen] = use
   });
 
   return (
-    <li className="rounded-xl border border-white/5 bg-white/[0.02]">
+    <li className="ui-panel rounded-xl border border-white/5 bg-white/[0.02]">
       <div className="flex items-stretch">
         <button
           onClick={() => setOpen((o) => !o)}

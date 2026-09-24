@@ -10,7 +10,14 @@ parser, fetch, search).
 
 from __future__ import annotations
 
+import asyncio
+
+import pytest
+
 from app.phones.enrich import enrich_lead
+from app.search_providers.base import BaseSearchProvider
+from app.search_providers.models import SearchResponse, SearchResult
+from app.search_providers.registry import SearchProviderRegistry
 
 
 class _Page:
@@ -51,6 +58,48 @@ def test_finds_email_on_homepage():
                    "website": "https://acmegc.com",
                    "dork": "phone_enrichment"}
     assert calls["search"] == 1  # one search, not a loop
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_default_search_closes_provider_in_its_own_loop(monkeypatch, fails):
+    """One-shot phone searches cannot leak a loop-bound provider session."""
+    class _Provider(BaseSearchProvider):
+        provider_name = "test_phone_search"
+
+        def __init__(self):
+            self.searched_on = None
+            self.closed_on = None
+            self.close_count = 0
+
+        async def search(self, query):
+            self.searched_on = asyncio.get_running_loop()
+            if fails:
+                raise RuntimeError("test provider unavailable")
+            return SearchResponse(
+                results=[SearchResult(title="Acme GC", url="https://acmegc.com")],
+                provider=self.provider_name, query=query.keywords,
+            )
+
+        async def close(self):
+            self.closed_on = asyncio.get_running_loop()
+            self.close_count += 1
+
+    provider = _Provider()
+    registry = SearchProviderRegistry()
+    registry.register(provider)
+    monkeypatch.setattr(
+        "app.search_providers.registry.get_registry", lambda: registry)
+    monkeypatch.setattr(
+        "app.search_providers.manager.get_registry", lambda: registry)
+
+    out = enrich_lead(
+        _lead(), fetch_fn=lambda u, **kw: _Page("info@acmegc.com"),
+        infer_fn=_no_infer,
+    )
+    assert out["website"] == ("" if fails else "https://acmegc.com")
+    assert provider.close_count == 1
+    assert provider.closed_on is provider.searched_on
+    assert provider.closed_on.is_closed()
 
 
 def test_follows_contact_page_when_homepage_has_no_email():

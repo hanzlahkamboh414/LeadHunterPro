@@ -10,7 +10,13 @@ from __future__ import annotations
 
 import types
 
-from app.email.email_cleaner import clean_emails
+import pytest
+
+from app.email.email_cleaner import (
+    DOMAIN_PATTERN,
+    clean_emails,
+    is_acceptable_email,
+)
 from app.email.email_discovery import EmailDiscovery
 from app.email.email_validator import is_valid_email
 from app.engines.website_engine import WebsiteEngine
@@ -60,6 +66,102 @@ class TestFormatHelperContract:
         # the artifact shapes are narrow on purpose.
         assert is_crawl_artifact("karl@sentrycontracting.com") is False
         assert is_crawl_artifact("j2b@sentrigroup.net") is False
+
+
+class TestAcceptableEmailGate:
+    """The ONE gate, and the false drops it must NOT make.
+
+    Every rule here was added because live data asked for it (2026-09-21):
+    ``test@email.com`` reached lead research and a phone record,
+    ``own.@jose.elcook`` cost 171.2s of research, and six of the ten
+    non-contact rows measured in a local ``lead_research.db`` were IMAGE
+    FILENAMES the crawl regex had read as addresses. The counter-cases at
+    the end matter as much as the drops: this module's own doctrine is that
+    a real address dropped is worse than a junk one kept.
+    """
+
+    @pytest.mark.parametrize("email", [
+        "test@email.com",         # the reported defect — template domain
+        "user@domain.com",        # template domain
+        "you@yourdomain.com",     # template domain
+        "own.@jose.elcook",       # trailing dot in the local part
+        ".owner@acme.com",        # leading dot
+        "a..b@acme.com",          # doubled dot
+        "noreply@acme.com",       # robot local
+        "do-not-reply@acme.com",  # robot local
+        "someone@tiktok.com",     # social platform
+        "jane@example.com",       # RFC 2606
+        "logo@3x-1-236x60.png",   # image filename, measured in live dossiers
+        "badge_25_2@2x.png",
+        # A phone welded onto the local part by unseparated text extraction.
+        # Reported live 2026-09-21 on a real phone record.
+        "620-6727email.office@premierelectricalcontracting.com",
+    ])
+    def test_non_contact_addresses_are_refused(self, email):
+        assert is_acceptable_email(email) is False
+
+    @pytest.mark.parametrize("email", [
+        "john@acme.com",
+        "m.gomez@texasskylineco.com",
+        "john.noreply@acme.com",      # contains the word — still a person
+        "noreplya@acme.com",          # contains the word — still a person
+        "karl@sentrycontracting.com",  # a real company named like an artifact
+        "j2b@sentrigroup.net",
+        "bob@x.com",                  # this repo's stand-in domain, not social
+        # Digit-leading locals are ordinary. The welded-phone rule must not
+        # swallow them — it needs a phone-SHAPED run, not merely digits.
+        "24hrservice@acme.com",
+        "365plumbing@acme.com",
+        "24-7service@acme.com",
+        "1800-flowers@acme.com",
+    ])
+    def test_real_contacts_are_kept(self, email):
+        assert is_acceptable_email(email) is True
+
+    def test_a_phone_and_an_email_in_adjacent_tags_do_not_weld(self):
+        """The extraction half of the welded-address defect.
+
+        A contact block that renders the phone and the email in adjacent
+        inline tags produced ``620-6727email.office@…`` from a page whose
+        only real address was ``email.office@…`` — and, because ``sorted()``
+        orders ``6`` before ``e``, the welded string came FIRST and won the
+        pick on a live phone record.
+        """
+        from app.crawlers.html_parser import HTMLParser
+
+        html = (
+            '<div class="contact">'
+            "<span>620-6727</span>"
+            '<a href="mailto:email.office@premierelectricalcontracting.com">'
+            "email.office@premierelectricalcontracting.com</a>"
+            "</div>"
+        )
+        page = HTMLParser().parse(html, "https://premierelectricalcontracting.com")
+
+        assert page.emails == ["email.office@premierelectricalcontracting.com"]
+        assert not any(e.startswith("620") for e in page.emails)
+
+    def test_the_domain_grammar_is_anchored(self):
+        """``DOMAIN_PATTERN`` is a whole-domain test, not a prefix test.
+
+        ``re.match`` alone would accept ``acme.com<script>`` and send
+        ``domain_verifier`` off to DNS-resolve a string that is not a
+        domain.
+        """
+        assert DOMAIN_PATTERN.match("acme.com") is not None
+        assert DOMAIN_PATTERN.match("acme.com<script>") is None
+        assert DOMAIN_PATTERN.match("a..b.com") is None
+
+    def test_the_syntax_helper_stays_purely_syntactic(self):
+        """``is_valid_email`` answers "does this parse?", nothing more.
+
+        It deliberately still accepts example.com — the junk rules live in
+        the gate, and folding them in here would change what every existing
+        caller of a FORMAT validator means.
+        """
+        assert is_valid_email("john@example.com") is True
+        assert is_valid_email("own.@jose.elcook") is False
+        assert is_acceptable_email("john@example.com") is False
 
 
 class TestWebsiteEngineWiring:

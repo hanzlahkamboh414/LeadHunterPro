@@ -118,6 +118,13 @@ export default function EmailInbox() {
     queryKey: ["gmail-status"],
     queryFn: () => api.gmailStatus(),
   });
+  // The admin kill-switch: browse/read/send can be disabled from the admin
+  // panel — then this screen shows the address export only.
+  const mode = useQuery({
+    queryKey: ["gmail-mode"],
+    queryFn: () => api.gmailMode(),
+  });
+  const inboxEnabled = mode.data?.inbox_enabled !== false;
 
   // Auto-select the first connected account once the list lands.
   useEffect(() => {
@@ -149,13 +156,13 @@ export default function EmailInbox() {
         q: searchQ,
         page_token: pageToken,
       }),
-    enabled: accountId !== null,
+    enabled: inboxEnabled && accountId !== null,
   });
 
   const message = useQuery({
     queryKey: ["gmail-message", accountId, openId],
     queryFn: () => api.gmailMessage(accountId!, openId!),
-    enabled: accountId !== null && openId !== null,
+    enabled: inboxEnabled && accountId !== null && openId !== null,
   });
 
   function goOlder() {
@@ -260,7 +267,7 @@ export default function EmailInbox() {
   // ================================================================= render
   if (accounts.isLoading) {
     return (
-      <div className="mx-auto flex h-full w-full max-w-6xl flex-col px-8 py-7">
+      <div className="workspace-page flex h-full flex-col">
         <PageHeader eyebrow="LeadHunter Pro" title="Email" subtitle="Loading your connected Gmail…" />
       </div>
     );
@@ -270,13 +277,13 @@ export default function EmailInbox() {
   if (!accounts.data || accounts.data.length === 0 || accountId === null) {
     const configured = gmailStatus.data?.configured === true;
     return (
-      <div className="mx-auto flex h-full w-full max-w-3xl flex-col px-8 py-7">
+      <div className="workspace-page page-focused flex h-full flex-col">
         <PageHeader
           eyebrow="LeadHunter Pro"
           title="Email"
           subtitle="Your connected Gmail, inside LeadHunter Pro."
         />
-        <div className="mt-6 rounded-xl border border-white/5 bg-white/[0.02] p-6 text-[13px] text-slate-400">
+        <div className="mt-6 ui-panel rounded-xl border border-white/5 bg-white/[0.02] p-6 text-[13px] text-slate-400">
           <Mail className="w-6 h-6 text-indigo-400 mb-3" />
           <p className="text-slate-300 font-medium mb-1">No Gmail connected yet.</p>
           <p className="mb-4">
@@ -309,7 +316,7 @@ export default function EmailInbox() {
     // list/reading panes split whatever space is LEFT after the header,
     // account bar, export panel and folder tabs — no fixed
     // calc(100vh-…) guesses that break when a panel opens.
-    <div className="mx-auto flex h-full w-full max-w-[1500px] flex-col px-8 py-6">
+    <div className="workspace-page inbox-page flex h-full flex-col">
       {/* Title + account controls share ONE row: the old separate account
           bar left the whole top-right of the screen empty while the panes
           below fought for height. */}
@@ -345,12 +352,14 @@ export default function EmailInbox() {
             </span>
           )}
 
-          <button
-            onClick={() => setDraft(emptyDraft())}
-            className="rounded-lg bg-indigo-600 px-3.5 py-2 text-[13px] font-semibold text-white hover:bg-indigo-500"
-          >
-            Compose
-          </button>
+          {inboxEnabled && (
+            <button
+              onClick={() => setDraft(emptyDraft())}
+              className="rounded-lg bg-indigo-600 px-3.5 py-2 text-[13px] font-semibold text-white hover:bg-indigo-500"
+            >
+              Compose
+            </button>
+          )}
 
           <button
             onClick={() => setExportOpen((v) => !v)}
@@ -404,7 +413,7 @@ export default function EmailInbox() {
 
       {/* Export panel — the single-click XLSX of addresses */}
       {exportOpen && (
-        <div className="mt-3 shrink-0 rounded-xl border border-white/5 bg-white/[0.02] p-4">
+        <div className="mt-3 shrink-0 ui-panel rounded-xl border border-white/5 bg-white/[0.02] p-4">
           <div className="flex flex-wrap items-end gap-4">
             <label className="text-[12px] text-slate-400">
               <span className="block mb-1.5">Source</span>
@@ -496,6 +505,16 @@ export default function EmailInbox() {
         </div>
       )}
 
+      {!inboxEnabled && (
+        <div className="mt-3 shrink-0 ui-panel rounded-xl border border-white/5 bg-white/[0.02] p-6 text-[13px] text-slate-400">
+          The Gmail inbox interface is currently disabled by the administrator.
+          The address export above still works — use it to download your
+          email addresses.
+        </div>
+      )}
+
+      {inboxEnabled && (
+        <>
       {/* Folder tabs + search */}
       <div className="mt-3 flex shrink-0 flex-wrap items-center gap-2">
         {FOLDERS.map(({ key, label, icon: Icon }) => (
@@ -542,7 +561,7 @@ export default function EmailInbox() {
           two panes swap: list, or the open message with a Back button. */}
       <div className="mt-3 grid min-h-0 flex-1 grid-cols-1 gap-4 lg:grid-cols-[minmax(300px,360px)_1fr]">
         <div
-          className={`min-h-0 overflow-hidden rounded-xl border border-white/5 bg-white/[0.02] ${
+          className={`min-h-0 overflow-hidden ui-panel rounded-xl border border-white/5 bg-white/[0.02] ${
             openId ? "hidden lg:flex" : "flex"
           } flex-col`}
         >
@@ -635,7 +654,7 @@ export default function EmailInbox() {
             the list from lg up. Its inner area scrolls; the pane itself
             fills the remaining column height. */}
         <div
-          className={`min-h-0 flex-col overflow-hidden rounded-xl border border-white/5 bg-white/[0.02] ${
+          className={`min-h-0 flex-col overflow-hidden ui-panel rounded-xl border border-white/5 bg-white/[0.02] ${
             openId ? "flex" : "hidden lg:flex"
           }`}
         >
@@ -909,6 +928,8 @@ export default function EmailInbox() {
             </div>
           </div>
         </div>
+      )}
+        </>
       )}
     </div>
   );

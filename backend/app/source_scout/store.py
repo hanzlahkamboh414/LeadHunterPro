@@ -45,6 +45,7 @@ import json
 import os
 import sqlite3
 import threading
+from collections.abc import Mapping
 from typing import Any
 
 _INIT_LOCK = threading.RLock()
@@ -110,6 +111,46 @@ ALL_STATUSES = frozenset((
     STATUS_RETIRED, STATUS_UNTRIED, STATUS_PROBING, STATUS_ADAPTER_DRAFT,
     STATUS_EXHAUSTED, STATUS_BLOCKED, STATUS_DEAD,
 ))
+
+
+def _json_obj(raw: Any) -> dict[str, Any]:
+    """A JSON-object column as a dict; anything else is an honest {}."""
+    if isinstance(raw, dict):
+        return raw
+    try:
+        out = json.loads(raw or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return out if isinstance(out, dict) else {}
+
+
+def servable_for(row: Mapping[str, Any], vertical: str) -> bool:
+    """May a lane SERVE this source for ``vertical``?
+
+    1. status must be promoted — everything else is quarantine by
+       construction (unchanged from the V1 lane).
+    2. a row that CLAIMS capabilities must not contradict itself.
+       ``capabilities[vertical].present`` is the Validator's measurement
+       (gate 3 downgrades a weak capability to false), so a lane promising
+       a false one is exactly the TX-mechanical waste the Phase-1 router
+       gate exists to prevent. The registry read honours that gate; the
+       production consumer has to honour it too.
+
+    A row with NO capability claim at all is legacy: the V1 proposal
+    ladder never spoke this vocabulary, and it promoted on a mechanically
+    verified phone column instead. Treating that silence as
+    ``present: false`` would be inventing evidence — accuracy Rule 8: no
+    evidence is *unknown*, not false. So it keeps the pre-V2 rule, and no
+    V1 source changes behaviour.
+    """
+    if str(row.get("status", "")) != STATUS_PROMOTED:
+        return False
+    caps = _json_obj(row.get("capabilities"))
+    if not caps:
+        return True  # legacy row — it made no claim to contradict
+    slot = caps.get(vertical)
+    return bool(isinstance(slot, dict) and slot.get("present"))
+
 
 #: Registry metadata columns added by the Phase-1 migration (v2). Old DBs
 #: get ALTER TABLE ADD COLUMN; fresh DBs create them in the base CREATE.
@@ -225,7 +266,95 @@ class ScoutStore:
                     updated_at TEXT NOT NULL
                 )
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS scout_schedule (
+                    job TEXT PRIMARY KEY,
+                    next_due_at TEXT NOT NULL DEFAULT '',
+                    lease_until TEXT NOT NULL DEFAULT '',
+                    last_outcome TEXT NOT NULL DEFAULT '',
+                    last_detail TEXT NOT NULL DEFAULT '',
+                    last_completed_at TEXT NOT NULL DEFAULT ''
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS source_snapshots (
+                    source_id TEXT PRIMARY KEY,
+                    checksum TEXT NOT NULL,
+                    rows_seen INTEGER NOT NULL DEFAULT 0,
+                    inserted INTEGER NOT NULL DEFAULT 0,
+                    checked_at TEXT NOT NULL
+                )
+            """)
             conn.commit()
+            conn.close()
+
+    def snapshot_checksum(self, source_id: str) -> str:
+        """Last fully imported bulk artifact, if any."""
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT checksum FROM source_snapshots WHERE source_id = ?",
+                (source_id.strip().lower(),)).fetchone()
+            return str(row[0]) if row else ""
+        finally:
+            conn.close()
+
+    def record_snapshot(self, source_id: str, checksum: str, *,
+                        rows_seen: int, inserted: int) -> None:
+        """Commit import progress only after the phone pool accepted rows."""
+        conn = self._conn()
+        try:
+            conn.execute(
+                "INSERT INTO source_snapshots "
+                "(source_id, checksum, rows_seen, inserted, checked_at) "
+                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(source_id) DO UPDATE SET "
+                "checksum=excluded.checksum, rows_seen=excluded.rows_seen, "
+                "inserted=excluded.inserted, checked_at=excluded.checked_at",
+                (source_id.strip().lower(), checksum, int(rows_seen),
+                 int(inserted), _now()))
+            conn.execute(
+                "UPDATE sources SET rows_consumed = rows_consumed + ?, "
+                "last_fetched_at = ? WHERE source_id = ?",
+                (int(rows_seen), _now(), source_id.strip().lower()))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def claim_scheduled_pass(self, job: str, now: str,
+                             lease_until: str) -> bool:
+        """Claim one due scout pass across app processes and restarts."""
+        conn = self._conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "INSERT OR IGNORE INTO scout_schedule (job) VALUES (?)", (job,))
+            row = conn.execute(
+                "SELECT next_due_at, lease_until FROM scout_schedule "
+                "WHERE job = ?", (job,)).fetchone()
+            if row[0] > now or row[1] > now:
+                conn.commit()
+                return False
+            conn.execute(
+                "UPDATE scout_schedule SET lease_until = ? WHERE job = ?",
+                (lease_until, job))
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+
+    def finish_scheduled_pass(self, job: str, *, now: str,
+                              next_due_at: str, outcome: str,
+                              detail: str = "") -> None:
+        """Persist success or retry time; a failed pass is never lost."""
+        conn = self._conn()
+        try:
+            conn.execute(
+                "UPDATE scout_schedule SET next_due_at = ?, lease_until = '', "
+                "last_outcome = ?, last_detail = ?, last_completed_at = ? "
+                "WHERE job = ?",
+                (next_due_at, outcome, detail[:500], now, job))
+            conn.commit()
+        finally:
             conn.close()
 
     def _migrate_v2(self, conn: sqlite3.Connection) -> None:
@@ -478,29 +607,53 @@ class ScoutStore:
         The router gate (Phase-1 exit criterion): phone demand must never
         bind to a source whose capabilities.phone.present is false — the
         TX-mechanical class of waste is prevented at the SELECT, not at
-        fetch time.
+        fetch time. ``servable_for`` is the same verdict the serving
+        consumers apply (``servable_promoted``).
         """
         conn = self._conn()
         try:
             rows = conn.execute(
                 "SELECT source_id, capabilities, access_path, state, "
-                "estimated_rows FROM sources WHERE status = ?",
+                "estimated_rows, status FROM sources WHERE status = ?",
                 (STATUS_PROMOTED,)).fetchall()
             out: list[dict[str, Any]] = []
-            for source_id, caps, access_path, state, est in rows:
-                try:
-                    caps = json.loads(caps or "{}")
-                except (TypeError, ValueError):
-                    caps = {}
-                slot = caps.get(vertical, {})
-                if isinstance(slot, dict) and slot.get("present"):
-                    out.append({
-                        "source_id": source_id,
-                        "capabilities": caps,
-                        "access_path": access_path,
-                        "state": state,
-                        "estimated_rows": est,
-                    })
+            for source_id, caps, access_path, state, est, status in rows:
+                if not servable_for({"status": status, "capabilities": caps},
+                                    vertical):
+                    continue
+                out.append({
+                    "source_id": source_id,
+                    "capabilities": _json_obj(caps),
+                    "access_path": access_path,
+                    "state": state,
+                    "estimated_rows": est,
+                })
+            return out
+        finally:
+            conn.close()
+
+    def servable_promoted(self, vertical: str,
+                          limit: int = 500) -> dict[str, dict[str, Any]]:
+        """``{source_id: payload}`` for promoted sources a lane may SERVE.
+
+        The phones lane's serving map (soda.py reads this on every coverage
+        lookup). ``promoted_payloads`` is the RAW registry view; this one
+        applies ``servable_for``, so a promoted source whose measured
+        capability for ``vertical`` is false can never be promised as
+        coverage the lane then fails to fetch.
+        """
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT source_id, payload, capabilities, status "
+                "FROM sources WHERE status = ? LIMIT ?",
+                (STATUS_PROMOTED, limit)).fetchall()
+            out: dict[str, dict[str, Any]] = {}
+            for source_id, payload, caps, status in rows:
+                if not servable_for({"status": status, "capabilities": caps},
+                                    vertical):
+                    continue
+                out[source_id] = _json_obj(payload)
             return out
         finally:
             conn.close()
@@ -641,12 +794,12 @@ class ScoutStore:
             conn.close()
 
     def promoted_payloads(self, limit: int = 500) -> dict[str, dict[str, Any]]:
-        """``{source_id: payload}`` for every PROMOTED source.
+        """``{source_id: payload}`` for every PROMOTED source — the RAW
+        registry view, capability claims NOT applied.
 
-        The phones lane's serving map (soda.py reads this on every
-        coverage lookup): a promoted source is the only scout state the
-        lead lanes are ever allowed to serve — everything else is
-        quarantine by construction.
+        Serving consumers want ``servable_promoted(vertical)`` instead:
+        this one is for inspection and tests, where seeing a promoted row
+        whose capability claim is false is the point.
         """
         conn = self._conn()
         try:

@@ -32,7 +32,7 @@ export default function Login() {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-[#0B0E14] px-4">
+    <div className="auth-page">
       <div className="w-full max-w-sm">
         {/* Logo */}
         <div className="flex items-center justify-center gap-2.5 mb-8">
@@ -47,7 +47,7 @@ export default function Login() {
 
         <form
           onSubmit={handleSubmit}
-          className="bg-[#0D1017] border border-white/5 rounded-xl p-6 space-y-4"
+          className="ui-panel bg-[#0D1017] border border-white/5 rounded-xl p-6 space-y-4"
         >
           <h1 className="text-lg font-semibold text-white mb-2">Sign in</h1>
 
@@ -61,6 +61,7 @@ export default function Login() {
             <label className="block text-[12px] text-slate-400 mb-1">Username</label>
             <input
               type="text"
+              aria-label="Username"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               required
@@ -73,6 +74,7 @@ export default function Login() {
             <label className="block text-[12px] text-slate-400 mb-1">Password</label>
             <input
               type="password"
+              aria-label="Password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required

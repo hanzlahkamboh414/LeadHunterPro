@@ -145,6 +145,70 @@ _STANDALONE_STATE_RE = re.compile(
 #: A capitalized (possibly hyphenated or two-word) city candidate.
 _CITY_GROUP_RE = re.compile(r"[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)*")
 
+#: A TRAILING bare state code — the comma-less address tail a free-text
+#: location field carries: "Dallas TX", "Plano TX 75024", "Houston TX
+#: 77002-1234", "Texas, USA"'s code-only twin. The regexes above cannot see
+#: this form (``_CITY_STATE_CODE_RE`` requires the comma; the standalone rule
+#: matches NAMES, not codes), so it is the one shape they miss.
+#:
+#: Case-insensitive because the API already accepts "austin tx" and
+#: ``harvester.store.state_from_location`` folded it. ``\b`` on both sides is
+#: load-bearing: it is what keeps "Berlin" from reading as IN.
+_STATE_CODE_TAIL_RE = re.compile(
+    r"\b(?P<state_code>" + _STATE_CODES_ALT + r")\b"
+    r"(?:\s+\d{5}(?:-\d{4})?)?"
+    r"(?:\s*,?\s*(?:USA|US|United States))?"
+    r"\s*$",
+    re.IGNORECASE,
+)
+
+
+def state_from_text(text: str) -> str:
+    """The 2-letter US state code *text* names — or "" when it names none, or
+    names more than one.
+
+    THE canonical free-text -> state fold. It exists so that "which state is
+    this?" has exactly ONE answer in this codebase (CLAUDE.md §14): the
+    scorer's service-area signal and the serve-time state filter must never
+    disagree about the same string, because a company scored as Texas and then
+    served to a Colorado run is exactly what two answers produce.
+
+    Deliberately conservative, in the direction this codebase's learning
+    safeguards require ("jahan signal weak ho, conservative no-op"):
+
+    * EXACTLY ONE state, or "". A compound string naming two — the AI writes
+      ``"Dallas, TX (corporate HQ: Tustin, CA)"`` and ``"Seattle, WA
+      (headquarters); offices in Houston, TX"`` — is genuinely ambiguous, and
+      this module's rule for conflicting location evidence is to record it and
+      claim neither, never to silently pick one. Measured on the live store:
+      14 of 1179 dossiers carry such a string, and every one of them is a
+      company whose real home is elsewhere (London, Amsterdam, Tustin CA), so
+      the old "any mention wins" reading was crediting them as Texas.
+    * US only. ``"Niagara Falls, ON"`` names no US state and folds to "" — a
+      known miss is honest; what "" MEANS is the caller's decision.
+    * A state NAME inside a longer place name counts, so ``"Kansas City, MO"``
+      folds to "" (it names both Kansas and Missouri). Accepted: the cost is a
+      missed bonus on a non-Texas company, and a guess here is the error worth
+      avoiding.
+    * Service-area language is not location evidence (the module's existing
+      rule): ``"TX area"`` folds to "" — a company that SERVES Texas is not a
+      company IN Texas.
+
+    Handles every form measured live: ``"Houston, TX"``, ``"Houston, Texas"``,
+    ``"Texas"``, ``"Dallas TX"``, ``"Plano TX 75024"``, ``"Texas, USA"``,
+    ``"Harris County, Texas"``, plus the lowercase variants the API accepts.
+    """
+    s = (text or "").strip()
+    if not s:
+        return ""
+    found = {code for _, code in _extract_mentions(s)[0] if code}
+    if not found:
+        m = _STATE_CODE_TAIL_RE.search(s)
+        if m:
+            found.add(m.group("state_code").upper())
+    return next(iter(found)) if len(found) == 1 else ""
+
+
 
 # ---------------------------------------------------------------------------
 # Pure helpers (deterministic, no I/O)

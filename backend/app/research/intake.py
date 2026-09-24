@@ -48,7 +48,7 @@ from app.discovery.intent import (
     default_intent_plugins,
     registered_intent_plugins,
 )
-from app.discovery.sources.status import SourceFailureReason, SourceStatus
+from app.discovery.sources.status import SourceReason, SourceStatus
 from app.research.adapters import from_intent_evidence
 from app.research.models import CanonicalEvidence
 from app.research.store import ResearchEvidenceStore, normalize_company_key
@@ -229,8 +229,15 @@ def _run_collection(
     rejected: list[dict[str, str]] = []
     for item in collection.evidence:
         try:
+            # ``domain_key`` is passed so the adapter can classify
+            # ``company_match``: it is the company's identity handle, and the
+            # one fact that lets a record on the company's own site be tied
+            # to it when the snippet does not happen to say the name.
             record: CanonicalEvidence = from_intent_evidence(
-                item, company_id=company_id
+                item,
+                company_id=company_id,
+                company_name=company_name,
+                domain=domain_key,
             )
             if store.add_evidence(record):
                 stored += 1
@@ -325,22 +332,22 @@ def _classify(
     )
 
 
-#: How a failed provider's ``SourceFailureReason`` reads in a summary line.
+#: How a failed provider's ``SourceReason`` reads in a summary line.
 #: The wording matters: "could not be reached" is a claim about the network,
 #: and it is FALSE for a 4xx — we reached the source and it rejected what we
 #: sent. That wording is what let a permanently-malformed USAspending request
 #: read as a flaky endpoint for its whole life, so a rejected request is
 #: never described as an outage here.
 _FAILURE_PHRASES = {
-    SourceFailureReason.REQUEST_ERROR.value: "rejected our request",
-    SourceFailureReason.SOURCE_ERROR.value: "failed",
-    SourceFailureReason.ACCESS_ERROR.value: "could not be reached",
+    SourceReason.REQUEST_ERROR.value: "rejected our request",
+    SourceReason.SOURCE_ERROR.value: "failed",
+    SourceReason.ACCESS_ERROR.value: "could not be reached",
 }
 
 
 def _did_not_answer(collection: Any) -> str:
     """The providers that did not answer, each with whose fault that was."""
-    reasons = collection.failure_reasons()
+    reasons = collection.provider_reasons()
     parts = [
         f"{name} {_FAILURE_PHRASES.get(reasons.get(name, ''), 'did not answer')}"
         for name in collection.unreachable

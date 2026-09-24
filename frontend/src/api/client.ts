@@ -11,6 +11,9 @@ import type {
   AdminDeleted,
   AdminDecision,
   AdminKeys,
+  AdminLaneMode,
+  AdminLaneRepeat,
+  AdminLaneStatus,
   AdminLeadAction,
   AdminLeadScope,
   AdminSearchCache,
@@ -42,13 +45,17 @@ import type {
   LinkedInLead,
   LinkedInSearchResult,
   PhoneLead,
+  PhoneCallAction,
+  PhoneCallActivity,
+  PhoneClaimsReport,
   PhonePoolStats,
   PhoneSaved,
   PhoneSearchResult,
+  WrongPhoneArchiveRow,
   SignupCategory,
 } from "../types";
 
-const BASE = import.meta.env.VITE_API_BASE || "/api/v1";
+const BASE = import.meta.env?.VITE_API_BASE || "/api/v1";
 
 const KEY_STORAGE = "leadhunter.api_key";
 
@@ -256,6 +263,21 @@ export const api = {
     });
   },
 
+  /** Is the Gmail-inbox interface (browse/read/send) on? The address XLSX
+   * export is separate and always available (`export_enabled`). */
+  gmailMode(): Promise<{ inbox_enabled: boolean; export_enabled: boolean }> {
+    return request("/gmail/mode");
+  },
+
+  /** Admin toggle: turn the Gmail inbox interface on/off (export-only mode). */
+  adminSetGmailInboxMode(enabled: boolean): Promise<{ inbox_enabled: boolean }> {
+    return request("/admin/gmail-inbox-mode", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    });
+  },
+
   /** Record the logout in the admin activity log (fire-and-forget; the client
    * discards the token right after — the JWT itself is stateless). */
   logout(): Promise<{ success: boolean }> {
@@ -277,6 +299,28 @@ export const api = {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name, value }),
+    });
+  },
+
+  /** Admin — the harvester AI-lane schedule: which lane runs, for how long,
+   *  and (for an "auto" cycle) what the worker is doing right now. */
+  adminLaneStatus(): Promise<AdminLaneStatus> {
+    return request<AdminLaneStatus>("/admin/harvester/lane");
+  },
+
+  /** Admin — save the AI-lane schedule. Applies on the next harvester pass
+   *  (no restart). A schedule that cannot run answers 422 with the reason. */
+  adminSetLaneSchedule(body: {
+    mode: AdminLaneMode;
+    phone_min?: number;
+    email_min?: number;
+    phone_first?: boolean;
+    repeat?: AdminLaneRepeat;
+  }): Promise<AdminLaneStatus> {
+    return request<AdminLaneStatus>("/admin/harvester/lane", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
     });
   },
 
@@ -361,6 +405,13 @@ export const api = {
   adminUsers(): Promise<AdminUsers> {
     return request<AdminUsers>("/admin/users");
   },
+  adminSetPhoneLimit(userId: string, dailyLimit: number): Promise<{ user_id: string; daily_limit: number }> {
+    return request(`/admin/users/${encodeURIComponent(userId)}/phone-limit`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ daily_limit: dailyLimit }),
+    });
+  },
   adminCreateUser(body: {
     username: string;
     email: string;
@@ -415,12 +466,15 @@ export const api = {
     });
   },
 
-  /** The caller's own (exclusively claimed) call-sheet leads. */
-  phoneLeads(filter: { trade?: string; state?: string; city?: string } = {}): Promise<PhoneLead[]> {
+  /** The caller's own (exclusively claimed) call-sheet leads. The limit
+   *  defaults to the backend's maximum on purpose: the sheet IS the user's
+   *  inventory, and a smaller default silently hid rows they had claimed. */
+  phoneLeads(filter: { trade?: string; state?: string; city?: string; limit?: number } = {}): Promise<PhoneLead[]> {
     const params = new URLSearchParams();
     if (filter.trade) params.set("trade", filter.trade);
     if (filter.state) params.set("state", filter.state);
     if (filter.city) params.set("city", filter.city);
+    if (filter.limit) params.set("limit", String(filter.limit));
     const qs = params.toString();
     return request<PhoneLead[]>(`/phones/leads${qs ? `?${qs}` : ""}`);
   },
@@ -473,9 +527,35 @@ export const api = {
     return request(`/phones/saved/${savedId}`, { method: "DELETE" });
   },
 
-  /** The shared pool's honest inventory (totals + per-trade/state + mine). */
-  phoneStats(): Promise<PhonePoolStats> {
-    return request<PhonePoolStats>("/phones/stats");
+  /** Users get eligible states only; admins also get inventory counts. */
+  phoneStats(target = 25): Promise<PhonePoolStats> {
+    return request<PhonePoolStats>(`/phones/stats?target=${target}`);
+  },
+  phoneActivity(day = ""): Promise<PhoneCallActivity> {
+    return request<PhoneCallActivity>(`/phones/activity${day ? `?date=${encodeURIComponent(day)}` : ""}`);
+  },
+  phoneActivityDays(): Promise<string[]> {
+    return request<string[]>("/phones/activity/days");
+  },
+  phoneRecordEvent(leadId: number, action: Exclude<PhoneCallAction, "lead" | "voicemail">): Promise<{ id?: number; retired?: boolean }> {
+    return request(`/phones/leads/${leadId}/event`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action }),
+      keepalive: true,
+    });
+  },
+  adminWrongPhones(): Promise<WrongPhoneArchiveRow[]> {
+    return request<WrongPhoneArchiveRow[]>("/admin/phones/wrong");
+  },
+  adminRecoverWrongPhone(archiveId: number): Promise<{ recovered: boolean }> {
+    return request(`/admin/phones/wrong/${archiveId}/recover`, { method: "POST" });
+  },
+
+  /** Admin: per-user call-sheet visibility — what the sheet SHOWS vs the
+   *  numbers a newer search pushed off-screen (still owned, still hidden). */
+  adminPhoneClaimsReport(): Promise<PhoneClaimsReport> {
+    return request<PhoneClaimsReport>("/admin/phones/claims-report");
   },
 
   // LinkedIn vertical (P4) — email-research byproduct, pool-only serve ---

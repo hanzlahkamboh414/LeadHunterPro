@@ -46,15 +46,16 @@ export default function LeadDetail() {
   const badge = recommendationBadge(data.recommendation);
 
   return (
-    <div className="px-8 py-7 max-w-4xl">
+    <div className="workspace-page page-focused company-dossier">
       <Link to={backTo} className="inline-flex items-center gap-1.5 text-[13px] text-slate-500 hover:text-white">
         <ArrowLeft className="w-4 h-4" /> Back to leads
       </Link>
 
       {/* Header */}
-      <div className="mt-3 flex items-start justify-between flex-wrap gap-4">
-        <div>
-          <div className="flex items-center gap-3">
+      <div className="dossier-hero mt-3 flex items-start justify-between flex-wrap gap-4">
+        <div className="min-w-0 flex-1">
+          <p className="page-eyebrow mb-4">Company research</p>
+          <div className="flex flex-wrap items-center gap-3">
             <h1 className="text-[26px] font-semibold text-white">
               {data.company.name || data.refined_company || "—"}
             </h1>
@@ -63,7 +64,7 @@ export default function LeadDetail() {
               {recommendationLabel(data.recommendation)}
             </span>
           </div>
-          <p className="text-[13.5px] text-slate-500 mt-1 inline-flex items-center gap-1.5">
+          <p className="break-all text-[13.5px] text-slate-500 mt-3 inline-flex items-center gap-1.5">
             {data.email}
             <CopyButton value={data.email} label="email" />
           </p>
@@ -71,11 +72,11 @@ export default function LeadDetail() {
             {[data.company.industry, data.company.location].filter(Boolean).join(" · ") || "—"}
           </p>
         </div>
-        <div className="text-right">
+        <div className="dossier-score text-center">
           <div className={`text-[34px] font-bold ${scoreColor(data.potential_score)}`}>
             {data.potential_score.toFixed(1)}
           </div>
-          <div className="text-[12px] text-slate-500">potential score</div>
+          <div className="text-[12px] text-slate-400">Potential / 10</div>
         </div>
       </div>
 
@@ -84,7 +85,7 @@ export default function LeadDetail() {
           href={data.company.website}
           target="_blank"
           rel="noreferrer"
-          className="inline-flex items-center gap-1.5 mt-3 text-[13.5px] text-indigo-400 hover:underline"
+          className="break-all inline-flex items-center gap-1.5 mt-3 text-[13.5px] text-indigo-400 hover:underline"
         >
           {data.company.website} <ExternalLink className="w-3.5 h-3.5" />
         </a>
@@ -101,12 +102,12 @@ export default function LeadDetail() {
         </div>
       )}
 
-      {data.signal_intelligence && (
+      {data.signal_intelligence?.company_id && (
         <CompanyIntelligence intelligence={data.signal_intelligence} />
       )}
 
       {/* Sections */}
-      <div className="mt-6 space-y-5">
+      <div className="dossier-sections mt-6">
         <Section title="Company" subtitle={data.refined_domain ? `domain: ${data.refined_domain}` : undefined}>
           <KV k="Industry" v={data.company.industry} />
           <KV k="Location" v={data.company.location} />
@@ -363,7 +364,7 @@ function LinkedInLink({ url }: { url: string }) {
 
 function Section({ title, subtitle, children }: { title: string; subtitle?: string; children: React.ReactNode }) {
   return (
-    <section className="rounded-xl border border-white/5 bg-white/[0.02] p-5">
+    <section className="dossier-section ui-panel rounded-xl border border-white/5 bg-white/[0.02] p-5">
       <h2 className="text-[14px] font-semibold text-white">
         {title}
         {subtitle && <span className="ml-2 font-normal text-slate-500">{subtitle}</span>}
@@ -376,7 +377,7 @@ function Section({ title, subtitle, children }: { title: string; subtitle?: stri
 function KV({ k, v }: { k: string; v: string }) {
   if (!v) return null;
   return (
-    <div className="flex gap-2 text-[13.5px]">
+    <div className="dossier-fact flex gap-2 text-[13.5px]">
       <span className="text-slate-500 w-28 shrink-0">{k}</span>
       <span className="text-slate-100">{v}</span>
     </div>

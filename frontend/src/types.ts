@@ -594,6 +594,35 @@ export interface AdminSearchCache {
   top_queries: Array<{ query: string; max_results: number; fetched_at: string }>;
 }
 
+/** Admin — the harvester AI-lane schedule (which lane runs, for how long).
+ *
+ * `mode`/`repeat` are what the operator SAVED; `effective_mode` is the lane
+ * the next harvester pass will actually run — for an "auto" spec it is the
+ * slot the clock is inside, and it reads "both" once a one-time cycle has
+ * finished (`one_time_done`). */
+export type AdminLaneMode = "both" | "phones" | "emails" | "auto";
+export type AdminLaneEffective = "both" | "phones" | "emails";
+export type AdminLaneRepeat = "day" | "once";
+
+export interface AdminLaneStatus {
+  mode: AdminLaneMode;
+  repeat: AdminLaneRepeat;
+  phone_min: number;
+  email_min: number;
+  phone_first: boolean;
+  started_at: string;
+  effective_mode: AdminLaneEffective;
+  in_phone_slot: boolean | null;
+  cycle_s: number;
+  position_s: number;
+  seconds_to_switch: number | null;
+  next_switch_at: string;
+  one_time_done: boolean;
+  harvester_enabled: boolean;
+  interval_s: number;
+  notes: string[];
+}
+
 /** Admin — Dashboard data control (hide / show / delete/assign user-facing leads). */
 export type AdminLeadScopeKind = "date" | "source" | "email" | "folder";
 
@@ -601,6 +630,7 @@ export interface AdminLeadScope {
   scope: AdminLeadScopeKind;
   value: string;
 }
+
 
 export interface AdminLeadAction {
   affected: number;
@@ -628,6 +658,8 @@ export interface AdminUser {
   created_at: string;
   /** Display name (topbar); empty -> UI falls back to username. */
   name: string;
+  phone_daily_limit: number;
+  phone_daily_used: number;
 }
 
 export interface AdminUsers {
@@ -720,18 +752,51 @@ export interface PhoneSearchResult {
 
 /** GET /phones/stats — the shared pool's honest inventory. */
 export interface PhonePoolStats {
-  total: number;
-  claimed: number;
-  unclaimed: number;
-  by_trade: Record<string, number>;
-  by_state: Record<string, number>;
+  total?: number;
+  claimed?: number;
+  unclaimed?: number;
+  by_trade?: Record<string, number>;
+  by_state?: Record<string, number>;
   mine: number;
+  eligible_states: string[];
   /** Per-state rows that would serve RIGHT NOW (unclaimed, not parked) — the
    *  honest "is location mein kitna naya data hai" number. A state whose
    *  numbers were already handed out is absent from this map even though
    *  `by_state` still counts them. */
-  servable_by_state: Record<string, number>;
-  servable_total: number;
+  servable_by_state?: Record<string, number>;
+  servable_total?: number;
+  daily_limit: number | null;
+  daily_used: number;
+  daily_remaining: number | null;
+}
+
+export type PhoneCallAction = "dialed" | "copied" | "lead" | "voicemail" |
+  "not_interested" | "follow_up" | "no_answer" | "wrong_number";
+
+export interface PhoneCallEvent {
+  id: number;
+  lead_id: number;
+  phone: string;
+  person_name: string;
+  business_name: string;
+  trade: string;
+  state: string;
+  action: PhoneCallAction;
+  created_at: string;
+}
+
+export interface PhoneCallActivity {
+  date: string;
+  dialed: number;
+  outcomes: Record<string, number>;
+  events: PhoneCallEvent[];
+}
+
+export interface WrongPhoneArchiveRow {
+  id: number;
+  user_id: string;
+  phone: string;
+  created_at: string;
 }
 
 /** One user's row in the admin phone-claims report. */

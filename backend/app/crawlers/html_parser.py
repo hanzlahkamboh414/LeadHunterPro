@@ -14,12 +14,13 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urljoin
 
-from app.email.email_cleaner import is_crawl_artifact
+from app.email.email_cleaner import EMAIL_CLEAN_PATTERN, is_acceptable_email
 
 logger = logging.getLogger(__name__)
 
-# Email regex pattern
-_EMAIL_PATTERN = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+# Email regex pattern — the SHARED grammar (dot-atom local part), so a
+# trailing-dot local like ``own.@jose.elcook`` is not even harvested.
+_EMAIL_PATTERN = EMAIL_CLEAN_PATTERN
 
 # Phone regex pattern (international format)
 _PHONE_PATTERN = re.compile(r"\+?[\d\s().-]{7,}\d")
@@ -189,13 +190,22 @@ class HTMLParser:
         """
         emails: set[str] = set()
 
-        # From text content
-        text = soup.get_text()
+        # From text content.
+        #
+        # The separator is the whole point, not a detail: a contact block
+        # puts the phone and the email in adjacent inline tags, and an
+        # unseparated ``get_text()`` welds them into
+        # ``620-6727email.office@premierelectricalcontracting.com`` — a
+        # string that is grammatically a valid address and therefore cannot
+        # be refused downstream by syntax. The same idiom (a space join) is
+        # already what ``text_content`` uses a few lines above.
+        text = soup.get_text(" ")
         for hit in _EMAIL_PATTERN.findall(text):
             # Page source carries machine strings shaped like addresses
-            # (Sentry DSNs, mailing-list ids, example.com placeholders) —
-            # the shared artifact gate keeps them out of lead data.
-            if not is_crawl_artifact(hit):
+            # (Sentry DSNs, mailing-list ids, example.com placeholders) and
+            # strings that are not addresses at all (``own.@jose.elcook``) —
+            # the shared gate keeps both out of lead data.
+            if is_acceptable_email(hit):
                 emails.add(hit)
 
         # From mailto: links
@@ -203,7 +213,7 @@ class HTMLParser:
             href = a_tag["href"]
             if href.startswith("mailto:"):
                 email = href[7:].split("?")[0].strip().lower()
-                if _EMAIL_PATTERN.match(email) and not is_crawl_artifact(email):
+                if is_acceptable_email(email):
                     emails.add(email)
 
         return sorted(emails)
@@ -217,7 +227,12 @@ class HTMLParser:
         Returns:
             List of unique phone numbers.
         """
-        text = soup.get_text()
+        # Separated for the same reason as _find_emails: welded text runs
+        # the previous element's trailing digits onto the number
+        # ("info2" + "620-6727" -> "2620-6727"), which is a wrong phone that
+        # still looks like a phone. The pattern already tolerates spaces, so
+        # the join costs nothing.
+        text = soup.get_text(" ")
         phones = _PHONE_PATTERN.findall(text)
 
         # Clean up phone numbers

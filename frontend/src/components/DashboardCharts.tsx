@@ -27,7 +27,7 @@ import type { LeadSummary } from "../types";
 
 /** The shared card shell — same visual language as the stat cards. */
 export const chartCardClass =
-  "rounded-xl border border-white/5 bg-white/[0.02] p-5";
+  "ui-panel rounded-xl border border-white/5 bg-white/[0.02] p-5";
 
 /** Dark-theme tooltip styling (Recharts inline SVG — Tailwind can't reach it). */
 const tooltipStyle = {
@@ -116,8 +116,8 @@ export function LeadsTrend({
       <AreaChart data={data} margin={{ top: 8, right: 8, left: -18, bottom: 0 }}>
         <defs>
           <linearGradient id="fillTotal" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="#818cf8" stopOpacity={0.35} />
-            <stop offset="100%" stopColor="#818cf8" stopOpacity={0.02} />
+            <stop offset="0%" stopColor="#2dd4bf" stopOpacity={0.35} />
+            <stop offset="100%" stopColor="#2dd4bf" stopOpacity={0.02} />
           </linearGradient>
           <linearGradient id="fillWorking" x1="0" y1="0" x2="0" y2="1">
             <stop offset="0%" stopColor="#34d399" stopOpacity={0.3} />
@@ -146,7 +146,7 @@ export function LeadsTrend({
           type="monotone"
           dataKey="total"
           name="Researched"
-          stroke="#818cf8"
+          stroke="#2dd4bf"
           strokeWidth={2}
           fill="url(#fillTotal)"
         />
@@ -319,7 +319,7 @@ export function TopSources({
         <Bar
           dataKey="leads"
           name="Leads"
-          fill="#818cf8"
+          fill="#2dd4bf"
           radius={[0, 4, 4, 0]}
           barSize={16}
           // Recharts hands the clicked BarRectangleItem; the datum lives in

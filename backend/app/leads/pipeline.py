@@ -1235,24 +1235,13 @@ def run_research(
                         store.add_owner(email, user_id)
                     if pending_store is not None:
                         pending_store.remove([email])
-                entry = {
-                    "email": email,
-                    "domain": domain,
-                    "company": existing.company.name,
-                    "person": existing.person.name,
-                    "bound": existing.person.bound,
-                    "score": existing.potential_score,
-                    "recommendation": existing.recommendation,
-                    "intent": existing.intent.needs_estimation if existing.intent else "",
-                    "timing": existing.timing.window if existing.timing else "",
-                    "sources_checked": existing.sources_checked,
-                    "elapsed_s": 0.0,
-                    "cached": True,
-                    # Already-researched: counts as done, never as NEW working
-                    # output for this run's target (the user asks "existing ko
-                    # skip karo, naye pakro").
-                    "working": False,
-                }
+                # Cross-run cache hit: already-researched, so it counts as
+                # done, never as NEW working output for this run's target (the
+                # user asks "existing ko skip karo, naye pakro"). Same entry
+                # builder as the instant serve — the verdict and score in it
+                # are today's, not the research-time ones.
+                entry = _entry_from_dossier(existing, instant=False)
+                entry["cached"] = True
                 if emit:
                     emit(
                         "research", i, total,
@@ -1389,26 +1378,43 @@ def run_research(
 # Full run — both phases, one call.
 # ---------------------------------------------------------------------------
 
-def _entry_from_dossier(d: Any) -> dict[str, Any]:
+def _entry_from_dossier(d: Any, *, instant: bool = True) -> dict[str, Any]:
     """A run-result entry built directly from a stored dossier — the same
-    shape run_research produces (plus an ``instant`` marker), so the job
-    feed / frontend needs no special case for served-from-pool leads."""
+    shape run_research produces, so the job feed / frontend needs no special
+    case for served-from-pool leads.
+
+    ``instant`` distinguishes the two ways a stored dossier is served: a lead
+    claimed from the SHARED pool (``_instant_serve``) is NEW WORKING output for
+    this run, while a cross-run CACHE hit is already-done and must never count
+    toward this run's target ("existing ko skip karo, naye pakro"). The two
+    serve sites used to build near-identical dicts by hand, which is how they
+    drift; both now come from here.
+
+    The verdict AND the score are re-derived from today's rules
+    (:func:`~app.lead_research.scoring.regate_verdict`) — fixed 2026-09-21.
+    This entry is the only thing the live feed shows about a stored dossier,
+    and it used to carry the research-time numbers verbatim: a formula or gate
+    correction reached the leads page and never reached the feed.
+    """
+    from app.lead_research.scoring import regate_verdict
+
+    recommendation, score = regate_verdict(d)
     return {
         "email": d.email,
         "domain": d.domain,
         "company": d.company.name,
         "person": d.person.name,
         "bound": d.person.bound,
-        "score": d.potential_score,
-        "recommendation": d.recommendation,
+        "score": score,
+        "recommendation": recommendation,
         "intent": d.intent.needs_estimation if d.intent else "",
         "timing": d.timing.window if d.timing else "",
         "sources_checked": d.sources_checked,
         "elapsed_s": 0.0,
-        # Instant-served dossiers were re-gated VISIBLE at serve time and
-        # are new-to-this-user (no prior owner) — genuine working output.
-        "working": True,
-        "instant": True,
+        # A served dossier re-gated VISIBLE at serve time and new-to-this-user
+        # (no prior owner) is genuine working output; a cache hit is not.
+        "working": instant,
+        "instant": instant,
     }
 
 

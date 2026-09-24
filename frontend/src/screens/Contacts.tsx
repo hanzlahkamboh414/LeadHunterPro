@@ -69,19 +69,19 @@ export default function Contacts() {
   }
 
   return (
-    <div className="px-8 py-7 max-w-6xl">
+    <div className="workspace-page contacts-page">
       <div className="flex items-center justify-between flex-wrap gap-3">
         <PageHeader
-          eyebrow="LeadHunter Pro"
+          eyebrow="People & relationships"
           title="Contacts"
-          subtitle="Sirf outreach fields — name, email, phone, LinkedIn. Baqi detail Companies me dekhein."
+          subtitle="Your contact directory. Find a person, copy their details and connect through the available channels."
         />
       </div>
 
       {/* Overview chips + live search — the outreach list at a glance.
           Every chip ACTS: LinkedIn/Phone narrow the list, Total resets. */}
       {contacts.length > 0 && (
-        <div className="mt-5 flex flex-wrap items-center gap-3">
+        <div className="contact-toolbar mt-5 flex flex-wrap items-center gap-3">
           <button
             type="button"
             onClick={() => {
@@ -190,7 +190,7 @@ export default function Contacts() {
           .
         </div>
       ) : (
-        <div className="mt-4 overflow-x-auto rounded-xl border border-white/5">
+        <div className="contact-directory mt-4 overflow-x-auto rounded-xl border border-white/5" tabIndex={0} role="region" aria-label="Contact directory">
           <table className="w-full text-[13.5px]">
             <thead>
               <tr className="bg-white/[0.02] text-left text-[12px] uppercase tracking-wide text-slate-500">
@@ -205,8 +205,10 @@ export default function Contacts() {
               {visible.map((c) => (
                 <tr key={c.email} className="border-t border-white/5 hover:bg-white/[0.03]">
                   <td className="px-4 py-3">
+                    <div className="company-identity"><span className="company-monogram contact-monogram" aria-hidden="true">{(c.person || c.company || c.email).slice(0, 2).toUpperCase()}</span><div>
                     <div className="font-medium text-white">{c.person || "—"}</div>
                     <div className="text-[12px] text-slate-500">{c.company}</div>
+                    </div></div>
                   </td>
                   <td className="px-4 py-3">
                     <span className="inline-flex items-center gap-1.5">

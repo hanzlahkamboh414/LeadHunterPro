@@ -84,3 +84,4 @@ def _no_live_intent_evidence(monkeypatch):
     pass stub plugins via ``intent_evidence_plugins=[...]``.
     """
     monkeypatch.setattr(settings, "INTENT_EVIDENCE_ENABLED", False)
+    monkeypatch.setattr(settings, "SOURCE_SCOUT_ENABLED", False)

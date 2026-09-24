@@ -226,14 +226,27 @@ def test_job_resume_rejects_completed_cancelled_and_unknown(tmp_path):
 
 
 def test_job_pause_then_resume(tmp_path, monkeypatch):
-    monkeypatch.setattr("app.leads.jobs.run_full", _block_on_pause)
+    pause_seen = threading.Event()
+
+    def _run_after_observing_pause(query, **kwargs):
+        original_paused = kwargs["paused"]
+
+        def observed_paused():
+            is_paused = original_paused()
+            if is_paused:
+                pause_seen.set()
+            return is_paused
+
+        return _block_on_pause(query, **{**kwargs, "paused": observed_paused})
+
+    monkeypatch.setattr("app.leads.jobs.run_full", _run_after_observing_pause)
     manager = JobManager(db_path=str(tmp_path / "jobs.db"))
     job = manager.submit(ResearchQuery(trade="gc", location="TX", target_emails=1))
     _wait_running(manager, job.id)
 
     assert manager.pause(job.id) is True
     assert manager.get(job.id).state is JobState.paused
-    time.sleep(0.05)
+    assert pause_seen.wait(5.0), "worker never observed the pause"
     # worker is blocked: still paused, not completed
     assert manager.get(job.id).state is JobState.paused
 

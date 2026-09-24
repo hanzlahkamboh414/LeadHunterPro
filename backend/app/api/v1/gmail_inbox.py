@@ -110,19 +110,21 @@ def _rate_limited(exc: Exception) -> bool:
 
 
 def _quota_exceeded(exc: Exception) -> bool:
-    """True when Google's own words say the per-minute quota ran out.
+    """True when Google's own words say a per-minute window ran out.
 
     Distinguishes the two 403/429 flavors that need different waits: a
-    burst rate-limit clears in seconds (``_RATE_RETRY_DELAYS``), but
-    "Quota exceeded ... 'Units per minute per user'" needs a window
-    rollover (``_QUOTA_RETRY_DELAYS``). Only Google's message text can
-    tell them apart, so it is read verbatim from the response body —
-    never guessed from the status code.
+    burst rate-limit clears in seconds (``_RATE_RETRY_DELAYS``), but a
+    per-minute window ("Quota exceeded ... 'Units per minute per user'",
+    or the batch endpoint's "User-rate limit exceeded") only resets when
+    the minute rolls over (``_QUOTA_RETRY_DELAYS``). Only Google's message
+    text can tell them apart, so it is read verbatim from the response
+    body — never guessed from the status code.
     """
     resp = getattr(exc, "response", None)
     if resp is None or getattr(resp, "status_code", None) not in (403, 429):
         return False
-    return "quota exceeded" in (getattr(resp, "text", "") or "").lower()
+    text = (getattr(resp, "text", "") or "").lower()
+    return "quota exceeded" in text or "rate limit exceeded" in text
 
 
 def _rate_retry(fn):
@@ -199,6 +201,39 @@ def _label(folder: str) -> str:
         ) from None
 
 
+def _require_inbox_enabled() -> None:
+    """The admin kill-switch for the Gmail-like browsing interface.
+
+    OFF (admin panel) = every inbox endpoint EXCEPT the address export and
+    this state probe answers an honest 503 — the export is the production
+    feature and always works. Applied per-endpoint (not on the router) so
+    ``/export`` and ``/mode`` stay reachable.
+    """
+    from app.auth.settings import get_settings
+
+    if not get_settings().gmail_inbox_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail="The Gmail inbox interface is currently disabled by the "
+                   "administrator — email address export still works.",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Feature state (always reachable — the frontend needs it to know which UI
+# to render)
+# ---------------------------------------------------------------------------
+
+@router.get("/mode")
+def inbox_mode(user: User = Depends(get_current_user)) -> dict[str, Any]:
+    """Which parts of the Gmail feature are on: the browsing interface and/or
+    the address export (the export has no switch — it is always available)."""
+    from app.auth.settings import get_settings
+
+    return {"inbox_enabled": get_settings().gmail_inbox_enabled(),
+            "export_enabled": True}
+
+
 # ---------------------------------------------------------------------------
 # Browse + read
 # ---------------------------------------------------------------------------
@@ -211,6 +246,7 @@ def list_messages(
     page_token: str = Query(default=""),
     limit: int = Query(default=50, ge=1, le=100),
     user: User = Depends(get_current_user),
+    _enabled: None = Depends(_require_inbox_enabled),
 ) -> dict[str, Any]:
     """One page of message rows for a folder/search — metadata only (from,
     to, subject, snippet, unread/starred flags), bodies are fetched by the
@@ -254,6 +290,7 @@ def read_message(
     message_id: str,
     account_id: int = Query(),
     user: User = Depends(get_current_user),
+    _enabled: None = Depends(_require_inbox_enabled),
 ) -> dict[str, Any]:
     """One full message (body + attachments), marked read like the Gmail
     site marks a message read when you open it."""
@@ -282,6 +319,7 @@ def download_attachment(
     attachment_id: str,
     account_id: int = Query(),
     user: User = Depends(get_current_user),
+    _enabled: None = Depends(_require_inbox_enabled),
 ) -> Response:
     """One attachment's bytes as a download. The message is fetched first
     only to name the file honestly (the attachment id alone is opaque)."""
@@ -325,7 +363,8 @@ class SendInput(BaseModel):
 
 
 @router.post("/send")
-def send(input: SendInput, user: User = Depends(get_current_user)) -> dict[str, Any]:
+def send(input: SendInput, user: User = Depends(get_current_user),
+         _enabled: None = Depends(_require_inbox_enabled)) -> dict[str, Any]:
     """Compose / reply / forward — one plain-text email from the connected
     account. Replies carry In-Reply-To/References so they thread properly
     in the recipient's (and this) inbox."""
@@ -354,6 +393,7 @@ class ModifyInput(BaseModel):
 def modify(
     message_id: str, input: ModifyInput,
     user: User = Depends(get_current_user),
+    _enabled: None = Depends(_require_inbox_enabled),
 ) -> dict[str, Any]:
     """Star/unstar, mark read/unread, trash, archive — Gmail label changes.
     Only Gmail's label ids are accepted (UNREAD, STARRED, TRASH, INBOX)."""
@@ -445,31 +485,44 @@ def export_addresses(
     addresses: set[str] = set()
     scanned = 0
     page_token = ""
+    pages = 0
     try:
-        with ThreadPoolExecutor(max_workers=_METADATA_WORKERS) as pool:
-            while scanned < _EXPORT_MESSAGE_CAP:
-                page = _rate_retry(lambda: google.list_message_ids(
-                    token, label="", q=q, page_token=page_token, limit=100,
-                ))
-                if not page["ids"]:
-                    break
-                for m in _metadata_messages(token, page["ids"], pool):
-                    h = m["headers"]
-                    if source == "sent":
-                        pairs = getaddresses([h.get("to", "")]) + \
-                            getaddresses([h.get("cc", "")])
-                    else:
-                        pairs = getaddresses([h.get("from", "")])
-                    for _, addr in pairs:
-                        addr = addr.strip().lower()
-                        if not addr or "@" not in addr:
-                            continue
-                        if source == "sent" or _is_person(addr, creds["email"]):
-                            addresses.add(addr)
-                scanned += len(page["ids"])
-                page_token = page["next_page_token"]
-                if not page_token:
-                    break
+        while scanned < _EXPORT_MESSAGE_CAP:
+            page = _rate_retry(lambda: google.list_message_ids(
+                token, label="", q=q, page_token=page_token, limit=100,
+            ))
+            if not page["ids"]:
+                break
+            # Batched metadata: ONE HTTP call per 100 messages instead of
+            # 100 single GETs (the 504 root cause — 6,000+ single GETs ran
+            # past nginx's 10-minute timeout). Measured live: 1.2s per
+            # 100-message batch.
+            metas = _rate_retry(
+                lambda: google.batch_get_message_metadata(token, page["ids"]))
+            for m in metas:
+                h = m["headers"]
+                if source == "sent":
+                    pairs = getaddresses([h.get("to", "")]) + \
+                        getaddresses([h.get("cc", "")])
+                else:
+                    pairs = getaddresses([h.get("from", "")])
+                for _, addr in pairs:
+                    addr = addr.strip().lower()
+                    if not addr or "@" not in addr:
+                        continue
+                    if source == "sent" or _is_person(addr, creds["email"]):
+                        addresses.add(addr)
+            scanned += len(page["ids"])
+            pages += 1
+            # Progress on purpose: a big year takes minutes of quota-paced
+            # batches, and without this line a long export is indistinguishable
+            # from a hung one in the journal.
+            logger.info("gmail address export: %s scanned=%d unique=%d "
+                        "(page %d)", creds["email"], scanned,
+                        len(addresses), pages)
+            page_token = page["next_page_token"]
+            if not page_token:
+                break
     except Exception as exc:  # noqa: BLE001 — Google's error shapes vary
         # Log Google's own words too (the reason lives in the response body,
         # not the status line) — the 2026-09-15 main-server 403 was invisible

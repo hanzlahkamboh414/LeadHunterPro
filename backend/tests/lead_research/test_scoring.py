@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from app.lead_research.models import AIEvidence, CompanyProfile, IntentAssessment, LeadDossier, PersonFindings, TimingAssessment
-from app.lead_research.scoring import LeadScorer, regate_recommendation
+from app.lead_research.scoring import (
+    LeadScorer,
+    regate_recommendation,
+    regate_verdict,
+    rescore_dossier,
+)
 
 
 def _company(**kw):
@@ -92,9 +99,10 @@ def test_gate_high_score_unbound_downgrades():
         _company(name="Acme Construction", industry="general contractor", location="Texas"),
         _person(bound=False, role_relevance=True),
         _intent(needs_estimation="yes", signal="expansion"),
+        # "Q1" is a quarter label, not a timing window — no timing bonus.
         _timing(window="Q1"),
     )
-    # construction(2.0) + role(1.0) + needs_est(2.0) + signal(1.0) + timing(0.5) + area(0.5) = 7.0
+    # construction(2.0) + role(1.0) + needs_est(2.0) + signal(1.0) + area(0.5) = 6.5
     # but NOT bound → gate says nurture
     assert score >= 6.0
     assert rec == "nurture"
@@ -155,6 +163,51 @@ def test_gate_exact_3_unbound_is_nurture():
     )
     assert score >= 3.0
     assert rec == "nurture"
+
+
+# --- the timing sentinel is not an observation ----------------------------
+# Fixed 2026-09-21. ``timing.window`` defaults to the STRING "unknown", which
+# ``intent_timing`` writes when the AI call raised or returned something
+# unparseable. The signal used to be ``if timing.window:`` — a truthiness test
+# — so every FAILED timing call was paid the same +0.5 as a real "now". The
+# signals below hold everything else equal so the timing contribution is the
+# only difference between them.
+
+
+def _score_with_window(window: str) -> float:
+    _, score, _ = LeadScorer().score(
+        "x@acme.com",
+        _company(name="Acme Construction", industry="general contractor", location=""),
+        _person(bound=False, role_relevance=False, name=""),
+        _intent(needs_estimation="no", signal=""),
+        _timing(window=window),
+    )
+    return score
+
+
+def test_a_failed_timing_call_does_not_earn_the_timing_signal():
+    """The defect: a failure scoring better than silence would."""
+    assert _score_with_window("unknown") == _score_with_window("")
+
+
+def test_a_real_window_still_earns_it():
+    """The counter-case — the allowlist must not abolish the signal."""
+    for window in ("now", "soon", "later"):
+        assert _score_with_window(window) == _score_with_window("") + 0.5, window
+
+
+def test_a_non_window_string_does_not_earn_it():
+    """Free text that is not a window is not a window.
+
+    The earlier test used ``window="Q1"`` and expected the +0.5 — arbitrary
+    text scored, which is the same defect from the other side.
+    """
+    assert _score_with_window("Q1") == _score_with_window("")
+
+
+def test_a_window_is_matched_case_insensitively():
+    """The AI's JSON is asked for lowercase, but "Now" is the same window."""
+    assert _score_with_window(" now ") == _score_with_window("now")
 
 
 # --- Edge cases ---
@@ -300,8 +353,13 @@ def test_backward_compatibility_ai_ask_ignored():
 
 def _dossier(email="x@acme.com", *, industry="general contractor", role="Owner",
              stored_rec="contact_now", score=8.0, bound=True, name="Acme Builders",
-             domain="acme.com", fact="", refined_company=""):
-    """Build a LeadDossier with an OLD/AI-era stored recommendation."""
+             domain="acme.com", fact="", refined_company="", fit="Scored at research time."):
+    """Build a LeadDossier with an OLD/AI-era stored recommendation.
+
+    ``fit`` defaults to a MEASURED-looking sentence on purpose: these tests are
+    about re-gating a dossier whose score is real, so they must not accidentally
+    exercise the abandoned-lead path (see the ``TestAbandonedLeads`` block).
+    """
     facts = [AIEvidence(claim=fact, source_url="https://x", source_type="web",
                         confidence="high")] if fact else []
     return LeadDossier(
@@ -312,6 +370,7 @@ def _dossier(email="x@acme.com", *, industry="general contractor", role="Owner",
         person=PersonFindings(name="Jane", role=role, role_relevance=True, bound=bound),
         intent=_intent(),
         timing=_timing(),
+        fit=fit,
         potential_score=score,
         recommendation=stored_rec,
     )
@@ -464,3 +523,137 @@ def test_regate_clean_gc_geotechnical_trade_not_suppressed():
                  fact="Schnabel is a geostructural design-build contractor "
                       "specializing in earth retention and deep foundations")
     assert regate_recommendation(d) == "contact_now"
+
+
+# --- Read-time re-score: the score is re-derived, not just the verdict ------
+# Added 2026-09-21. ``regate_recommendation`` always re-applied TODAY'S gates
+# at read time, but compared them against the STORED score and left that score
+# on screen. So a formula correction reached the gate and never reached the
+# number the gate compares — a dossier sitting on the 6.0 line thanks to a
+# bonus the formula no longer grants was still served contact_now, with the
+# number that justified it.
+#
+# The fix is ``rescore_dossier``, which reuses the SAME LeadScorer the research
+# path uses (CLAUDE.md §14 — one formula, not two).
+
+
+def test_rescore_re_derives_the_stored_score():
+    """The 8.0 the row was stored with is not what the signals say today."""
+    d = _dossier(score=8.0)
+    assert rescore_dossier(d) == 8.5  # 2.0+1.5+1.0+2.0+1.0+0.5+0.5
+
+
+def test_rescore_reproduces_a_research_time_score():
+    """The counter-case: on unchanged inputs it must agree with Stage 4.
+
+    Recomputing the score the scorer itself just produced has to be a no-op,
+    or the leads page and a fresh research of the same lead would disagree.
+    """
+    d = _dossier(score=0.0)
+    _, score, _ = LeadScorer().score(
+        d.email, d.company, d.person, d.intent, d.timing,
+    )
+    assert rescore_dossier(d) == score
+
+
+def test_rescore_honours_the_timing_sentinel_end_to_end():
+    """The stored score paid +0.5 for a timing call that never answered.
+
+    ``_dossier``'s signals total 8.5 including a real "now" window. Swap in
+    the FAILURE sentinel and the 0.5 must go; a real window keeps it.
+    """
+    paid = _dossier(score=6.5, stored_rec="contact_now")
+    paid.timing = TimingAssessment(window="unknown")   # the failure sentinel
+    real = _dossier(score=6.5, stored_rec="contact_now")
+    real.timing = TimingAssessment(window="soon")      # a real observation
+    assert rescore_dossier(paid) == 8.0
+    assert rescore_dossier(real) == 8.5
+    assert rescore_dossier(paid) == rescore_dossier(real) - 0.5
+
+
+def test_the_gate_uses_the_re_derived_score():
+    """A row kept at contact_now by the bogus bonus drops to nurture.
+
+    The stored 6.0 includes the +0.5 the old formula paid a FAILED timing
+    call. Under today's formula the same signals total 5.5 — under the
+    contact_now line — so re-deriving the score is not cosmetic, it changes
+    the verdict. That is the shape of the live defect: 27 stored dossiers sat
+    on a threshold the bonus carried, and 6 changed class.
+    """
+    d = _dossier(score=6.0, stored_rec="contact_now",
+                 fact="Acme Builders is a commercial general contractor.")
+    d.intent = IntentAssessment(needs_estimation="no", signal="")
+    d.timing = TimingAssessment(window="unknown")
+    # construction(2.0) + bound(1.5) + role(1.0) + facts(0.5) + area(0.5)
+    assert rescore_dossier(d) == 5.5
+    assert regate_verdict(d) == ("nurture", 5.5)
+
+
+# --- Abandoned leads have no score to re-derive -----------------------------
+# ``potential_score`` defaults to 0.0 and only Stage 4 overwrites it, so every
+# gate that returns BEFORE Stage 4 — junk domain, free mail, dead domain, client
+# fit — persists 0.0 for a lead whose research never ran. Re-deriving a score
+# for such a row computes a number from fields that were never researched.
+#
+# Measured on the live store 2026-09-21: 397 of 1179 rows are abandoned this
+# way, and re-scoring them manufactured a PASSING score for 43 companies the
+# pipeline had explicitly decided are not our clients.
+
+
+def test_an_abandoned_lead_is_not_given_an_invented_score():
+    """A 'Not our client' row keeps its 0.0 instead of getting a made-up 3.5."""
+    d = _dossier(stored_rec="skip", score=0.0,
+                 fit="Not our client — Acme is a software company.")
+    assert rescore_dossier(d) == 0.0
+
+
+def test_an_abandoned_lead_keeps_its_skip_verdict():
+    """The regression this guard exists for.
+
+    Under today's signals this row would compute 8.5 and flip to contact_now —
+    but the pipeline already decided this company is not a client, and no
+    research backs the 8.5. It must stay skip.
+    """
+    d = _dossier(stored_rec="skip", score=0.0,
+                 fit="Not our client — Acme is a software company.")
+    rec, score = regate_verdict(d)
+    assert (rec, score) == ("skip", 0.0)
+
+
+def test_every_pre_scoring_gate_prefix_is_registered():
+    """A future early-return gate must register its ``fit`` prefix.
+
+    ``_ABANDONED_FIT_PREFIXES`` is how an abandoned lead is told apart from a
+    scored one. A new gate that writes an unregistered sentence would make
+    ``rescore_dossier`` score a lead that was never researched — the 43-lead
+    defect again, silently. This reads the gate sites out of ``agent.py`` so
+    the failure lands here, with the prefix to add, instead of in production.
+    """
+    import re
+
+    from app.lead_research.scoring import _ABANDONED_FIT_PREFIXES
+
+    src = (
+        Path(__file__).resolve().parents[2] / "app" / "lead_research" / "agent.py"
+    ).read_text(encoding="utf-8")
+    # The literal part of every `dossier.fit = ...` that assigns a STRING — an
+    # f-string is captured up to its first `{`, and a wrapped `= (` form is
+    # allowed. `dossier.fit = fit` (Stage 4 handing over the scorer's own
+    # sentence) has no quote and is deliberately not matched.
+    assignments = len(re.findall(r"dossier\.fit\s*=", src))
+    literals = re.findall(r'dossier\.fit\s*=\s*\(?\s*f?["\']([^"\'{]*)', src)
+    assert literals, "the scan found no gate sentences — did agent.py move?"
+    assert len(literals) == assignments - 1, (
+        f"{assignments} `dossier.fit =` sites but only {len(literals)} parsed "
+        "as gate sentences — a gate is written in a form this scan misses, so "
+        "this guard is no longer complete"
+    )
+    unregistered = [
+        s for s in literals
+        if not s.startswith(_ABANDONED_FIT_PREFIXES)
+    ]
+    assert not unregistered, (
+        "these pre-scoring gate sentences are not registered in "
+        "_ABANDONED_FIT_PREFIXES, so their leads would be re-scored as if "
+        f"researched: {unregistered}"
+    )

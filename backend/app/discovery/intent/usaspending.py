@@ -15,7 +15,7 @@ a single award. The failure was invisible because the 422 was reported as
 ``UNAVAILABLE`` — "the source is down" — which reads as a passing outage
 rather than a bug on our side. Two things changed: the body now carries the
 required keys (verified live: 200 with real awards), and HTTP failures are
-split by whose fault they are (§ :class:`SourceFailureReason`), with the
+split by whose fault they are (§ :class:`SourceReason`), with the
 API's own explanation kept in ``metadata["detail"]``.
 """
 
@@ -28,7 +28,7 @@ import requests
 
 from app.discovery.intent.base import BaseIntentPlugin
 from app.discovery.plugins.base_plugin import PluginCapability
-from app.discovery.sources.status import SourceFailureReason, SourceStatus
+from app.discovery.sources.status import SourceReason, SourceStatus
 from app.engines.lead.lead_models import IntentEvidence, IntentEvidenceType
 
 logger = logging.getLogger(__name__)
@@ -111,7 +111,7 @@ class USAspendingPlugin(BaseIntentPlugin):
             )
             return SourceStatus.UNAVAILABLE, [], {
                 "source": self.name,
-                "reason": SourceFailureReason.ACCESS_ERROR.value,
+                "reason": SourceReason.ACCESS_ERROR.value,
                 "error": str(exc),
             }
         if response.status_code != 200:
@@ -143,7 +143,7 @@ class USAspendingPlugin(BaseIntentPlugin):
             )
             return SourceStatus.ERROR, [], {
                 "source": self.name,
-                "reason": SourceFailureReason.SOURCE_ERROR.value,
+                "reason": SourceReason.SOURCE_ERROR.value,
                 "error": str(exc),
             }
 
@@ -152,7 +152,7 @@ class USAspendingPlugin(BaseIntentPlugin):
         if not evidence:
             return SourceStatus.EMPTY, [], {
                 "source": self.name,
-                "reason": SourceFailureReason.NO_DATA.value,
+                "reason": SourceReason.NO_DATA.value,
                 "query": company_name,
             }
         return SourceStatus.SUCCESS, evidence, {
@@ -164,7 +164,7 @@ class USAspendingPlugin(BaseIntentPlugin):
     # -- failure classification -------------------------------------------
 
     @staticmethod
-    def _failure_reason(status_code: int) -> SourceFailureReason:
+    def _failure_reason(status_code: int) -> SourceReason:
         """4xx is ours, 5xx is theirs. Both are ``ERROR``; the reason tells them apart.
 
         ``UNAVAILABLE`` is reserved for "we never reached it" (timeout, DNS,
@@ -175,8 +175,8 @@ class USAspendingPlugin(BaseIntentPlugin):
         endpoint for this plugin's whole life.
         """
         if 400 <= status_code < 500:
-            return SourceFailureReason.REQUEST_ERROR
-        return SourceFailureReason.SOURCE_ERROR
+            return SourceReason.REQUEST_ERROR
+        return SourceReason.SOURCE_ERROR
 
     @staticmethod
     def _error_detail(response: Any, limit: int = 200) -> str:

@@ -45,7 +45,7 @@ export default function ResetPassword() {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-[#0B0E14] px-4">
+    <div className="auth-page">
       <div className="w-full max-w-sm">
         {/* Logo */}
         <div className="flex items-center justify-center gap-2.5 mb-8">
@@ -60,7 +60,7 @@ export default function ResetPassword() {
 
         <form
           onSubmit={step === 1 ? handleUsernameSubmit : handleResetSubmit}
-          className="bg-[#0D1017] border border-white/5 rounded-xl p-6 space-y-4"
+          className="ui-panel bg-[#0D1017] border border-white/5 rounded-xl p-6 space-y-4"
         >
           <h1 className="text-lg font-semibold text-white mb-2">Reset password</h1>
 
@@ -82,7 +82,8 @@ export default function ResetPassword() {
                 <label className="block text-[12px] text-slate-400 mb-1">Username</label>
                 <input
                   type="text"
-                  value={username}
+                  aria-label="Username"
+              value={username}
                   onChange={(e) => setUsername(e.target.value)}
                   required
                   autoFocus
@@ -106,7 +107,8 @@ export default function ResetPassword() {
                 <label className="block text-[12px] text-slate-400 mb-1">New password</label>
                 <input
                   type="password"
-                  value={newPassword}
+                  aria-label="New password"
+              value={newPassword}
                   onChange={(e) => setNewPassword(e.target.value)}
                   required
                   autoFocus
@@ -117,7 +119,8 @@ export default function ResetPassword() {
                 <label className="block text-[12px] text-slate-400 mb-1">Confirm new password</label>
                 <input
                   type="password"
-                  value={confirmPassword}
+                  aria-label="Confirm password"
+              value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
                   required
                   className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500/50"

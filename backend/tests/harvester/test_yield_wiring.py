@@ -35,8 +35,8 @@ class FetchOK:
         self.records = records
         self.calls: list[tuple] = []
 
-    def __call__(self, source_id, slug, city, limit):
-        self.calls.append((source_id, slug, city, limit))
+    def __call__(self, source_id, slug, city, limit, offset=0):
+        self.calls.append((source_id, slug, city, limit, offset))
         return SourceStatus.SUCCESS, list(self.records), {}
 
 
@@ -44,7 +44,7 @@ class FetchFail:
     def __init__(self):
         self.calls = 0
 
-    def __call__(self, source_id, slug, city, limit):
+    def __call__(self, source_id, slug, city, limit, offset=0):
         self.calls += 1
         return SourceStatus.UNAVAILABLE, [], {"error": "source down"}
 

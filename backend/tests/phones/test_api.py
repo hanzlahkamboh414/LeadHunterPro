@@ -31,6 +31,10 @@ def client(tmp_stores, tmp_path, monkeypatch):
     user_store, phone_store = tmp_stores
     app = FastAPI()
     app.include_router(phones_router, prefix="/api/v1")
+    # The admin claims-report shares the same temp phone store, so it is
+    # covered from here (hermetic) rather than against the real DB.
+    from app.api.v1.admin import router as admin_router
+    app.include_router(admin_router, prefix="/api/v1")
 
     import app.api.v1.phones as phones_mod
     monkeypatch.setattr(phones_mod, "_store", phone_store)
@@ -107,6 +111,100 @@ def test_emails_only_account_gets_403(client, make_user):
     assert "Emails vertical only" in resp.json()["detail"]
 
 
+def test_daily_allowance_is_enforced_across_searches(client, make_user, tmp_stores):
+    user = make_user("limited", category="phones")
+    _, store = tmp_stores
+    _stock(store, 3)
+    store.set_daily_limit(user.id, 2)
+    headers = {"Authorization": f"Bearer {_token(user)}"}
+    first = client.post("/api/v1/phones/search", headers=headers,
+                        json={"state": "WA", "target": 1})
+    second = client.post("/api/v1/phones/search", headers=headers,
+                         json={"state": "WA", "target": 1})
+    third = client.post("/api/v1/phones/search", headers=headers,
+                        json={"state": "WA", "target": 1})
+    assert [first.status_code, second.status_code, third.status_code] == [200, 200, 422]
+    stats = client.get("/api/v1/phones/stats", headers=headers).json()
+    assert stats["daily_limit"] == 2
+    assert stats["daily_used"] == 2
+    assert stats["daily_remaining"] == 0
+
+
+def test_only_admin_can_change_user_allowance(client, make_user, tmp_stores):
+    user = make_user("caller", category="phones")
+    admin = make_user("root", is_admin=True)
+    path = f"/api/v1/admin/users/{user.id}/phone-limit"
+    body = {"daily_limit": 800}
+    forbidden = client.put(path, headers={"Authorization": f"Bearer {_token(user)}"},
+                           json=body)
+    allowed = client.put(path, headers={"Authorization": f"Bearer {_token(admin)}"},
+                         json=body)
+    assert forbidden.status_code == 403
+    assert allowed.status_code == 200
+    assert allowed.json()["daily_limit"] == 800
+    assert tmp_stores[1].daily_limit(user.id) == 800
+
+
+def test_user_sees_only_states_meeting_requested_quantity_not_stock_counts(
+    client, make_user, tmp_stores,
+):
+    user = make_user("privatepool", category="phones")
+    admin = make_user("root", is_admin=True)
+    _, store = tmp_stores
+    store.add([
+        {"phone": f"503111{i:04d}", "business_name": f"WA {i}",
+         "trade_category": "GENERAL", "state": "WA"}
+        for i in range(3)
+    ] + [
+        {"phone": "5121110000", "business_name": "TX 1",
+         "trade_category": "GENERAL", "state": "TX"}
+    ])
+    user_stats = client.get(
+        "/api/v1/phones/stats?target=2",
+        headers={"Authorization": f"Bearer {_token(user)}"},
+    ).json()
+    assert user_stats["eligible_states"] == ["WA"]
+    assert "by_state" not in user_stats
+    assert "servable_by_state" not in user_stats
+    assert "total" not in user_stats
+    admin_stats = client.get(
+        "/api/v1/phones/stats?target=2",
+        headers={"Authorization": f"Bearer {_token(admin)}"},
+    ).json()
+    assert admin_stats["by_state"] == {"WA": 3, "TX": 1}
+
+
+def test_call_activity_and_wrong_archive_are_owner_and_admin_scoped(
+    client, make_user, tmp_stores,
+):
+    alice = make_user("dialer", category="phones")
+    bob = make_user("otherdialer", category="phones")
+    admin = make_user("root", is_admin=True)
+    _, store = tmp_stores
+    _stock(store)
+    lead_id = store.serve("", "WA", "", 1, alice.id)[0]["id"]
+    alice_headers = {"Authorization": f"Bearer {_token(alice)}"}
+    bob_headers = {"Authorization": f"Bearer {_token(bob)}"}
+    admin_headers = {"Authorization": f"Bearer {_token(admin)}"}
+    path = f"/api/v1/phones/leads/{lead_id}/event"
+    assert client.post(path, headers=bob_headers, json={"action": "dialed"}).status_code == 404
+    assert client.post(path, headers=alice_headers, json={"action": "dialed"}).status_code == 200
+    assert client.post(path, headers=alice_headers,
+                       json={"action": "wrong_number"}).status_code == 200
+    activity = client.get("/api/v1/phones/activity", headers=alice_headers).json()
+    assert activity["dialed"] == 1
+    assert activity["outcomes"]["wrong_number"] == 1
+    assert client.get("/api/v1/admin/phones/wrong", headers=bob_headers).status_code == 403
+    archive = client.get("/api/v1/admin/phones/wrong", headers=admin_headers).json()
+    assert len(archive) == 1
+    recovered = client.post(
+        f"/api/v1/admin/phones/wrong/{archive[0]['id']}/recover",
+        headers=admin_headers,
+    )
+    assert recovered.status_code == 200
+    assert store.pool_stats()["total"] == 1
+
+
 def test_phones_and_both_and_admin_pass_gate(client, make_user, tmp_stores):
     """The gate lets phones/both/admin THROUGH (200). The lead itself is
     EXCLUSIVE — the first claimant owns it, later searches in this test
@@ -156,7 +254,137 @@ def test_search_serves_and_records_activity(client, make_user, tmp_stores):
     assert [l["phone"] for l in leads] == ["+15031110001"]
     # ...and the stats endpoint reports the honest pool inventory.
     stats = client.get("/api/v1/phones/stats", headers=headers).json()
-    assert stats["total"] == 1 and stats["mine"] == 1
+    assert stats["mine"] == 1
+    assert "total" not in stats
+    admin = make_user("pooladmin", is_admin=True)
+    admin_stats = client.get(
+        "/api/v1/phones/stats",
+        headers={"Authorization": f"Bearer {_token(admin)}"},
+    ).json()
+    assert admin_stats["total"] == 1
+    # The served lead is no longer FRESH: the raw pool still counts it
+    # (by_state) but nothing is servable any more (one-shot serve) — the
+    # Location counts the screen shows must never conflate the two.
+    assert admin_stats["by_state"]["WA"] == 1
+    assert admin_stats["servable_by_state"] == {}
+    assert admin_stats["servable_total"] == 0
+
+
+def test_repeat_search_serves_only_fresh_and_sheet_shows_the_whole_claim(
+    client, make_user, tmp_stores,
+):
+    """The two live complaints of 2026-09-16, pinned:
+
+    (a) a 249-number Texas search claimed 249 leads but the call sheet showed
+        only 200 — the endpoint's default limit silently cut the user's own
+        inventory short;
+    (b) clicking the same state again must bring FRESH numbers, never the ones
+        already handed out (not to this user, not to anyone).
+    """
+    _, phone_store = tmp_stores
+    phone_store.add([{
+        "phone": f"503111{i:04d}", "person_name": "SMITH, JANE",
+        "business_name": f"Acme {i}", "trade_category": "GENERAL",
+        "city": "SEATTLE", "state": "WA", "source": "wa_license",
+        "license_status": "ACTIVE", "source_url": "https://data.wa.gov/x",
+    } for i in range(1, 250)])
+    user = make_user("alice", category="phones")
+    headers = {"Authorization": f"Bearer {_token(user)}"}
+
+    first = client.post("/api/v1/phones/search", headers=headers,
+                        json={"state": "WA", "target": 249}).json()
+    assert first["served_from_pool"] == 249
+    # The whole claim is on the sheet — not the first 200 rows of it.
+    assert len(client.get("/api/v1/phones/leads", headers=headers).json()) == 249
+
+    # Nothing fresh left in WA: the repeat click serves 0 with the honest
+    # harvester reason, never the same numbers a second time.
+    again = client.post("/api/v1/phones/search", headers=headers,
+                        json={"state": "WA", "target": 249}).json()
+    assert again["served_from_pool"] == 0
+    assert "harvester" in again["reason"]
+    # And that repeat call does not disturb what the user already owns.
+    assert len(client.get("/api/v1/phones/leads", headers=headers).json()) == 249
+
+
+def test_new_search_adds_to_todays_sheet(client, make_user, tmp_stores):
+    """Today's sheet contains fresh claims from every searched state."""
+    _, phone_store = tmp_stores
+    phone_store.add([{
+        "phone": f"503111{i:04d}", "person_name": "SMITH, JANE",
+        "business_name": f"WaCo {i}", "trade_category": "GENERAL",
+        "city": "SEATTLE", "state": "WA", "source": "wa_license",
+        "license_status": "ACTIVE", "source_url": "https://data.wa.gov/x",
+    } for i in range(1, 101)])
+    phone_store.add([{
+        "phone": f"512111{i:04d}", "person_name": "SMITH, JANE",
+        "business_name": f"TxCo {i}", "trade_category": "GENERAL",
+        "city": "AUSTIN", "state": "TX", "source": "tdlr_license",
+        "license_status": "ACTIVE", "source_url": "https://tdlr.texas.gov/x",
+    } for i in range(1, 101)])
+    user = make_user("batchy", category="phones")
+    headers = {"Authorization": f"Bearer {_token(user)}"}
+
+    wa = client.post("/api/v1/phones/search", headers=headers,
+                     json={"state": "WA", "target": 60}).json()
+    assert wa["served_from_pool"] == 60
+    sheet = client.get("/api/v1/phones/leads", headers=headers).json()
+    assert len(sheet) == 60
+    assert all(r["state"] == "WA" for r in sheet)
+    assert client.get("/api/v1/phones/stats", headers=headers).json()["mine"] == 60
+
+    tx = client.post("/api/v1/phones/search", headers=headers,
+                     json={"state": "TX", "target": 40}).json()
+    assert tx["served_from_pool"] == 40
+    sheet = client.get("/api/v1/phones/leads", headers=headers).json()
+    assert len(sheet) == 100
+    assert {r["state"] for r in sheet} == {"WA", "TX"}
+    assert client.get("/api/v1/phones/stats", headers=headers).json()["mine"] == 100
+
+    # The hidden 60 are still exclusive: the 60 batchy took NEVER come back —
+    # someone else gets only the 40 WA numbers that were still fresh.
+    other = make_user("other", category="phones")
+    other_headers = {"Authorization": f"Bearer {_token(other)}"}
+    gone = client.post("/api/v1/phones/search", headers=other_headers,
+                       json={"state": "WA", "target": 100}).json()
+    assert gone["served_from_pool"] == 40
+
+
+def test_admin_claims_report_shows_visible_and_hidden(
+    client, make_user, tmp_stores,
+):
+    """The admin's eyes on hidden stock: per user, what the sheet shows vs
+    what a newer search pushed off-screen (still owned, still invisible)."""
+    _, phone_store = tmp_stores
+    phone_store.add([{
+        "phone": f"503111{i:04d}", "person_name": "SMITH, JANE",
+        "business_name": f"Acme {i}", "trade_category": "GENERAL",
+        "city": "SEATTLE", "state": "WA", "source": "wa_license",
+        "license_status": "ACTIVE", "source_url": "https://data.wa.gov/x",
+    } for i in range(1, 6)])
+    user = make_user("alice", category="phones")
+    headers = {"Authorization": f"Bearer {_token(user)}"}
+
+    client.post("/api/v1/phones/search", headers=headers,
+                json={"state": "WA", "target": 3}).json()
+    client.post("/api/v1/phones/search", headers=headers,
+                json={"state": "WA", "target": 5}).json()
+
+    admin = make_user("root", is_admin=True)
+    r = client.get("/api/v1/admin/phones/claims-report",
+                   headers={"Authorization": f"Bearer {_token(admin)}"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total_claims"] == 5      # 3 first batch + 2 second batch
+    assert body["total_hidden"] == 0
+    row = next(u for u in body["by_user"] if u["user_id"] == user.id)
+    assert row["visible"] == 5
+    assert row["hidden"] == 0
+
+    # Non-admin is locked out of the report.
+    alice = client.get("/api/v1/admin/phones/claims-report",
+                       headers=headers)
+    assert alice.status_code == 403
 
 
 def test_search_target_cap_for_users(client, make_user):

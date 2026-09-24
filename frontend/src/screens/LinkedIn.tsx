@@ -103,7 +103,7 @@ export default function LinkedIn() {
   const showMine = !result || result.leads.length === 0;
 
   return (
-    <div className="max-w-6xl mx-auto px-6 py-8 space-y-6">
+    <div className="workspace-page space-y-6">
       <PageHeader
         eyebrow="LinkedIn"
         title="LinkedIn Profiles"
@@ -113,7 +113,7 @@ export default function LinkedIn() {
       {/* Search form */}
       <form
         onSubmit={runSearch}
-        className="bg-[#0D1017] border border-white/5 rounded-xl p-5 space-y-4"
+        className="ui-panel bg-[#0D1017] border border-white/5 rounded-xl p-5 space-y-4"
       >
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <div>
@@ -192,7 +192,7 @@ export default function LinkedIn() {
 
       {/* Honest serve telemetry — pool-only, so a shortfall is stated plainly */}
       {result && (
-        <div className="bg-[#0D1017] border border-white/5 rounded-xl px-4 py-3 flex flex-wrap gap-x-6 gap-y-1.5 text-[12.5px] text-slate-400">
+        <div className="ui-panel bg-[#0D1017] border border-white/5 rounded-xl px-4 py-3 flex flex-wrap gap-x-6 gap-y-1.5 text-[12.5px] text-slate-400">
           <span>
             <span className="text-white font-medium">{result.leads.length}</span> lead
             {result.leads.length === 1 ? "" : "s"} served
@@ -208,7 +208,7 @@ export default function LinkedIn() {
       )}
 
       {/* Results / my leads */}
-      <div className="bg-[#0D1017] border border-white/5 rounded-xl overflow-hidden">
+      <div className="ui-panel bg-[#0D1017] border border-white/5 rounded-xl overflow-hidden">
         <div className="flex items-center justify-between px-4 py-3 border-b border-white/5">
           <div className="flex items-center gap-2 text-[13.5px] font-medium text-white">
             <BriefcaseIcon className="w-4 h-4 text-indigo-400" />

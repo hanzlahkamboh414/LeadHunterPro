@@ -524,14 +524,14 @@ export default function Leads() {
   }, [rec, folder, tag, date, src, bound, minScore, q]);
 
   return (
-    <div className="px-8 py-7 max-w-7xl">
-      <div className="flex items-center justify-between flex-wrap gap-3">
+    <div className="workspace-page companies-page">
+      <div className="directory-heading flex items-center justify-between flex-wrap gap-3">
         <PageHeader
-          eyebrow="LeadHunter Pro"
+          eyebrow="Company workspace"
           title={q ? `Results for "${params.get("q")}"` : "Companies"}
-          subtitle="Researched companies with a bound decision-maker and a buying-window score."
+          subtitle="Explore your research, review the evidence and prioritize your next conversation."
         />
-        <div className="flex items-center gap-2">
+        <div className="directory-actions flex flex-wrap items-center gap-2">
           {selected.size > 0 && (
             <button
               onClick={exportSelected}
@@ -603,11 +603,9 @@ export default function Leads() {
         </div>
       )}
 
-      {/* Places chip bar — the folder/tag surface as ONE row above the table
-          (Inbox · All · 📁 per folder · # per tag), so no left rail steals data
-          width. Create/rename/delete live in the ⚙ Manage dropdown on the
-          right — a clean single-row filter, not a sidebar. */}
-      <div className="mt-5 flex flex-wrap items-center gap-1.5">
+      <section className="company-library" aria-label="Company folders and tags">
+      <div className="directory-section-heading"><h2>Your collections</h2><span>Organize companies by folder or tag</span></div>
+      <div className="collection-row flex flex-wrap items-center gap-1.5">
         <PlaceChip
           active={folder === "" && !tag && !date}
           icon={<Inbox className="w-3.5 h-3.5" />}
@@ -624,7 +622,10 @@ export default function Leads() {
         >
           All <span className="font-semibold">{catalog?.total ?? 0}</span>
         </PlaceChip>
-        {folderList.length > 0 && <span className="mx-1 h-4 w-px bg-white/10" />}
+      </div>
+      <div className="collection-row flex flex-wrap items-center gap-1.5">
+        <span className="collection-label">Folders</span>
+        {folderList.length === 0 && <span className="text-xs text-slate-500">No folders yet</span>}
         {folderList.map((f) => (
           <PlaceChip
             key={f.name}
@@ -636,7 +637,10 @@ export default function Leads() {
             {f.name} <span className="font-semibold">{f.count}</span>
           </PlaceChip>
         ))}
-        {globalTags.length > 0 && <span className="mx-1 h-4 w-px bg-white/10" />}
+      </div>
+      <div className="collection-row flex flex-wrap items-center gap-1.5">
+        <span className="collection-label">Tags</span>
+        {globalTags.length === 0 && <span className="text-xs text-slate-500">No tags yet</span>}
         {globalTags.map((t) => (
           <PlaceChip
             key={t}
@@ -666,6 +670,7 @@ export default function Leads() {
           />
         </div>
       </div>
+      </section>
           {junkNote && (
             <p className="mt-3 text-[12.5px] text-emerald-300 bg-emerald-500/10 rounded-lg px-3 py-2">
               {junkNote}
@@ -724,7 +729,9 @@ export default function Leads() {
       ) : null}
 
       {/* Filters */}
-      <div className="mt-4 mb-4 flex flex-wrap items-end gap-3">
+      <section className="company-filters" aria-label="Company filters">
+      <div className="directory-section-heading"><h2>Refine your view</h2><span>Find the companies that matter now</span></div>
+      <div className="filter-grid">
         <Filter>
           <span className={labelCls}>Recommendation</span>
           <Select
@@ -827,6 +834,7 @@ export default function Leads() {
           </button>
         )}
       </div>
+      </section>
 
       {isError && (
         <p className="text-[13px] text-rose-300 bg-rose-500/10 rounded-lg px-3 py-2">
@@ -886,12 +894,13 @@ export default function Leads() {
         </div>
       ) : (
         <>
-        <div className="overflow-x-auto rounded-xl border border-white/5">
-          <table className="w-full text-[13.5px]">
+        <div className="directory-results-heading"><div><h2>Company directory</h2><span>{leads.length.toLocaleString()} loaded of {totalLeads.toLocaleString()} matching companies</span></div><p>Open a company to review its research · Scroll across for more details</p></div>
+        <div className="company-table-scroll overflow-x-auto rounded-xl border border-white/5" tabIndex={0} role="region" aria-label="Company directory, scroll horizontally for all columns">
+          <table className="company-table w-full text-[13.5px]">
             <thead>
               <tr className="bg-white/[0.02] text-left text-[12px] uppercase tracking-wide text-slate-500">
                 <th className="px-4 py-3 font-medium w-10">
-                  <button onClick={toggleSelectAll} className="flex items-center justify-center">
+                  <button onClick={toggleSelectAll} aria-label="Select all loaded companies" aria-pressed={selected.size === leads.length && leads.length > 0} className="flex items-center justify-center">
                     {selected.size === leads.length && leads.length > 0 ? (
                       <CheckSquare className="w-4 h-4 text-indigo-400" />
                     ) : (
@@ -946,6 +955,8 @@ export default function Leads() {
                   >
                     <td className="px-4 py-3">
                       <button
+                        aria-label={`Select ${l.company || l.email}`}
+                        aria-pressed={isChecked}
                         onClick={(e) => {
                           e.stopPropagation();
                           toggleSelect(l.email);
@@ -964,6 +975,7 @@ export default function Leads() {
                         isLast ? "border-indigo-400" : "border-transparent"
                       }`}
                     >
+                      <div className="company-identity"><span className="company-monogram" aria-hidden="true">{(l.company || l.email).slice(0, 2).toUpperCase()}</span><div className="min-w-0">
                       <div className="flex items-center gap-1.5 font-medium text-white">
                         {isLast ? (
                           <span
@@ -982,7 +994,7 @@ export default function Leads() {
                             </span>
                           )
                         )}
-                        <span className="truncate">{l.company || "—"}</span>
+                        <span className="truncate" title={l.company || l.email}>{l.company || "—"}</span>
                       </div>
                       <div className="truncate text-[12px] text-slate-500">{l.email}</div>
                       {l.source && (
@@ -990,6 +1002,7 @@ export default function Leads() {
                           🔍 {l.source}
                         </span>
                       )}
+                      </div></div>
                     </td>
                     <td className="px-4 py-3">
                       <div className="text-slate-200">{l.person || "—"}</div>
@@ -1109,7 +1122,7 @@ export default function Leads() {
                         )}
                         {l.reason && (
                           <span className="mt-0.5 inline-block text-[11px] text-indigo-400 hover:underline">
-                            {expanded ? "▲ chhupao" : "▼ poora reason"}
+                            {expanded ? "Hide research" : "Review research"}
                           </span>
                         )}
                       </button>
@@ -1352,7 +1365,7 @@ function StatMini({
         : tint === "indigo"
           ? "bg-indigo-500/15 text-indigo-400"
           : "bg-slate-500/15 text-slate-400";
-  const cls = `rounded-xl border p-4 text-left transition-colors ${
+  const cls = `company-stat rounded-xl border p-4 text-left transition-colors ${
     onClick ? "cursor-pointer hover:bg-white/[0.04]" : ""
   } ${active ? "border-indigo-500/50 bg-indigo-500/[0.08]" : "border-white/5 bg-white/[0.02]"}`;
   const body = (
@@ -1368,7 +1381,7 @@ function StatMini({
     </>
   );
   return onClick ? (
-    <button type="button" onClick={onClick} className={cls}>
+    <button type="button" onClick={onClick} aria-pressed={active} className={cls}>
       {body}
     </button>
   ) : (
@@ -1393,6 +1406,7 @@ function PlaceChip({
     <button
       onClick={onClick}
       title={title}
+      aria-pressed={active}
       className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-[12.5px] transition-colors ${
         active
           ? "border-indigo-500/50 bg-indigo-500/20 text-indigo-100"

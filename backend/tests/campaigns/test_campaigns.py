@@ -29,7 +29,13 @@ from app.lead_research.models import CompanyProfile, LeadDossier, PersonFindings
 from app.lead_research.service import LeadResearchStore
 from app.main import app
 
-NOW = datetime(2026, 9, 13, 4, 0, 0, tzinfo=timezone.utc)  # a fixed "now"
+#: The suite's stable "now" for this run. It must NOT be a frozen literal
+#: date: the API endpoints (test-send, resume, the open pixel) read the REAL
+#: clock, so a hardcoded past date makes fixture tokens look expired, past
+#: start_at look already-started and post-send grace windows never match —
+#: a time-bomb that detonates the day after it's written. Everything below
+#: uses NOW relatively (NOW ± timedelta), never as a literal.
+NOW = datetime.now(timezone.utc).replace(microsecond=0)
 
 
 def _dossier(email: str, company: str = "Acme Corp",

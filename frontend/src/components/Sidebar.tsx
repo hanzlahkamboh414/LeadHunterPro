@@ -1,4 +1,5 @@
-import { NavLink } from "react-router-dom";
+import { useEffect, useRef, useState } from "react";
+import { NavLink, useLocation } from "react-router-dom";
 import {
   LayoutGrid,
   Building2,
@@ -12,8 +13,12 @@ import {
   Phone,
   Briefcase,
   Mail,
+  Menu,
+  X,
+  ArrowUpRight,
 } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
+import { canSeeEmails, canSeePhones } from "../lib/verticals";
 
 // Nav items map to REAL, functional screens backed by the Leads API.
 // Items with no backend data source (emails, pipeline, analytics…) are
@@ -39,16 +44,27 @@ const NAV = [
 // P3: the Phones vertical is category-gated (phones | both accounts, admin,
 // and open-site mode where everyone runs as the shared "both" account).
 // Shared with App.tsx so the route gate and the nav gate agree.
-export function canSeePhones(category?: string | null, isAdmin?: boolean, userExists?: boolean): boolean {
-  if (!userExists) return true; // open-site mode (no session)
-  return Boolean(isAdmin) || category === "phones" || category === "both";
-}
-
 export default function Sidebar() {
   const { user, logout } = useAuth();
+  const [open, setOpen] = useState(false);
+  const drawer = useRef<HTMLDialogElement>(null);
+  const location = useLocation();
+  useEffect(() => { setOpen(false); }, [location.pathname, location.search]);
+  useEffect(() => {
+    if (open) drawer.current?.showModal();
+    else drawer.current?.close();
+  }, [open]);
+  useEffect(() => {
+    const desktop = window.matchMedia("(min-width: 1024px)");
+    const closeOnDesktop = () => { if (desktop.matches) setOpen(false); };
+    desktop.addEventListener("change", closeOnDesktop);
+    return () => desktop.removeEventListener("change", closeOnDesktop);
+  }, []);
 
-  const visibleNav = NAV.filter(
-    (item) => !item.adminOnly || user?.is_admin,
+  const emailsVisible = canSeeEmails(user?.category, user?.is_admin, Boolean(user));
+  const visibleNav = NAV.filter((item) =>
+    (!item.adminOnly || user?.is_admin) &&
+    (emailsVisible || item.to === "/admin"),
   );
 
   // Phones sits after Research — the two lead-hunting entry points together.
@@ -57,15 +73,14 @@ export default function Sidebar() {
     nav.splice(2, 0, { to: "/phones", label: "Phones", icon: Phone, end: false, adminOnly: false });
   }
 
-  return (
+  function rail(mobile = false) { return (
     // The shell is now a fixed viewport height, so the rail scrolls on its own
     // rather than clipping its nav on a short window.
-    <aside className="w-64 shrink-0 overflow-y-auto border-r border-white/5 bg-[#0D1017] flex flex-col justify-between px-4 py-5">
+    <aside className={`workspace-sidebar ${mobile ? "mobile-rail" : "desktop-rail"}`} aria-label="Workspace navigation">
       <div>
-        <div className="flex items-center gap-2.5 px-2 pb-6">
-          <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center relative shrink-0">
+        <div className="flex items-center gap-2.5 px-2 pb-6 pt-1">
+          <div className="brand-mark w-9 h-9 rounded-xl flex items-center justify-center relative shrink-0">
             <Search className="w-4 h-4 text-white" strokeWidth={2.5} />
-            <span className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-emerald-400 ring-2 ring-[#0D1017]" />
           </div>
           <div className="leading-tight">
             <div className="text-[15px] font-semibold text-white">
@@ -75,16 +90,24 @@ export default function Sidebar() {
               AI Sales Intelligence
             </div>
           </div>
+          {mobile && <button type="button" className="ml-auto p-2 text-slate-400" aria-label="Close navigation" onClick={() => setOpen(false)}><X className="w-4 h-4" /></button>}
         </div>
+
+        {emailsVisible && <NavLink to="/research" className="sidebar-create"><Search size={16} /> New research <ArrowUpRight size={15} className="ml-auto" /></NavLink>}
 
         <nav className="flex flex-col gap-0.5">
           {nav.map(({ to, label, icon: Icon, end }) => (
+            <div key={to}>
+            {to === "/" && <p className="nav-section-label">Discover</p>}
+            {to === "/leads" && <p className="nav-section-label">Workspace</p>}
+            {to === "/campaigns" && <p className="nav-section-label">Engage</p>}
+            {to === "/history" && <p className="nav-section-label">Manage</p>}
             <NavLink
               key={to}
               to={to}
               end={end}
               className={({ isActive }) =>
-                `flex items-center gap-3 px-3 py-2.5 rounded-lg text-[13.5px] transition-colors text-left ${
+                `sidebar-link flex items-center gap-3 px-3 py-2.5 rounded-lg text-[13.5px] transition-colors text-left ${
                   isActive
                     ? "bg-indigo-500/15 text-white"
                     : "text-slate-400 hover:bg-white/[0.04] hover:text-slate-200"
@@ -94,6 +117,7 @@ export default function Sidebar() {
               <Icon className="w-[17px] h-[17px] shrink-0" strokeWidth={1.75} />
               {label}
             </NavLink>
+            </div>
           ))}
         </nav>
       </div>
@@ -118,17 +142,15 @@ export default function Sidebar() {
           </div>
         )}
 
-        <div className="rounded-lg bg-white/[0.03] border border-white/5 px-3 py-2.5 flex items-center justify-between text-[12px] text-slate-400">
-          <span className="flex items-center gap-1.5">
-            <ShieldCheck className="w-3.5 h-3.5" />
-            System status
-          </span>
-          <span className="flex items-center gap-1.5 text-emerald-400">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-            Operational
-          </span>
-        </div>
+        <div className="sidebar-footer"><span>LeadHunter Pro</span><span>Sales intelligence</span></div>
       </div>
     </aside>
-  );
+  ); }
+  return <>
+    {rail()}
+    <button type="button" className="mobile-nav-toggle" aria-label="Open navigation" aria-expanded={open} onClick={() => setOpen(true)}><Menu size={21} /></button>
+    <dialog ref={drawer} className="navigation-drawer" aria-label="Navigation" onCancel={() => setOpen(false)} onClick={(event) => { if (event.target === drawer.current) setOpen(false); }}>
+      {rail(true)}
+    </dialog>
+  </>;
 }

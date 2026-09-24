@@ -2,16 +2,65 @@
 
 > **THE single source of truth for project sequencing.** If this file and any other
 > doc disagree, this file wins — update it here, nowhere else.
-> Last updated: **2026-09-04** · Branch: `master` @ **`c497d48`** (Sprint2.6 Inc11 + D7-B + D12 + D1) + **Sprint2.7 committed**: the new **AI Lead Research pipeline** (`app/lead_research/`) that finally produced qualified leads, and the **Leads API + job runner** (Stage 3) that ships it over HTTP.
+> Last updated: **2026-09-24**. The **Current national board-coverage roadmap** immediately below is authoritative for this workstream. Sections 0–9 preserve the older engine/frontend plan as historical context; their 2026-09-04 status statements are not current deployment evidence.
 >
 > **How to use this file (so it never needs re-reviewing):**
-> Read §0 for "what do I do next". Every stage has a hard **EXIT GATE** — do not
+> Read the current board-coverage roadmap for "what do I do next". Every stage has a hard **EXIT GATE** — do not
 > start the next stage until the current gate provably passes. Update the status
 > column when a gate passes; never delete history.
 
 ---
 
-## 0. NEXT ACTION (read this first)
+## Current national board-coverage roadmap — 2026-09-24
+
+### Executive status
+
+**Objective:** Continuously stock the maximum usable public contractor phone data from US licensing authorities. A source is counted as coverage only after its actual download, schema, phone yield, jurisdiction, repeatability, and refresh path are verified. Publicly listed, paid/request-only, blocked, and stocked are different statuses.
+
+**Current release boundary:** MN/NY raw imports, the business-name + evidenced-trade serve gate, and the CPU/session readiness patch are **deployed on the test server** at `13.53.71.141` (2026-09-24). Production was not touched. Nationwide automatic board coverage is **not complete**. A raw phone record is inventory, not a usable lead, until its business and trade are verified; person name remains optional by the D41 decision.
+
+| Area | Status | Verified evidence / next gate |
+|---|---|---|
+| SODA phone pagination | Deployed on test server | Persistent per-source/trade/state cursor, stable `:id` order, wrap after end; long-run sweep throughput still needs measurement. |
+| Daily quota and rotation | Deployed on test server | Service startup logged `phone quota unlimited`; effective interval 120 seconds and explicit pair cooldown 1,800 seconds remain. Fair sweep/maximum daily volume still need observation. |
+| Daily source scout | Running on test server, **partial** | First pass completed; durable `source_discovery` next due `2026-09-25T02:06:24+00:00`. It seeded 51 boards but found no fresh catalog candidate (one fetched was already known), so AI was not called on this pass. V2 path probing + AI adapter queue is not yet called by the daily worker. |
+| MN official registration CSV | **Test deployed and stocked** | 21,371 source rows; 14,887 new state-only MN numbers. Second fetch was checksum-unchanged and inserted 0. Windows `cp1252`, `Issued` + `Contractor Registration`, no inferred trade. |
+| NYC DCWP Home Improvement Contractor | **Test deployed and stocked** | 12,983 active source rows on server; 12,908 new state-only NY numbers. Second fetch was checksum-unchanged and inserted 0. NYC-only jurisdiction, no inferred GC trade. |
+| Phone lead quality gate | **Test deployed** | Raw rows without business name or evidenced canonical trade are retained but cannot be claimed or counted as available. Company-site verification requires matching business + phone + independent trade text. MN has an official exact name + phone + ZIP license join. No person identity is invented. |
+| MN official master-license join | **Test deployed and live verified** | 462 raw MN businesses promoted using an issued *business* license and exact identity; 7 conflicting-trade matches rejected; immediate repeat promoted 0. After the join, MN had 14,350 raw-pending and 474 available qualified records (including other sources). |
+| CPU hotspot | **Fixed on test server; historical stall still needs long-run confirmation** | A live 30-second profiler sample attributed 398/650 samples to `CompanyExtractor._extract_contact` phone matching. Its optional free-standing `\s*` made a no-phone whitespace run quadratic: 8k spaces took ~5.6s locally before the fix. The revised pattern permits unbounded whitespace only after a real `tel:`/`phone:` label; 32k spaces took 0.0057s on the deployed server. Normal labeled/unlabeled phone extraction has regression tests. The exact stack of the earlier hours-long stuck thread was not captured, so linking that incident to this hotspot is an inference. |
+| Phone-search session lifecycle | **Fixed on test server; short observation passed** | The phone enrichment lane used `asyncio.run` without closing loop-bound search-provider sessions, matching repeated `Unclosed client session` warnings. Success and provider-error tests now prove `close()` runs in the same event loop before it exits. Across the first 10 post-deploy minutes, 7 trade passes completed and the journal recorded 0 such warnings (8 were seen in a 10-minute pre-deploy sample). |
+| Regression gate | Passed locally | Latest backend suite **4,020 passed, 0 failed, 28 deselected**; targeted Ruff clean. One prior full run had an unrelated plan-holder test polluted by concurrent background search calls (4,017 pass/1 fail); it passed isolated (1/1), in its file (40/40), and in the latest full run. Test-server public health and 32k-space benchmark passed after deployment. |
+
+### Source register — truth before coverage claims
+
+| Jurisdiction / source | Access | Phone/trade decision | Current disposition |
+|---|---|---|---|
+| MN DLI contractor registrations | [Official nightly CSV](https://secure.doli.state.mn.us/ccld/data/MNDLILicRegCertExport_Contractor_Registrations.csv) and [official master ZIP](https://secure.doli.state.mn.us/ccld/data/MNDLILicRegCertExport.zip) | Registration file has no reliable trade column. An exact issued business-license match (name + phone + ZIP) can supply a canonical subtype; ambiguous matches stay raw. Mailing `St` is not license jurisdiction. | 14,887 imported raw at first sync; official join promoted 462 on test, then 0 on repeat. Daily join follows MN raw sync. Remaining raw inventory is not served. |
+| NYC DCWP Home Improvement Contractor | [Official public dataset](https://data.cityofnewyork.us/Business/Legally-Operating-Businesses/w7w3-xahh) | Active HIC + public contact phone; HIC does not prove a canonical GC trade. City-scoped source, not statewide NY coverage. | 12,908 imported raw at first sync; 12,908 still raw-pending on test after the quality gate. Company-site evidence may promote records, but no blanket GC classification. |
+| AZ ROC | [Official posting list](https://roc.az.gov/posting-list) lists a free active-contractor CSV. | Scripted CSV fetch returned HTTP 403 challenge; a webpage HTTP 200 is not a verified file fetch. | **Blocked/pending** reliable public machine-readable path; not promoted. |
+| NC General Contractors Board | [Official FAQ](https://www.nclbgc.org/faq-consumers/) says full mailing list costs $25. | Free individual lookup is not a free full roster. | **Paid/request-only pending**; no purchase or fabricated feed. |
+| SC LLR / LA LSLBC | Official licensee-list / roster request routes. | No verified free bulk phone feed in this milestone. | **Request-only pending**; do not count as coverage. |
+| CA CSLB | Public portal advertises free master file and phone fields. | Existing classification pilot, but scripted master-list POST was rejected by the site; browser workflow is separate. | **Access investigation pending**; do not count a master import as live. |
+| CT HIC / GA roster / OR BCD file | Official data or roster layouts inspected. | Examined exports omit phone fields. | **Not phone-capable from those exports**; revisit only if another verified public feed appears. |
+
+### Delivery sequence and exit gates
+
+| Milestone | Work | Exit gate / proof | Status |
+|---|---|---|---|
+| **A. Test-server rollout of verified imports** | Confirm the user-supplied test host; inspect deployed file hashes, service/config, DB location and backup; transfer only the reviewed dependency closure; restart the single service. | Healthy service; effective scout/harvester settings confirmed; MN/NY runs logged; positive new rows or honest dedupe counts; second run does not inflate counts; no pre-existing data lost; rollback copy retained. | **Complete on test server 2026-09-24.** Nine scoped files deployed; pre-deploy code/three DB backups in `/opt/leadhunter/deploy-backups/board-20260924/`; public `/api/v1/health` healthy. Phone pool 15,524 → 43,319 exactly (+27,795); second sync inserted 0; daily scout pass succeeded and next due persisted. |
+| **B. Production-grade V2 discovery loop** | Make daily scout consume prioritized board seeds, discover actual downloadable endpoints (not homepages), probe access paths, sample bytes, write AI adapters from real columns, validate, probation-test, promote, retry transient failures, and alert on stalls/AI credit errors. | Hermetic 403/404/200 and schema tests; one new official source passes end-to-end on test server; daily re-run and restart resume; no false source promotion. | **Pending**; this is the main nationwide automation gap. |
+| **C. Expand verified free coverage** | Work state/agency-by-agency by demand and phone yield; use existing SODA/bulk seams, retain trade-less imports as raw stock, and use explicit municipal scope. | Each source has official URL, license jurisdiction, lawful/free access, row count, usable-phone sample, active-status rule, idempotent daily refresh, and test-server stocked proof. A usable-lead claim additionally requires business + evidenced trade. | **Ongoing**; MN + NYC local pilots done, remaining states not promised. |
+| **D. Operational throughput and honesty** | Measure daily fetched/valid/new/duplicate/suppressed by source; confirm unlimited phone quota is effective on server; alert on no-progress, schema drift and stale boards; show municipal-only vs statewide coverage. | Seven consecutive daily reports with source-level numbers, no silent stalls, and a measured maximum/day rather than an assumed 20k/day. | **Pending server rollout and telemetry**. |
+| **E. Production promotion** | After test-server evidence, repeat a scoped deploy with rollback and smoke tests on the production host. | Source hashes, service health, DB backup, API/UI smoke, and overnight import verified; no unrelated worktree files shipped. | **Not authorized by this test-server request**. |
+
+**Operational watch item:** The test server's process was still marked active but stopped answering health requests after logs ended at 04:31 UTC on 2026-09-24. One thread consumed ~100% CPU for hours; a controlled stop required the service's 90-second timeout. The exact stack of that thread was lost when it stopped, so its cause is **not proven**. A subsequent live profiler capture found and isolated a quadratic phone-regex CPU hotspot in the discovery producer; that proven hotspot is fixed on test, with public health and a bounded 32k-space benchmark passing. Phone enrichment's loop-bound provider-session leak was also fixed and tested. The first 10 post-deploy minutes stayed healthy through 7 trade passes with 0 `Unclosed client session` warnings. **Production-promotion gate:** at least 3 hours of normal email/phone lanes with responsive health checks, no sustained single-thread 100% CPU, and no material recurrence of session warnings; the original stall began about 1h40 after startup, so a 10-minute smoke cannot prove non-recurrence. The pre-fix backups are in `/opt/leadhunter/deploy-backups/cpu-regex-20260924/`.
+
+**Next action:** Complete sustained test-server health/CPU/session-warning observation before production promotion. Milestone B remains the next board-coverage engineering unit: wire and verify the V2 AI/path-probing source-discovery loop before claiming autonomous nationwide coverage. More states can be added afterward against Milestone C's evidence gate. This roadmap is not permission to purchase rosters, bypass site challenges, deploy to the main server, or assign invented trades. No additional phase approval is required for in-scope free public sources; every gate still needs evidence. **This turn stops after the CPU/session readiness unit.**
+
+---
+
+## 0. HISTORICAL NEXT ACTION (2026-09-04; superseded for board coverage)
 
 | | |
 |---|---|
@@ -394,6 +443,12 @@ with alerting, inside a known cost envelope.
 | **D3** | TDLR source is DNS-blocked on this machine; AGC Texas has no public directory. | Two planned Texas sources unusable locally. | founder |
 | **D4** | Persistence choice for M6 (existing `database.py` store vs. new). | Must reuse per §14; confirm what `database.py` already provides. | to verify |
 | **D5** | Commit cadence — Inc11 + NARA still uncommitted. | Work at risk until committed. | founder |
+| **D36** | **Municipal-only coverage is flagged in the scout's gap calculation but NOT in the search response.** A state whose only source is a city portal (e.g. Chicago for IL) still reports as covered in the search `coverage` metadata, so the user is told a state is stocked when no state-level board covers it. Cut from the municipal-gate phase on purpose to keep that phase one-file small. | Users read "covered" as "stocked". | founder |
+| **D37** | **The accuracy audit measures scout sources only — hand connectors are a NAMED blind spot.** A hand connector has no `sources` row (`wa_license`/`tdlr_license` live in `known_sources`) and no lifecycle to demote, so nothing automated can act on its accuracy. TDLR is the concrete case: our own docstring says its `owner_name` is often the BUSINESS name ("INFINITE POWER LLC"), and the live yield table reads `tdlr_license \| electrical \| TX` = 197 trials / 5 working. Fix is a human mapping decision, not automation. | TX phone leads can carry a company name in the person field. | founder |
+| **D38** | **`catalog.py` `_PHONE_HINTS` = ("phone", "telephone") lets a metric-named phone column past the PRE-filter**, spending one of `MAX_CANDIDATES` slots on a candidate the verifier is guaranteed to reject. The verifier is the authority (2026-09-23 shape gate), so this is a wasted slot, not a correctness hole. | One fewer real candidate per pass. | unassigned |
+| **D39** | **The verifier's `sample_with_phone` detail string prints "(< 5)" on PASS as well as FAIL** ("50 rows with a phone (< 5)"), so a passing check reads like a failing one in the verdict log. Cosmetic but it is the line an operator reads when deciding whether a source is healthy. | Verdict log misreads. | unassigned |
+| **D40** | **Ruff B007 in `app/source_scout/adapter_writer.py:435`** (unused loop variable) — another workstream's file; the shape-gate phase deliberately did not touch it. | Lint gate red on that file. | unassigned |
+| **D41** | **B — requiring `person_name` for a phone lead is a ONE-WAY DOOR (4 call sites) and is parked.** The live evidence for the trade-off: `montgomery_md_builders` fails probation repeatedly with "rows list company/LLC names in the applicant field". Blocked on product-owner/sales confirmation that phone-without-person leads are usable. Do not implement before that answer. | Blocks the person-quality decision. | founder / product owner |
 
 ---
 

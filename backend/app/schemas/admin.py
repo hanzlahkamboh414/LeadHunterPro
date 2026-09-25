@@ -182,6 +182,23 @@ class AdminUserCreateIn(BaseModel):
     email: str = Field(..., min_length=5, max_length=100)
     password: str = Field(..., min_length=4, max_length=100)
     name: str = Field("", max_length=100)
+    tenant_id: str | None = Field(None, max_length=100)
+
+
+class AdminTenantCreateIn(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+
+
+class AdminTenantOut(BaseModel):
+    id: str
+    name: str
+    member_count: int
+
+
+class AdminTenantMemberOut(BaseModel):
+    user_id: str
+    username: str
+    role: str
 
 
 class AdminPasswordIn(BaseModel):

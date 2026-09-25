@@ -57,15 +57,16 @@ import os
 import re
 import sqlite3
 import threading
+from app.core.db_paths import operational_db_path
 
 logger = logging.getLogger(__name__)
 
 #: Dispatched runs before a zero-working dork is considered proven useless.
 MIN_TRIALS = 12
 
-_DEFAULT_DB = os.path.join(
+_DEFAULT_DB = operational_db_path(os.path.join(
     os.path.dirname(__file__), "..", "..", "output", "lead_research.db"
-)
+))
 
 #: Serializes writes across concurrent research threads / discovery passes.
 _write_lock = threading.Lock()

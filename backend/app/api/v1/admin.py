@@ -9,10 +9,11 @@ Security rules (CLAUDE.md §6 — honest, never leaky):
 * ``require_api_key`` guards the whole router (M12 baseline).
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 import logging
+import sqlite3
 from datetime import datetime, timezone
 
 from app.admin_read import (
@@ -23,7 +24,7 @@ from app.admin_read import (
 from app.api.v1.leads import _job_source_by_email, _store, require_api_key
 from app.auth.activity import get_activity
 from app.auth import dependencies as auth_deps
-from app.auth.dependencies import require_admin
+from app.auth.dependencies import multi_tenant_enabled, require_admin
 from app.auth.models import User, UserStore
 from app.core.runtime_keys import KNOWN_KEY_NAMES, RuntimeKeyStore
 from app.lead_research.service import _email_hash
@@ -48,6 +49,9 @@ from app.schemas.admin import (
     AdminPhoneClaimsOut,
     AdminPurgeOut,
     AdminSearchCacheOut,
+    AdminTenantCreateIn,
+    AdminTenantMemberOut,
+    AdminTenantOut,
     AdminUserCreateIn,
     AdminUserOut,
     AdminUsersOut,
@@ -346,16 +350,94 @@ def leads_delete(body: AdminLeadScopeIn) -> AdminLeadActionOut:
 # User management — accounts + the activity log.
 # ---------------------------------------------------------------------------
 
+def _require_tenant_mode() -> None:
+    if not multi_tenant_enabled():
+        raise HTTPException(status_code=404, detail="Tenant mode is not enabled")
+
+
+def _admin_phone_tenant(
+    request: Request, admin: User = Depends(require_admin),
+) -> str | None:
+    """Select only a workspace the admin currently owns or administers."""
+    if not multi_tenant_enabled():
+        return None
+    context = auth_deps.get_tenant_context(request, admin)
+    if context.role not in ("owner", "admin"):
+        raise HTTPException(status_code=403, detail="Tenant admin access required")
+    return context.tenant_id
+
+
+@router.get("/tenants", response_model=list[AdminTenantOut])
+def list_tenants() -> list[AdminTenantOut]:
+    """Platform-admin tenant registry and current user counts."""
+    _require_tenant_mode()
+    return [AdminTenantOut(**row) for row in _user_store().list_tenants()]
+
+
+@router.post("/tenants", response_model=AdminTenantOut, status_code=201)
+def create_tenant(body: AdminTenantCreateIn, admin: User = Depends(require_admin)) -> AdminTenantOut:
+    """Create a tenant with the platform admin as its first owner."""
+    _require_tenant_mode()
+    store = _user_store()
+    try:
+        tenant_id = store.create_tenant(body.name, owner_user_id=admin.id)
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="Tenant name already exists") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return AdminTenantOut(id=tenant_id, name=body.name.strip(), member_count=1)
+
+
+@router.get("/tenants/{tenant_id}/members", response_model=list[AdminTenantMemberOut])
+def tenant_members(tenant_id: str) -> list[AdminTenantMemberOut]:
+    _require_tenant_mode()
+    members = _user_store().list_tenant_members(tenant_id)
+    if members is None:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    return [AdminTenantMemberOut(**member) for member in members]
+
+
+@router.put("/tenants/{tenant_id}/members/{user_id}")
+def add_tenant_member(tenant_id: str, user_id: str) -> dict:
+    """Assign an existing account as a member, never silently change its role."""
+    _require_tenant_mode()
+    store = _user_store()
+    existing_role = store.tenant_role(user_id, tenant_id)
+    if existing_role not in (None, "member"):
+        raise HTTPException(status_code=409, detail="Existing role cannot be changed here")
+    try:
+        store.grant_membership(tenant_id, user_id, "member")
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"tenant_id": tenant_id, "user_id": user_id, "role": "member"}
+
+
+@router.delete("/tenants/{tenant_id}/members/{user_id}")
+def remove_tenant_member(tenant_id: str, user_id: str) -> dict:
+    _require_tenant_mode()
+    try:
+        removed = _user_store().revoke_membership(tenant_id, user_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not removed:
+        raise HTTPException(status_code=404, detail="Tenant membership not found")
+    return {"removed": True}
+
 @router.get("/users", response_model=AdminUsersOut)
-def users() -> AdminUsersOut:
+def users(tenant_id: str | None = Depends(_admin_phone_tenant)) -> AdminUsersOut:
     """Every account (no password data ever leaves the backend)."""
     all_users = _user_store().list_all()
+    if tenant_id is not None:
+        all_users = [
+            user for user in all_users
+            if _user_store().tenant_role(user.id, tenant_id) is not None
+        ]
     from app.api.v1.phones import _store as phone_store
     return AdminUsersOut(
         total=len(all_users),
         users=[AdminUserOut(
-            **u.to_dict(), phone_daily_limit=phone_store.daily_limit(u.id),
-            phone_daily_used=phone_store.daily_usage(u.id),
+            **u.to_dict(), phone_daily_limit=phone_store.daily_limit(u.id, tenant_id),
+            phone_daily_used=phone_store.daily_usage(u.id, tenant_id),
         ) for u in all_users],
     )
 
@@ -363,13 +445,17 @@ def users() -> AdminUsersOut:
 @router.post("/users", response_model=AdminUserOut, status_code=201)
 def create_user(body: AdminUserCreateIn) -> AdminUserOut:
     """Admin creates an account directly (username + email + password)."""
+    if multi_tenant_enabled() and not (body.tenant_id or "").strip():
+        raise HTTPException(status_code=422, detail="tenant_id is required")
     try:
         user = _user_store().create(
             username=body.username, email=body.email,
             password=body.password, name=body.name,
+            tenant_id=body.tenant_id if multi_tenant_enabled() else None,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        status = 422 if str(exc) == "tenant does not exist" else 409
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
     logger.info("POST /admin/users -> created %s", user.username)
     get_activity().record(user.id, user.username, "signup", detail="admin-created")
     return AdminUserOut(**user.to_dict())
@@ -417,6 +503,11 @@ def set_auth_mode(body: AdminAuthModeIn, admin: User = Depends(require_admin)) -
     through the secret URL + password gate. ON = the classic login wall.
     """
     from app.auth.settings import get_settings
+
+    if multi_tenant_enabled() and not body.enabled:
+        raise HTTPException(
+            status_code=409, detail="Login cannot be disabled in multi-tenant mode"
+        )
 
     get_settings().set_auth_enabled(body.enabled)
     detail = "login auth ON" if body.enabled else "login auth OFF (open site)"
@@ -541,12 +632,15 @@ def set_harvester_lane(
 
 @router.get("/activity", response_model=AdminActivityOut)
 def activity(limit: int = Query(default=200, ge=1, le=1000),
-             user_id: str = Query(default="")) -> AdminActivityOut:
+             user_id: str = Query(default=""),
+             tenant_id: str | None = Depends(_admin_phone_tenant)) -> AdminActivityOut:
     """Recent user activity (login / logout / signup / search), newest first.
 
     ``user_id`` filters to one account's history — the per-user drill-down.
     """
-    rows = get_activity().list(limit=limit, user_id=user_id)
+    rows = get_activity().list(
+        limit=limit, user_id=user_id, tenant_id=tenant_id,
+    )
     return AdminActivityOut(
         total=len(rows),
         activity=[AdminActivityRow(**r) for r in rows],
@@ -593,6 +687,7 @@ def user_leads_summary(user_id: str) -> AdminUserSummaryOut:
 @router.get("/phones/claims-report", response_model=AdminPhoneClaimsOut)
 def phone_claims_report(
     admin: User = Depends(require_admin),
+    tenant_id: str | None = Depends(_admin_phone_tenant),
 ) -> AdminPhoneClaimsOut:
     """Phone claims report — per user visible vs hidden claims.
 
@@ -603,7 +698,7 @@ def phone_claims_report(
     """
     from app.api.v1.phones import _store as phone_store
 
-    rows = phone_store.claim_visibility_by_user()
+    rows = phone_store.claim_visibility_by_user(tenant_id=tenant_id)
     umap = {}
     try:
         for u in _user_store().list_all():
@@ -634,28 +729,40 @@ class PhoneDailyLimitIn(BaseModel):
 
 
 @router.put("/users/{user_id}/phone-limit")
-def set_user_phone_limit(user_id: str, body: PhoneDailyLimitIn) -> dict:
+def set_user_phone_limit(
+    user_id: str, body: PhoneDailyLimitIn,
+    tenant_id: str | None = Depends(_admin_phone_tenant),
+) -> dict:
     """Admin override of one account's daily phone-claim allowance."""
     target = _user_store().get_by_id(user_id)
     if target is None:
         raise HTTPException(status_code=404, detail="User not found")
+    if tenant_id is not None and _user_store().tenant_role(user_id, tenant_id) is None:
+        raise HTTPException(status_code=404, detail="User not in selected tenant")
     from app.api.v1.phones import _store as phone_store
-    phone_store.set_daily_limit(user_id, body.daily_limit)
+    phone_store.set_daily_limit(user_id, body.daily_limit, tenant_id=tenant_id)
     logger.info("PUT /admin/users/%s/phone-limit -> %d", user_id, body.daily_limit)
-    return {"user_id": user_id, "daily_limit": phone_store.daily_limit(user_id)}
+    return {
+        "user_id": user_id,
+        "daily_limit": phone_store.daily_limit(user_id, tenant_id),
+    }
 
 
 @router.get("/phones/wrong")
-def wrong_phone_archive() -> list[dict]:
+def wrong_phone_archive(
+    tenant_id: str | None = Depends(_admin_phone_tenant),
+) -> list[dict]:
     """Admin view of suppressed wrong numbers, retained indefinitely."""
     from app.api.v1.phones import _store as phone_store
-    return phone_store.list_wrong_archive()
+    return phone_store.list_wrong_archive(tenant_id=tenant_id)
 
 
 @router.post("/phones/wrong/{archive_id}/recover")
-def recover_wrong_phone(archive_id: int) -> dict:
+def recover_wrong_phone(
+    archive_id: int, tenant_id: str | None = Depends(_admin_phone_tenant),
+) -> dict:
     from app.api.v1.phones import _store as phone_store
-    if not phone_store.recover_wrong_number(archive_id):
+    if not phone_store.recover_wrong_number(archive_id, tenant_id=tenant_id):
         raise HTTPException(status_code=404, detail="Wrong-number archive row unavailable")
     logger.info("POST /admin/phones/wrong/%s/recover", archive_id)
     return {"recovered": True}

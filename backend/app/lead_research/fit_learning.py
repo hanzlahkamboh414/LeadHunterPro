@@ -46,6 +46,7 @@ import os
 import re
 import sqlite3
 import threading
+from app.core.db_paths import operational_db_path
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +63,7 @@ MIN_TRIALS = 12
 PROP_MIN_TRIALS = 40
 PROP_MAX_KEEP_RATE = 0.15
 
-_DEFAULT_DB = os.path.join(os.path.dirname(__file__), "..", "..", "output", "lead_research.db")
+_DEFAULT_DB = operational_db_path(os.path.join(os.path.dirname(__file__), "..", "..", "output", "lead_research.db"))
 
 #: Serializes writes across concurrent research threads (LEADS_CONCURRENCY).
 _write_lock = threading.Lock()

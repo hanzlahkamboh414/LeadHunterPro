@@ -36,6 +36,7 @@ import logging
 import os
 import sqlite3
 import threading
+from app.core.db_paths import operational_db_path
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 
@@ -199,10 +200,10 @@ class HarvesterLaneStore:
 
     def __init__(self, db_path: str | None = None) -> None:
         if db_path is None:
-            db_path = os.path.join(
+            db_path = operational_db_path(os.path.join(
                 os.path.dirname(__file__), "..", "..", "output",
                 "harvester.db",
-            )
+            ))
         self._db_path = db_path
         self._lock = threading.Lock()
         self._init_db()

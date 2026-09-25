@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 
 import bcrypt
 
+from app.core.db_paths import operational_db_path
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
@@ -56,9 +58,9 @@ class UserStore:
 
     def __init__(self, db_path: str | None = None) -> None:
         if db_path is None:
-            db_path = os.path.join(
+            db_path = operational_db_path(os.path.join(
                 os.path.dirname(__file__), "..", "..", "output", "users.db"
-            )
+            ))
         self._db_path = db_path
         self._init_db()
 
@@ -115,7 +117,8 @@ class UserStore:
         )
 
     def create(self, username: str, email: str, password: str,
-               name: str = "", category: str = "both") -> User:
+               name: str = "", category: str = "both",
+               tenant_id: str | None = None) -> User:
         """Create a new user. Raises ValueError on duplicate username/email.
 
         ``name`` is the display name (shown in the topbar). Empty -> derived
@@ -124,6 +127,9 @@ class UserStore:
         ``category`` is the signup vertical answer: "emails" | "phones" |
         "both" (default) — anything else falls back to "both" so a bad
         client payload can never lock an account out of everything.
+
+        When ``tenant_id`` is supplied, the account and its first membership
+        commit together; an invalid tenant leaves no orphaned account.
         """
         pw_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
         if category not in ("emails", "phones", "both"):
@@ -146,13 +152,27 @@ class UserStore:
                 (user.id, user.username, user.email, user.password_hash,
                  int(user.is_admin), user.created_at, user.name, user.category),
             )
+            if tenant_id is not None:
+                if conn.execute(
+                    "SELECT 1 FROM tenants WHERE id = ?", (tenant_id,)
+                ).fetchone() is None:
+                    raise ValueError("tenant does not exist")
+                conn.execute(
+                    "INSERT INTO tenant_memberships (tenant_id, user_id, role) "
+                    "VALUES (?, ?, 'member')",
+                    (tenant_id, user.id),
+                )
             conn.commit()
         except sqlite3.IntegrityError as e:
+            conn.rollback()
             if "username" in str(e):
                 raise ValueError("Username already taken") from e
             if "email" in str(e):
                 raise ValueError("Email already registered") from e
             raise ValueError("User already exists") from e
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
         return user
@@ -205,6 +225,139 @@ class UserStore:
         conn.close()
         return [self._row_to_user(row) for row in rows]
 
+    def create_tenant(self, name: str, owner_user_id: str | None = None) -> str:
+        """Create an organization and, when supplied, its first owner atomically."""
+        clean_name = name.strip()
+        if not clean_name:
+            raise ValueError("tenant name is required")
+        tenant_id = uuid.uuid4().hex
+        with sqlite3.connect(self._db_path) as conn:
+            if owner_user_id is not None and conn.execute(
+                "SELECT 1 FROM users WHERE id = ? AND is_admin = 1",
+                (owner_user_id,),
+            ).fetchone() is None:
+                raise ValueError("platform admin does not exist")
+            conn.execute(
+                "INSERT INTO tenants (id, name) VALUES (?, ?)",
+                (tenant_id, clean_name),
+            )
+            if owner_user_id is not None:
+                conn.execute(
+                    "INSERT INTO tenant_memberships (tenant_id, user_id, role) "
+                    "VALUES (?, ?, 'owner')",
+                    (tenant_id, owner_user_id),
+                )
+        return tenant_id
+
+    def list_tenants(self) -> list[dict[str, str | int]]:
+        """Platform-admin registry view with live membership counts."""
+        with sqlite3.connect(self._db_path) as conn:
+            rows = conn.execute(
+                "SELECT t.id, t.name, COUNT(m.user_id) FROM tenants t "
+                "LEFT JOIN tenant_memberships m ON m.tenant_id = t.id "
+                "GROUP BY t.id, t.name ORDER BY t.name, t.id"
+            ).fetchall()
+        return [
+            {"id": row[0], "name": row[1], "member_count": row[2]}
+            for row in rows
+        ]
+
+    def list_tenant_members(self, tenant_id: str) -> list[dict[str, str]] | None:
+        """Return None for an unknown tenant, including an empty known one."""
+        with sqlite3.connect(self._db_path) as conn:
+            if conn.execute(
+                "SELECT 1 FROM tenants WHERE id = ?", (tenant_id,)
+            ).fetchone() is None:
+                return None
+            rows = conn.execute(
+                "SELECT u.id, u.username, m.role FROM tenant_memberships m "
+                "JOIN users u ON u.id = m.user_id WHERE m.tenant_id = ? "
+                "ORDER BY CASE m.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 "
+                "ELSE 2 END, u.username, u.id",
+                (tenant_id,),
+            ).fetchall()
+        return [
+            {"user_id": row[0], "username": row[1], "role": row[2]}
+            for row in rows
+        ]
+
+    def tenant_role(self, user_id: str, tenant_id: str) -> str | None:
+        """Read current membership on every authorization check, not from JWT."""
+        with sqlite3.connect(self._db_path) as conn:
+            row = conn.execute(
+                "SELECT role FROM tenant_memberships "
+                "WHERE tenant_id = ? AND user_id = ?",
+                (tenant_id, user_id),
+            ).fetchone()
+        return row[0] if row else None
+
+    def list_user_tenants(self, user_id: str) -> list[dict[str, str]]:
+        """List only this user's current workspaces for the tenant selector."""
+        with sqlite3.connect(self._db_path) as conn:
+            rows = conn.execute(
+                "SELECT t.id, t.name, m.role FROM tenant_memberships m "
+                "JOIN tenants t ON t.id = m.tenant_id "
+                "WHERE m.user_id = ? ORDER BY t.name, t.id",
+                (user_id,),
+            ).fetchall()
+        return [{"id": row[0], "name": row[1], "role": row[2]} for row in rows]
+
+    def grant_membership(self, tenant_id: str, user_id: str, role: str) -> None:
+        """Assign a user to one tenant without changing any other membership."""
+        if role not in ("owner", "admin", "member"):
+            raise ValueError("invalid tenant role")
+        with sqlite3.connect(self._db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute(
+                "SELECT 1 FROM tenants WHERE id = ?", (tenant_id,)
+            ).fetchone() is None:
+                raise ValueError("tenant does not exist")
+            if conn.execute(
+                "SELECT 1 FROM users WHERE id = ?", (user_id,)
+            ).fetchone() is None:
+                raise ValueError("user does not exist")
+            current = conn.execute(
+                "SELECT role FROM tenant_memberships "
+                "WHERE tenant_id = ? AND user_id = ?",
+                (tenant_id, user_id),
+            ).fetchone()
+            if current == ("owner",) and role != "owner" and conn.execute(
+                "SELECT COUNT(*) FROM tenant_memberships "
+                "WHERE tenant_id = ? AND role = 'owner'",
+                (tenant_id,),
+            ).fetchone()[0] <= 1:
+                raise ValueError("cannot remove the last tenant owner")
+            conn.execute(
+                "INSERT INTO tenant_memberships (tenant_id, user_id, role) "
+                "VALUES (?, ?, ?) ON CONFLICT(tenant_id, user_id) "
+                "DO UPDATE SET role = excluded.role",
+                (tenant_id, user_id, role),
+            )
+
+    def revoke_membership(self, tenant_id: str, user_id: str) -> bool:
+        """Remove access immediately; existing JWTs confer no membership."""
+        with sqlite3.connect(self._db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            role = conn.execute(
+                "SELECT role FROM tenant_memberships "
+                "WHERE tenant_id = ? AND user_id = ?",
+                (tenant_id, user_id),
+            ).fetchone()
+            if role is None:
+                return False
+            if role[0] == "owner" and conn.execute(
+                "SELECT COUNT(*) FROM tenant_memberships "
+                "WHERE tenant_id = ? AND role = 'owner'",
+                (tenant_id,),
+            ).fetchone()[0] <= 1:
+                raise ValueError("cannot remove the last tenant owner")
+            result = conn.execute(
+                "DELETE FROM tenant_memberships "
+                "WHERE tenant_id = ? AND user_id = ?",
+                (tenant_id, user_id),
+            )
+        return result.rowcount > 0
+
     def delete(self, user_id: str) -> bool:
         """Delete a user account (row only — dossiers/jobs keep their user_id
         and stay visible to the admin panel; the user's JWT dies on the next
@@ -242,6 +395,30 @@ class UserStore:
         conn.commit()
         conn.close()
         return self.get_by_username(username) or user
+
+    def require_secure_platform_admin(self) -> None:
+        """Fail tenant-mode startup if bootstrap identity is missing or unsafe."""
+        admins = [user for user in self.list_all() if user.is_admin]
+        if not admins:
+            raise RuntimeError("multi-tenant mode requires a platform admin")
+        for admin in admins:
+            try:
+                uses_factory_password = bcrypt.checkpw(
+                    b"223344", admin.password_hash.encode()
+                )
+            except ValueError as exc:
+                raise RuntimeError("platform admin password hash is invalid") from exc
+            if uses_factory_password:
+                raise RuntimeError("platform admin factory password must be rotated")
+        try:
+            first_tenant_owners = any(
+                self.tenant_role(admin.id, "the-best-estimators-llc") == "owner"
+                for admin in admins
+            )
+        except sqlite3.Error as exc:
+            raise RuntimeError("tenant registry is unavailable") from exc
+        if not first_tenant_owners:
+            raise RuntimeError("first tenant has no platform-admin owner")
 
     def ensure_shared(self) -> User:
         """The account token-less visitors run as when login auth is OFF.

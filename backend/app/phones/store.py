@@ -46,6 +46,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.discovery.tradefold import normalize_trade
+from app.core.db_paths import operational_db_path
 
 _INIT_LOCK = threading.RLock()
 
@@ -57,6 +58,40 @@ _INIT_LOCK = threading.RLock()
 VOICEMAIL_COOLDOWN_DAYS: dict[int, int] = {1: 14, 2: 30, 3: 60}
 MAX_VOICEMAILS = 4
 DEFAULT_DAILY_PHONE_LIMIT = 600
+
+
+def _claim_tenant(tenant_id: str | None) -> str | None:
+    """Require explicit claim scope in tenant mode; keep legacy calls intact."""
+    if tenant_id is not None and not tenant_id.strip():
+        raise ValueError("tenant_id must not be blank")
+    if (
+        os.environ.get("LEADHUNTER_MULTI_TENANT_ENABLED") == "1"
+        and tenant_id is None
+    ):
+        raise ValueError("tenant_id is required in multi-tenant mode")
+    return tenant_id
+
+
+def _private_tenant(
+    conn: sqlite3.Connection, table: str, tenant_id: str | None,
+) -> str | None:
+    """Resolve the sole legacy workspace on a tagged copy; never guess among many."""
+    tenant_id = _claim_tenant(tenant_id)
+    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if "tenant_id" not in columns:
+        if tenant_id is not None:
+            raise ValueError(f"{table} is not tenant-ready")
+        return None
+    if tenant_id is not None:
+        if conn.execute(
+            "SELECT 1 FROM tenants WHERE id = ?", (tenant_id,),
+        ).fetchone() is None:
+            raise ValueError("unknown tenant_id for private phone operation")
+        return tenant_id
+    tenants = conn.execute("SELECT id FROM tenants LIMIT 2").fetchall()
+    if len(tenants) != 1:
+        raise ValueError("ambiguous legacy tenant for private phone write")
+    return str(tenants[0][0])
 
 
 def _now() -> str:
@@ -114,9 +149,9 @@ class PhoneLeadsStore:
 
     def __init__(self, db_path: str | None = None) -> None:
         if db_path is None:
-            db_path = os.path.join(
+            db_path = operational_db_path(os.path.join(
                 os.path.dirname(__file__), "..", "..", "output", "phone_leads.db"
-            )
+            ))
         self._db_path = db_path
         self._init_db()
 
@@ -414,50 +449,83 @@ class PhoneLeadsStore:
         )
         return f" AND NOT ({conds})"
 
-    def daily_limit(self, user_id: str) -> int:
+    @staticmethod
+    def _owned_phone_frag() -> str:
+        """A claimed number is unavailable across all matching raw rows."""
+        return (
+            " AND NOT EXISTS ("
+            "SELECT 1 FROM phone_lead_owners o "
+            "JOIN phone_leads owned ON owned.id = o.lead_id "
+            "WHERE owned.phone = l.phone)"
+        )
+
+    def daily_limit(self, user_id: str, tenant_id: str | None = None) -> int:
         conn = self._conn()
         try:
+            tenant_id = _private_tenant(conn, "phone_daily_limits", tenant_id)
+            clause = " AND tenant_id = ?" if tenant_id is not None else ""
+            args = (user_id, tenant_id) if tenant_id is not None else (user_id,)
             row = conn.execute(
-                "SELECT daily_limit FROM phone_daily_limits WHERE user_id = ?",
-                (user_id,),
+                f"SELECT daily_limit FROM phone_daily_limits WHERE user_id = ?{clause}",
+                args,
             ).fetchone()
             return int(row[0]) if row else DEFAULT_DAILY_PHONE_LIMIT
         finally:
             conn.close()
 
-    def set_daily_limit(self, user_id: str, limit: int) -> None:
+    def set_daily_limit(
+        self, user_id: str, limit: int, tenant_id: str | None = None,
+    ) -> None:
         if limit < 0 or limit > 5000:
             raise ValueError("daily phone limit must be between 0 and 5000")
         conn = self._conn()
         try:
-            conn.execute(
-                "INSERT INTO phone_daily_limits (user_id, daily_limit) "
-                "VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET "
-                "daily_limit = excluded.daily_limit",
-                (user_id, limit),
-            )
+            tenant_id = _private_tenant(conn, "phone_daily_limits", tenant_id)
+            if tenant_id is None:
+                conn.execute(
+                    "INSERT INTO phone_daily_limits (user_id, daily_limit) "
+                    "VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET "
+                    "daily_limit = excluded.daily_limit",
+                    (user_id, limit),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO phone_daily_limits "
+                    "(tenant_id, user_id, daily_limit) VALUES (?, ?, ?) "
+                    "ON CONFLICT(tenant_id, user_id) DO UPDATE SET "
+                    "daily_limit = excluded.daily_limit",
+                    (tenant_id, user_id, limit),
+                )
             conn.commit()
         finally:
             conn.close()
 
-    def daily_usage(self, user_id: str) -> int:
+    def daily_usage(self, user_id: str, tenant_id: str | None = None) -> int:
+        tenant_id = _claim_tenant(tenant_id)
+        tenant_clause = " AND tenant_id = ?" if tenant_id is not None else ""
+        args = (user_id, _now()[:10])
+        if tenant_id is not None:
+            args += (tenant_id,)
         conn = self._conn()
         try:
             return int(conn.execute(
                 "SELECT COUNT(*) FROM phone_claim_events WHERE user_id = ? "
-                "AND substr(created_at, 1, 10) = ?",
-                (user_id, _now()[:10]),
+                f"AND substr(created_at, 1, 10) = ?{tenant_clause}",
+                args,
             ).fetchone()[0])
         finally:
             conn.close()
 
-    def daily_remaining(self, user_id: str) -> int:
-        return max(0, self.daily_limit(user_id) - self.daily_usage(user_id))
+    def daily_remaining(self, user_id: str, tenant_id: str | None = None) -> int:
+        return max(
+            0, self.daily_limit(user_id, tenant_id) - self.daily_usage(user_id, tenant_id)
+        )
 
     def serve(
         self, trade: str, state: str, city: str, limit: int, user_id: str,
         exclude_ids: list[int] | None = None,
         enforce_quota: bool = True,
+        tenant_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Claim up to ``limit`` UNOWNED leads and stamp ownership.
 
@@ -480,6 +548,7 @@ class PhoneLeadsStore:
         ``exclude_ids`` keeps one run's own earlier serves from re-serving
         the same row (the gap-fill re-serve after a pool serve).
         """
+        tenant_id = _claim_tenant(tenant_id)
         if limit <= 0:
             return []
         frag, args = self._serve_clauses(trade, state, city)
@@ -494,16 +563,23 @@ class PhoneLeadsStore:
             # Lock before counting and claiming: concurrent searches for the
             # same account cannot both spend the same remaining allowance.
             conn.execute("BEGIN IMMEDIATE")
+            tenant_id = _private_tenant(conn, "phone_daily_limits", tenant_id)
             if enforce_quota:
+                limit_clause = " AND tenant_id = ?" if tenant_id is not None else ""
+                limit_args = (user_id, tenant_id) if tenant_id is not None else (user_id,)
                 limit_row = conn.execute(
-                    "SELECT daily_limit FROM phone_daily_limits WHERE user_id = ?",
-                    (user_id,),
+                    "SELECT daily_limit FROM phone_daily_limits "
+                    f"WHERE user_id = ?{limit_clause}", limit_args,
                 ).fetchone()
                 allowance = int(limit_row[0]) if limit_row else DEFAULT_DAILY_PHONE_LIMIT
+                tenant_clause = " AND tenant_id = ?" if tenant_id is not None else ""
+                usage_args = (user_id, _now()[:10])
+                if tenant_id is not None:
+                    usage_args += (tenant_id,)
                 used = int(conn.execute(
                     "SELECT COUNT(*) FROM phone_claim_events WHERE user_id = ? "
-                    "AND substr(created_at, 1, 10) = ?",
-                    (user_id, _now()[:10]),
+                    f"AND substr(created_at, 1, 10) = ?{tenant_clause}",
+                    usage_args,
                 ).fetchone()[0])
                 limit = min(limit, max(0, allowance - used))
             if limit <= 0:
@@ -511,10 +587,13 @@ class PhoneLeadsStore:
                 return []
             cur = conn.execute(
                 f"""
+                WITH eligible AS (
+                    SELECT MIN(l.id) AS id FROM phone_leads l
+                    WHERE 1 = 1{self._owned_phone_frag()}{frag}
+                    GROUP BY l.phone
+                )
                 SELECT l.* FROM phone_leads l
-                WHERE l.id NOT IN (
-                    SELECT lead_id FROM phone_lead_owners
-                ){frag}
+                JOIN eligible e ON e.id = l.id
                 ORDER BY l.id ASC
                 LIMIT ?
                 """,
@@ -528,18 +607,34 @@ class PhoneLeadsStore:
             # sheet reads the latest batch, so one search = one sheet.
             batch = _new_batch()
             for lead in leads:
-                claimed = conn.execute(
-                    "INSERT OR IGNORE INTO phone_lead_owners "
-                    "(lead_id, user_id, created_at, batch_at) "
-                    "VALUES (?, ?, ?, ?)",
-                    (lead["id"], user_id, ts, batch),
-                )
-                if claimed.rowcount:
-                    conn.execute(
-                        "INSERT INTO phone_claim_events "
-                        "(lead_id, user_id, phone, created_at) VALUES (?, ?, ?, ?)",
-                        (lead["id"], user_id, lead["phone"], ts),
+                if tenant_id is None:
+                    claimed = conn.execute(
+                        "INSERT OR IGNORE INTO phone_lead_owners "
+                        "(lead_id, user_id, created_at, batch_at) "
+                        "VALUES (?, ?, ?, ?)",
+                        (lead["id"], user_id, ts, batch),
                     )
+                else:
+                    claimed = conn.execute(
+                        "INSERT OR IGNORE INTO phone_lead_owners "
+                        "(lead_id, user_id, created_at, batch_at, tenant_id) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (lead["id"], user_id, ts, batch, tenant_id),
+                    )
+                if claimed.rowcount:
+                    if tenant_id is None:
+                        conn.execute(
+                            "INSERT INTO phone_claim_events "
+                            "(lead_id, user_id, phone, created_at) VALUES (?, ?, ?, ?)",
+                            (lead["id"], user_id, lead["phone"], ts),
+                        )
+                    else:
+                        conn.execute(
+                            "INSERT INTO phone_claim_events "
+                            "(lead_id, user_id, phone, created_at, tenant_id) "
+                            "VALUES (?, ?, ?, ?, ?)",
+                            (lead["id"], user_id, lead["phone"], ts, tenant_id),
+                        )
             conn.commit()
             return leads
         finally:
@@ -555,10 +650,8 @@ class PhoneLeadsStore:
         try:
             row = conn.execute(
                 f"""
-                SELECT COUNT(*) FROM phone_leads l
-                WHERE l.id NOT IN (
-                    SELECT lead_id FROM phone_lead_owners
-                ){frag}
+                SELECT COUNT(DISTINCT l.phone) FROM phone_leads l
+                WHERE 1 = 1{self._owned_phone_frag()}{frag}
                 """,
                 args,
             ).fetchone()
@@ -579,9 +672,9 @@ class PhoneLeadsStore:
         conn = self._conn()
         try:
             row = conn.execute(
-                "SELECT COUNT(*) FROM phone_leads l WHERE "
+                "SELECT COUNT(DISTINCT l.phone) FROM phone_leads l WHERE "
                 + " AND ".join(clauses)
-                + " AND l.id NOT IN (SELECT lead_id FROM phone_lead_owners)",
+                + self._owned_phone_frag(),
                 args,
             ).fetchone()
             return int(row[0]) if row else 0
@@ -602,12 +695,11 @@ class PhoneLeadsStore:
         try:
             rows = conn.execute(
                 f"""
-                SELECT l.state, COUNT(*) FROM phone_leads l
-                WHERE l.id NOT IN (
-                    SELECT lead_id FROM phone_lead_owners
-                ){self._qualified_frag()}{self._resting_frag()}
+                SELECT l.state, COUNT(DISTINCT l.phone) FROM phone_leads l
+                WHERE 1 = 1{self._owned_phone_frag()}
+                {self._qualified_frag()}{self._resting_frag()}
                 GROUP BY l.state
-                ORDER BY COUNT(*) DESC
+                ORDER BY COUNT(DISTINCT l.phone) DESC
                 """
             ).fetchall()
             return {(r[0] or "").upper(): int(r[1]) for r in rows}
@@ -774,13 +866,17 @@ class PhoneLeadsStore:
     def list_owned(
         self, user_id: str, trade: str = "", state: str = "", city: str = "",
         limit: int = 200,
+        tenant_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Today's still-owned claims across all searches and states (UTC).
 
         A new UTC day starts a blank sheet; previous claims remain exclusive
         and their immutable claim/call history stays queryable by date.
         """
+        tenant_id = _claim_tenant(tenant_id)
         frag, args = self._serve_clauses(trade, state, city)
+        tenant_clause = " AND o.tenant_id = ?" if tenant_id is not None else ""
+        tenant_args = [tenant_id] if tenant_id is not None else []
         conn = self._conn()
         try:
             cur = conn.execute(
@@ -788,11 +884,11 @@ class PhoneLeadsStore:
                 SELECT l.*, o.created_at AS claimed_at FROM phone_leads l
                 JOIN phone_lead_owners o ON o.lead_id = l.id
                 AND o.user_id = ?
-                AND substr(o.created_at, 1, 10) = ?{frag}
+                AND substr(o.created_at, 1, 10) = ?{tenant_clause}{frag}
                 ORDER BY o.created_at DESC, l.id DESC
                 LIMIT ?
                 """,
-                [user_id, _now()[:10], *args, limit],
+                [user_id, _now()[:10], *tenant_args, *args, limit],
             )
             rows = cur.fetchall()
             cols = [d[0] for d in cur.description]
@@ -800,7 +896,9 @@ class PhoneLeadsStore:
         finally:
             conn.close()
 
-    def claim_visibility_by_user(self) -> list[dict[str, Any]]:
+    def claim_visibility_by_user(
+        self, tenant_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         """Admin report — per user: how many claims the sheet SHOWS (their
         latest batch) and how many sit hidden behind it.
 
@@ -811,8 +909,11 @@ class PhoneLeadsStore:
         """
         conn = self._conn()
         try:
+            tenant_id = _private_tenant(conn, "phone_lead_owners", tenant_id)
+            tenant_clause = "WHERE o.tenant_id = ?" if tenant_id is not None else ""
+            args = (_now()[:10], tenant_id) if tenant_id is not None else (_now()[:10],)
             rows = conn.execute(
-                """
+                f"""
                 SELECT o.user_id,
                        COUNT(*) AS total,
                        SUM(CASE WHEN substr(o.created_at, 1, 10) = ?
@@ -820,10 +921,11 @@ class PhoneLeadsStore:
                        MIN(o.created_at) AS first_claimed,
                        MAX(o.created_at) AS last_claimed
                 FROM phone_lead_owners o
+                {tenant_clause}
                 GROUP BY o.user_id
                 ORDER BY total DESC
                 """,
-                (_now()[:10],),
+                args,
             ).fetchall()
             out = []
             for user_id, total, visible, first_seen, last_seen in rows:
@@ -884,45 +986,71 @@ class PhoneLeadsStore:
     @staticmethod
     def _insert_call_event(
         conn: sqlite3.Connection, lead: dict[str, Any], user_id: str,
-        action: str,
+        action: str, tenant_id: str | None = None,
     ) -> dict[str, Any]:
         ts = _now()
-        cur = conn.execute(
-            "INSERT INTO phone_call_events (user_id, lead_id, phone, "
-            "person_name, business_name, trade, state, action, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (user_id, lead["id"], lead["phone"], lead.get("person_name", ""),
-             lead.get("business_name", ""), lead.get("trade", ""),
-             lead.get("state", ""), action, ts),
+        fields = (
+            user_id, lead["id"], lead["phone"], lead.get("person_name", ""),
+            lead.get("business_name", ""), lead.get("trade", ""),
+            lead.get("state", ""), action, ts,
         )
+        if tenant_id is None:
+            cur = conn.execute(
+                "INSERT INTO phone_call_events (user_id, lead_id, phone, "
+                "person_name, business_name, trade, state, action, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                fields,
+            )
+        else:
+            cur = conn.execute(
+                "INSERT INTO phone_call_events (user_id, lead_id, phone, "
+                "person_name, business_name, trade, state, action, created_at, "
+                "tenant_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (*fields, tenant_id),
+            )
         return {"id": cur.lastrowid, "action": action, "created_at": ts}
 
     def record_call_event(
         self, lead_id: int, user_id: str, action: str,
+        tenant_id: str | None = None,
     ) -> dict[str, Any] | None:
         """Owner-only dial/copy or non-terminal call outcome."""
+        tenant_id = _claim_tenant(tenant_id)
         if action not in ("dialed", "copied", "not_interested", "follow_up", "no_answer"):
             raise ValueError("unknown phone call action")
-        lead = self._owned_lead(lead_id, user_id)
-        if lead is None:
-            return None
         conn = self._conn()
         try:
-            result = self._insert_call_event(conn, lead, user_id, action)
+            conn.execute("BEGIN IMMEDIATE")
+            lead = self._owned_lead(lead_id, user_id, tenant_id, conn=conn)
+            if lead is None:
+                conn.rollback()
+                return None
+            tenant_id = _private_tenant(conn, "phone_call_events", tenant_id)
+            result = self._insert_call_event(
+                conn, lead, user_id, action, tenant_id
+            )
             conn.commit()
             return result
         finally:
             conn.close()
 
-    def call_activity(self, user_id: str, day: str = "") -> dict[str, Any]:
+    def call_activity(
+        self, user_id: str, day: str = "", tenant_id: str | None = None,
+    ) -> dict[str, Any]:
         """One UTC day's immutable call history and last outcome per phone."""
+        tenant_id = _claim_tenant(tenant_id)
         day = day or _now()[:10]
+        tenant_clause = " AND tenant_id = ?" if tenant_id is not None else ""
+        args = (user_id, day)
+        if tenant_id is not None:
+            args += (tenant_id,)
         conn = self._conn()
         try:
             cur = conn.execute(
                 "SELECT * FROM phone_call_events WHERE user_id = ? "
-                "AND substr(created_at, 1, 10) = ? ORDER BY id ASC",
-                (user_id, day),
+                f"AND substr(created_at, 1, 10) = ?{tenant_clause} "
+                "ORDER BY id ASC",
+                args,
             )
             cols = [d[0] for d in cur.description]
             events = [dict(zip(cols, row, strict=True)) for row in cur.fetchall()]
@@ -942,33 +1070,52 @@ class PhoneLeadsStore:
             "events": list(reversed(events)),
         }
 
-    def call_days(self, user_id: str) -> list[str]:
+    def call_days(
+        self, user_id: str, tenant_id: str | None = None,
+    ) -> list[str]:
+        tenant_id = _claim_tenant(tenant_id)
+        tenant_clause = " AND tenant_id = ?" if tenant_id is not None else ""
+        args = (user_id, tenant_id) if tenant_id is not None else (user_id,)
         conn = self._conn()
         try:
             return [row[0] for row in conn.execute(
                 "SELECT DISTINCT substr(created_at, 1, 10) AS day "
-                "FROM phone_call_events WHERE user_id = ? "
-                "ORDER BY day DESC", (user_id,),
+                f"FROM phone_call_events WHERE user_id = ?{tenant_clause} "
+                "ORDER BY day DESC", args,
             ).fetchall()]
         finally:
             conn.close()
 
     def mark_wrong_number(
         self, lead_id: int, user_id: str,
+        tenant_id: str | None = None,
     ) -> dict[str, Any] | None:
         """Suppress a bad number, remove it from the sheet, retain archive."""
-        lead = self._owned_lead(lead_id, user_id)
-        if lead is None:
-            return None
         conn = self._conn()
         try:
             conn.execute("BEGIN IMMEDIATE")
-            self._insert_call_event(conn, lead, user_id, "wrong_number")
-            cur = conn.execute(
-                "INSERT INTO phone_wrong_archive "
-                "(user_id, phone, snapshot_json, created_at) VALUES (?, ?, ?, ?)",
-                (user_id, lead["phone"], json.dumps(lead), _now()),
+            lead = self._owned_lead(lead_id, user_id, tenant_id, conn=conn)
+            if lead is None:
+                conn.rollback()
+                return None
+            tenant_id = _private_tenant(conn, "phone_wrong_archive", tenant_id)
+            self._insert_call_event(
+                conn, lead, user_id, "wrong_number", tenant_id,
             )
+            if tenant_id is None:
+                cur = conn.execute(
+                    "INSERT INTO phone_wrong_archive "
+                    "(user_id, phone, snapshot_json, created_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (user_id, lead["phone"], json.dumps(lead), _now()),
+                )
+            else:
+                cur = conn.execute(
+                    "INSERT INTO phone_wrong_archive "
+                    "(user_id, phone, snapshot_json, created_at, tenant_id) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (user_id, lead["phone"], json.dumps(lead), _now(), tenant_id),
+                )
             conn.execute(
                 "DELETE FROM phone_lead_owners WHERE lead_id IN "
                 "(SELECT id FROM phone_leads WHERE phone = ?)",
@@ -984,26 +1131,36 @@ class PhoneLeadsStore:
         finally:
             conn.close()
 
-    def list_wrong_archive(self) -> list[dict[str, Any]]:
+    def list_wrong_archive(
+        self, tenant_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         conn = self._conn()
         try:
+            tenant_id = _private_tenant(conn, "phone_wrong_archive", tenant_id)
+            clause = " AND tenant_id = ?" if tenant_id is not None else ""
+            args = (tenant_id,) if tenant_id is not None else ()
             cur = conn.execute(
                 "SELECT id, user_id, phone, created_at FROM phone_wrong_archive "
-                "WHERE recovered_at = '' ORDER BY id DESC"
+                f"WHERE recovered_at = ''{clause} ORDER BY id DESC", args,
             )
             cols = [d[0] for d in cur.description]
             return [dict(zip(cols, row, strict=True)) for row in cur.fetchall()]
         finally:
             conn.close()
 
-    def recover_wrong_number(self, archive_id: int) -> bool:
+    def recover_wrong_number(
+        self, archive_id: int, tenant_id: str | None = None,
+    ) -> bool:
         """Admin-only caller: restore exact archived row to the shared pool."""
         conn = self._conn()
         try:
             conn.execute("BEGIN IMMEDIATE")
+            tenant_id = _private_tenant(conn, "phone_wrong_archive", tenant_id)
+            clause = " AND tenant_id = ?" if tenant_id is not None else ""
+            args = (archive_id, tenant_id) if tenant_id is not None else (archive_id,)
             row = conn.execute(
                 "SELECT phone, snapshot_json FROM phone_wrong_archive "
-                "WHERE id = ? AND recovered_at = ''", (archive_id,),
+                f"WHERE id = ? AND recovered_at = ''{clause}", args,
             ).fetchone()
             if row is None:
                 conn.rollback()
@@ -1032,26 +1189,35 @@ class PhoneLeadsStore:
                 conn.rollback()
                 return False
             conn.execute("DELETE FROM phone_suppressions WHERE phone = ?", (row[0],))
+            update_args = (_now(), archive_id, tenant_id) if tenant_id is not None else (_now(), archive_id)
             conn.execute(
-                "UPDATE phone_wrong_archive SET recovered_at = ? WHERE id = ?",
-                (_now(), archive_id),
+                f"UPDATE phone_wrong_archive SET recovered_at = ? WHERE id = ?{clause}",
+                update_args,
             )
             conn.commit()
             return True
         finally:
             conn.close()
 
-    def _owned_lead(self, lead_id: int, user_id: str) -> dict[str, Any] | None:
+    def _owned_lead(
+        self, lead_id: int, user_id: str, tenant_id: str | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any] | None:
         """The lead row when ``user_id`` owns it (claimed at serve), else
         None. Every calling-workflow action is owner-only: a number another
         user owns is not on this user's sheet, so there is nothing to act
         on."""
-        conn = self._conn()
+        tenant_id = _claim_tenant(tenant_id)
+        tenant_clause = " AND tenant_id = ?" if tenant_id is not None else ""
+        args = (lead_id, user_id, tenant_id) if tenant_id is not None else (lead_id, user_id)
+        own_conn = conn is None
+        if conn is None:
+            conn = self._conn()
         try:
             row = conn.execute(
                 "SELECT 1 FROM phone_lead_owners "
-                "WHERE lead_id = ? AND user_id = ?",
-                (lead_id, user_id),
+                f"WHERE lead_id = ? AND user_id = ?{tenant_clause}",
+                args,
             ).fetchone()
             if row is None:
                 return None
@@ -1062,46 +1228,83 @@ class PhoneLeadsStore:
             r = cur.fetchone()
             return dict(zip(cols, r, strict=True)) if r else None
         finally:
-            conn.close()
+            if own_conn:
+                conn.close()
 
-    def _retire(self, lead_id: int, phone: str, reason: str) -> None:
+    def _retire(
+        self, lead_id: int, phone: str, reason: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> None:
         """Remove a lead from the pool FOR GOOD and suppress the number —
         the row, its owner stamps, everything except the users' SAVED
         snapshots (those live in phone_user_leads keyed by phone). A later
         harvest can never re-add the number (phone_suppressions)."""
-        conn = self._conn()
+        own_conn = conn is None
+        if conn is None:
+            conn = self._conn()
         try:
-            conn.execute("DELETE FROM phone_leads WHERE id = ?", (lead_id,))
+            if conn.execute(
+                "SELECT 1 FROM phone_leads WHERE id = ? AND phone = ?",
+                (lead_id, phone),
+            ).fetchone() is None:
+                return
             conn.execute(
-                "DELETE FROM phone_lead_owners WHERE lead_id = ?", (lead_id,)
+                "DELETE FROM phone_lead_owners WHERE lead_id IN "
+                "(SELECT id FROM phone_leads WHERE phone = ?)", (phone,)
             )
+            conn.execute("DELETE FROM phone_leads WHERE phone = ?", (phone,))
             conn.execute(
                 "INSERT OR IGNORE INTO phone_suppressions (phone, reason, "
                 "created_at) VALUES (?, ?, ?)",
                 (phone, reason, _now()),
             )
-            conn.commit()
+            if own_conn:
+                conn.commit()
         finally:
-            conn.close()
+            if own_conn:
+                conn.close()
 
     def _save_snapshot(
         self, lead: dict[str, Any], user_id: str, kind: str, note: str = "",
+        tenant_id: str | None = None,
+        conn: sqlite3.Connection | None = None,
     ) -> int:
         """Insert-or-refresh the user's saved copy of a lead (kind 'lead' or
         'contact'). The snapshot is keyed by (user_id, phone, kind) so it
         survives the pool row's retirement; a re-save refreshes the fields
         (enrichment may have found the email since the first save)."""
         ts = _now()
-        conn = self._conn()
+        own_conn = conn is None
+        if conn is None:
+            conn = self._conn()
         try:
-            cur = conn.execute(
+            tenant_id = _private_tenant(conn, "phone_user_leads", tenant_id)
+            columns = (
+                "user_id", "phone", "person_name", "business_name", "trade",
+                "city", "state", "source", "source_url", "license_status",
+                "email", "email_source", "website", "kind", "note",
+                "created_at", "updated_at",
+            )
+            values = (
+                user_id, lead["phone"], lead.get("person_name", ""),
+                lead.get("business_name", ""), lead.get("trade", ""),
+                lead.get("city", ""), lead.get("state", ""),
+                lead.get("source", ""), lead.get("source_url", ""),
+                lead.get("license_status", ""), lead.get("email", ""),
+                lead.get("email_source", ""), lead.get("website", ""),
+                kind, note, ts, ts,
+            )
+            conflict = "user_id, phone, kind"
+            if tenant_id is not None:
+                columns = ("tenant_id", *columns)
+                values = (tenant_id, *values)
+                conflict = "tenant_id, user_id, phone, kind"
+            names = ", ".join(columns)
+            marks = ", ".join("?" for _ in columns)
+            conn.execute(
+                f"INSERT INTO phone_user_leads ({names}) VALUES ({marks}) "
+                f"ON CONFLICT({conflict}) DO UPDATE SET "
                 """
-                INSERT INTO phone_user_leads
-                    (user_id, phone, person_name, business_name, trade, city,
-                     state, source, source_url, license_status, email,
-                     email_source, website, kind, note, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(user_id, phone, kind) DO UPDATE SET
                     person_name = excluded.person_name,
                     business_name = excluded.business_name,
                     trade = excluded.trade,
@@ -1115,56 +1318,66 @@ class PhoneLeadsStore:
                     website = excluded.website,
                     updated_at = excluded.updated_at
                 """,
-                (
-                    user_id, lead["phone"], lead.get("person_name", ""),
-                    lead.get("business_name", ""), lead.get("trade", ""),
-                    lead.get("city", ""), lead.get("state", ""),
-                    lead.get("source", ""), lead.get("source_url", ""),
-                    lead.get("license_status", ""), lead.get("email", ""),
-                    lead.get("email_source", ""), lead.get("website", ""),
-                    kind, note, ts, ts,
-                ),
+                values,
             )
-            conn.commit()
+            if own_conn:
+                conn.commit()
+            tenant_clause = " AND tenant_id = ?" if tenant_id is not None else ""
+            args = (user_id, lead["phone"], kind)
+            if tenant_id is not None:
+                args += (tenant_id,)
             row = conn.execute(
                 "SELECT id FROM phone_user_leads WHERE user_id = ? "
-                "AND phone = ? AND kind = ?",
-                (user_id, lead["phone"], kind),
+                f"AND phone = ? AND kind = ?{tenant_clause}", args,
             ).fetchone()
             return int(row[0]) if row else 0
         finally:
-            conn.close()
+            if own_conn:
+                conn.close()
 
-    def mark_lead(self, lead_id: int, user_id: str) -> dict[str, Any] | None:
+    def mark_lead(
+        self, lead_id: int, user_id: str, tenant_id: str | None = None,
+    ) -> dict[str, Any] | None:
         """✓Lead: the person said "project doonga" on the call — the number
         becomes THIS user's lead permanently. The snapshot saves to their
         account, the pool row RETIRES (a lead number is never served to
         another user), and the number is suppressed against re-harvest.
         None when the user doesn't own the lead."""
-        lead = self._owned_lead(lead_id, user_id)
-        if lead is None:
-            return None
-        saved_id = self._save_snapshot(lead, user_id, kind="lead")
         conn = self._conn()
         try:
-            self._insert_call_event(conn, lead, user_id, "lead")
+            conn.execute("BEGIN IMMEDIATE")
+            lead = self._owned_lead(lead_id, user_id, tenant_id, conn=conn)
+            if lead is None:
+                conn.rollback()
+                return None
+            tenant_id = _private_tenant(conn, "phone_call_events", tenant_id)
+            saved_id = self._save_snapshot(
+                lead, user_id, kind="lead", tenant_id=tenant_id, conn=conn,
+            )
+            self._insert_call_event(conn, lead, user_id, "lead", tenant_id)
+            self._retire(lead_id, lead["phone"], "claimed_lead", conn=conn)
             conn.commit()
+            return {"saved_id": saved_id, "retired": True}
         finally:
             conn.close()
-        self._retire(lead_id, lead["phone"], "claimed_lead")
-        return {"saved_id": saved_id, "retired": True}
 
-    def store_contact(self, lead_id: int, user_id: str) -> dict[str, Any] | None:
+    def store_contact(
+        self, lead_id: int, user_id: str, tenant_id: str | None = None,
+    ) -> dict[str, Any] | None:
         """💾Store: keep the contact in the account (not a lead — just a
         number worth keeping). The row STAYS claimed: it remains on the
         user's call sheet and never serves to anyone else while claimed."""
-        lead = self._owned_lead(lead_id, user_id)
+        lead = self._owned_lead(lead_id, user_id, tenant_id)
         if lead is None:
             return None
-        saved_id = self._save_snapshot(lead, user_id, kind="contact")
+        saved_id = self._save_snapshot(
+            lead, user_id, kind="contact", tenant_id=tenant_id,
+        )
         return {"saved_id": saved_id, "retired": False}
 
-    def mark_voicemail(self, lead_id: int, user_id: str) -> dict[str, Any] | None:
+    def mark_voicemail(
+        self, lead_id: int, user_id: str, tenant_id: str | None = None,
+    ) -> dict[str, Any] | None:
         """☎Voicemail: nobody answered — park the number and move on.
 
         Tiered recycling (the user's approved ladder): the Nth voicemail
@@ -1175,25 +1388,26 @@ class PhoneLeadsStore:
         it). A FOURTH voicemail retires the number for good: row deleted,
         number suppressed, harvester can never re-add it. None when the
         user doesn't own the lead."""
-        lead = self._owned_lead(lead_id, user_id)
-        if lead is None:
-            return None
-        count = int(lead.get("voicemail_count") or 0) + 1
-        if count >= MAX_VOICEMAILS:
-            conn = self._conn()
-            try:
-                self._insert_call_event(conn, lead, user_id, "voicemail")
-                conn.commit()
-            finally:
-                conn.close()
-            self._retire(lead_id, lead["phone"], "voicemail_retired")
-            return {
-                "retired": True, "voicemail_count": count, "cooldown_days": 0,
-            }
-        cooldown = VOICEMAIL_COOLDOWN_DAYS.get(count, 60)
         conn = self._conn()
         try:
-            self._insert_call_event(conn, lead, user_id, "voicemail")
+            conn.execute("BEGIN IMMEDIATE")
+            lead = self._owned_lead(lead_id, user_id, tenant_id, conn=conn)
+            if lead is None:
+                conn.rollback()
+                return None
+            tenant_id = _private_tenant(conn, "phone_call_events", tenant_id)
+            count = int(lead.get("voicemail_count") or 0) + 1
+            self._insert_call_event(conn, lead, user_id, "voicemail", tenant_id)
+            if count >= MAX_VOICEMAILS:
+                self._retire(
+                    lead_id, lead["phone"], "voicemail_retired", conn=conn,
+                )
+                conn.commit()
+                return {
+                    "retired": True, "voicemail_count": count,
+                    "cooldown_days": 0,
+                }
+            cooldown = VOICEMAIL_COOLDOWN_DAYS.get(count, 60)
             conn.execute(
                 "UPDATE phone_leads SET voicemail_count = ?, "
                 "voicemail_at = ?, updated_at = ? WHERE id = ?",
@@ -1205,43 +1419,57 @@ class PhoneLeadsStore:
                 "DELETE FROM phone_lead_owners WHERE lead_id = ?", (lead_id,)
             )
             conn.commit()
+            return {
+                "retired": False, "voicemail_count": count,
+                "cooldown_days": cooldown,
+            }
         finally:
             conn.close()
-        return {
-            "retired": False, "voicemail_count": count,
-            "cooldown_days": cooldown,
-        }
 
     def note_lead(
         self, lead_id: int, user_id: str, note: str,
+        tenant_id: str | None = None,
     ) -> dict[str, Any] | None:
         """📝Note on a lead still on the call sheet: the note saves to a
         contact-kind snapshot (auto-stored — writing a note IS keeping it).
         None when the user doesn't own the lead."""
-        lead = self._owned_lead(lead_id, user_id)
+        lead = self._owned_lead(lead_id, user_id, tenant_id)
         if lead is None:
             return None
-        saved_id = self._save_snapshot(lead, user_id, kind="contact")
+        saved_id = self._save_snapshot(
+            lead, user_id, kind="contact", tenant_id=tenant_id,
+        )
         conn = self._conn()
         try:
+            tenant_id = _private_tenant(conn, "phone_user_leads", tenant_id)
+            clause = " AND tenant_id = ?" if tenant_id is not None else ""
+            args = (note.strip(), _now(), saved_id, user_id)
+            if tenant_id is not None:
+                args += (tenant_id,)
             conn.execute(
                 "UPDATE phone_user_leads SET note = ?, updated_at = ? "
-                "WHERE id = ? AND user_id = ?",
-                (note.strip(), _now(), saved_id, user_id),
+                f"WHERE id = ? AND user_id = ?{clause}", args,
             )
             conn.commit()
         finally:
             conn.close()
         return {"saved_id": saved_id, "retired": False}
 
-    def set_saved_note(self, saved_id: int, user_id: str, note: str) -> bool:
+    def set_saved_note(
+        self, saved_id: int, user_id: str, note: str,
+        tenant_id: str | None = None,
+    ) -> bool:
         """Edit the note on an already-saved lead/contact row."""
         conn = self._conn()
         try:
+            tenant_id = _private_tenant(conn, "phone_user_leads", tenant_id)
+            clause = " AND tenant_id = ?" if tenant_id is not None else ""
+            args = (note.strip(), _now(), saved_id, user_id)
+            if tenant_id is not None:
+                args += (tenant_id,)
             cur = conn.execute(
                 "UPDATE phone_user_leads SET note = ?, updated_at = ? "
-                "WHERE id = ? AND user_id = ?",
-                (note.strip(), _now(), saved_id, user_id),
+                f"WHERE id = ? AND user_id = ?{clause}", args,
             )
             conn.commit()
             return cur.rowcount > 0
@@ -1250,17 +1478,25 @@ class PhoneLeadsStore:
 
     def list_saved(
         self, user_id: str, kind: str = "", limit: int = 1000,
+        tenant_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """The user's saved leads/contacts (✓Lead + 💾Store output),
         newest-saved first. ``kind`` filters ('lead' | 'contact'); '' = all."""
-        frag = " AND kind = ?" if kind else ""
-        args: list[Any] = [user_id] + ([kind] if kind else []) + [limit]
         conn = self._conn()
         try:
+            tenant_id = _private_tenant(conn, "phone_user_leads", tenant_id)
+            tenant_clause = " AND tenant_id = ?" if tenant_id is not None else ""
+            kind_clause = " AND kind = ?" if kind else ""
+            args: list[Any] = [user_id]
+            if tenant_id is not None:
+                args.append(tenant_id)
+            if kind:
+                args.append(kind)
+            args.append(limit)
             cur = conn.execute(
                 f"""
                 SELECT * FROM phone_user_leads
-                WHERE user_id = ?{frag}
+                WHERE user_id = ?{tenant_clause}{kind_clause}
                 ORDER BY created_at DESC, id DESC
                 LIMIT ?
                 """,
@@ -1272,14 +1508,21 @@ class PhoneLeadsStore:
         finally:
             conn.close()
 
-    def delete_saved(self, saved_id: int, user_id: str) -> bool:
+    def delete_saved(
+        self, saved_id: int, user_id: str, tenant_id: str | None = None,
+    ) -> bool:
         """Delete one of the user's saved leads/contacts (their account,
         their decision — the pool row, if any, is untouched by this)."""
         conn = self._conn()
         try:
+            tenant_id = _private_tenant(conn, "phone_user_leads", tenant_id)
+            clause = " AND tenant_id = ?" if tenant_id is not None else ""
+            args = (saved_id, user_id)
+            if tenant_id is not None:
+                args += (tenant_id,)
             cur = conn.execute(
-                "DELETE FROM phone_user_leads WHERE id = ? AND user_id = ?",
-                (saved_id, user_id),
+                f"DELETE FROM phone_user_leads WHERE id = ? AND user_id = ?{clause}",
+                args,
             )
             conn.commit()
             return cur.rowcount > 0

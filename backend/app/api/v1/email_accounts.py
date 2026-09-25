@@ -20,14 +20,18 @@ identity for the return hop.
 from __future__ import annotations
 
 import logging
+import secrets
 import time
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 
 from app.auth.activity import get_activity
-from app.auth.dependencies import get_current_user
+from app.auth import dependencies as auth_deps
+from app.auth.dependencies import (
+    get_current_user, get_tenant_context, multi_tenant_enabled,
+)
 from app.auth.jwt import decode_access_token
 from app.auth.models import User
 from app.core.config import settings
@@ -49,16 +53,27 @@ def _configured() -> bool:
     return bool(settings.GOOGLE_CLIENT_ID and settings.GOOGLE_CLIENT_SECRET)
 
 
+def email_tenant_id(
+    request: Request, user: User = Depends(get_current_user),
+) -> str | None:
+    """Live membership guard for every connected-account operation."""
+    if not multi_tenant_enabled():
+        return None
+    return get_tenant_context(request, user).tenant_id
+
+
 @router.get("/google/status")
 def google_status() -> dict[str, bool]:
-    """Whether Gmail OAuth is configured — drives the Settings screen's
+    """Whether Gmail OAuth is configured  drives the Settings screen's
     "Connect Gmail" button vs the honest setup notice. Public: leaks nothing
     beyond configured / not."""
     return {"configured": _configured()}
 
 
 @router.get("/google/authorize")
-def google_authorize(token: str = Query(default="")) -> RedirectResponse:
+def google_authorize(
+    token: str = Query(default=""), tenant_id: str = Query(default=""),
+) -> RedirectResponse:
     """Start the Google consent flow — 302 to Google's authorization page.
 
     The JWT arrives as ``?token=`` (top-level browser navigation has no auth
@@ -74,8 +89,20 @@ def google_authorize(token: str = Query(default="")) -> RedirectResponse:
     user_id = (payload or {}).get("sub") or ""
     if not user_id:
         raise HTTPException(status_code=401, detail="invalid or expired token")
-    return RedirectResponse(google.authorize_url(google.make_state(user_id)),
-                            status_code=302)
+    if multi_tenant_enabled():
+        if not tenant_id.strip():
+            raise HTTPException(status_code=400, detail="tenant_id is required")
+        users = auth_deps._user_store()
+        if users.get_by_id(user_id) is None or users.tenant_role(user_id, tenant_id) is None:
+            raise HTTPException(status_code=403, detail="Tenant access denied")
+        nonce = secrets.token_urlsafe(24)
+        state = google.make_tenant_state(user_id, tenant_id, nonce)
+        verified = google.verify_tenant_state(state)
+        assert verified is not None
+        get_email_store().reserve_oauth_nonce(user_id, tenant_id, nonce, verified[3])
+    else:
+        state = google.make_state(user_id)
+    return RedirectResponse(google.authorize_url(state), status_code=302)
 
 
 @router.get("/google/callback")
@@ -89,9 +116,21 @@ def google_callback(
     if error:
         logger.info("Gmail OAuth callback error from Google: %s", error)
         return RedirectResponse(_spa_settings(f"gmail=error:{error}"), status_code=302)
-    user_id = google.verify_state(state)
-    if not user_id:
-        return RedirectResponse(_spa_settings("gmail=error:expired-state"), status_code=302)
+    tenant_id: str | None = None
+    if multi_tenant_enabled():
+        verified = google.verify_tenant_state(state)
+        if verified is None:
+            return RedirectResponse(_spa_settings("gmail=error:expired-state"), status_code=302)
+        user_id, tenant_id, nonce, _expiry = verified
+        if not get_email_store().consume_oauth_nonce(user_id, tenant_id, nonce):
+            return RedirectResponse(_spa_settings("gmail=error:expired-state"), status_code=302)
+        users = auth_deps._user_store()
+        if users.get_by_id(user_id) is None or users.tenant_role(user_id, tenant_id) is None:
+            return RedirectResponse(_spa_settings("gmail=error:tenant-access"), status_code=302)
+    else:
+        user_id = google.verify_state(state)
+        if not user_id:
+            return RedirectResponse(_spa_settings("gmail=error:expired-state"), status_code=302)
     if not code:
         return RedirectResponse(_spa_settings("gmail=error:missing-code"), status_code=302)
     try:
@@ -105,6 +144,9 @@ def google_callback(
     if not email:
         return RedirectResponse(_spa_settings("gmail=error:no-email-claim"), status_code=302)
 
+    if tenant_id is not None and auth_deps._user_store().tenant_role(user_id, tenant_id) is None:
+        return RedirectResponse(_spa_settings("gmail=error:tenant-access"), status_code=302)
+
     store = get_email_store()
     store.connect(
         user_id, email,
@@ -113,41 +155,52 @@ def google_callback(
         refresh_token=tokens.get("refresh_token", ""),
         token_expires_at=str(int(time.time()) + int(tokens.get("expires_in", 3600))),
         scopes=tokens.get("scope", ""),
+        tenant_id=tenant_id,
     )
     get_activity().record(user_id, "", "email_account",
-                          detail=f"Gmail connected: {email}")
+                          detail=f"Gmail connected: {email}", tenant_id=tenant_id)
     logger.info("Gmail OAuth connected %s (user %s)", email, user_id)
     return RedirectResponse(_spa_settings(f"gmail=connected:{email}"), status_code=302)
 
 
 @router.get("")
-def list_accounts(user: User = Depends(get_current_user)) -> list[dict[str, Any]]:
+def list_accounts(
+    user: User = Depends(get_current_user),
+    tenant_id: str | None = Depends(email_tenant_id),
+) -> list[dict[str, Any]]:
     """The caller's connected sending accounts — tokens NEVER appear."""
-    return get_email_store().list_for_user(user.id)
+    return get_email_store().list_for_user(user.id, tenant_id=tenant_id)
 
 
 @router.delete("/{account_id}")
-def disconnect(account_id: int, user: User = Depends(get_current_user)) -> dict[str, Any]:
+def disconnect(
+    account_id: int, user: User = Depends(get_current_user),
+    tenant_id: str | None = Depends(email_tenant_id),
+) -> dict[str, Any]:
     """Disconnect one account — its tokens are deleted, not just hidden."""
     store = get_email_store()
-    creds = store.get_credentials(account_id, user.id)
+    creds = store.get_credentials(account_id, user.id, tenant_id=tenant_id)
     if creds is None:
         raise HTTPException(status_code=404, detail="no such account")
-    if not store.delete(account_id, user.id):
+    if not store.delete(account_id, user.id, tenant_id=tenant_id):
         raise HTTPException(status_code=404, detail="no such account")
     get_activity().record(user.id, user.username, "email_account",
-                          detail=f"Gmail disconnected: {creds['email']}")
+                          detail=f"Gmail disconnected: {creds['email']}",
+                          tenant_id=tenant_id)
     logger.info("DELETE /email-accounts/%d -> %s disconnected", account_id, creds["email"])
     return {"id": account_id, "deleted": True}
 
 
 @router.post("/{account_id}/send-test")
-def send_test(account_id: int, user: User = Depends(get_current_user)) -> dict[str, Any]:
+def send_test(
+    account_id: int, user: User = Depends(get_current_user),
+    tenant_id: str | None = Depends(email_tenant_id),
+) -> dict[str, Any]:
     """Send a test email FROM the connected account TO ITSELF — the
     end-to-end proof (OAuth token -> Gmail API -> delivered) without
     touching anyone else's inbox."""
     store = get_email_store()
-    creds = store.get_credentials(account_id, user.id)
+    creds = store.get_credentials(account_id, user.id, tenant_id=tenant_id)
     if creds is None:
         raise HTTPException(status_code=404, detail="no such account")
     if not creds["access_token"] and not creds["refresh_token"]:
@@ -166,7 +219,7 @@ def send_test(account_id: int, user: User = Depends(get_current_user)) -> dict[s
         )
     except Exception as exc:  # noqa: BLE001 — Gmail's error shape varies
         logger.warning("Test send via %s failed: %s", creds["email"], exc)
-        get_email_store().mark_status(account_id, user.id, "revoked")
+        get_email_store().mark_status(account_id, user.id, "revoked", tenant_id=tenant_id)
         detail = f"Gmail refused the send — reconnect the account ({creds['email']})."
         body = getattr(exc, "response", None)
         if body is not None:
@@ -178,6 +231,6 @@ def send_test(account_id: int, user: User = Depends(get_current_user)) -> dict[s
                 pass
         raise HTTPException(status_code=502, detail=detail) from exc
     # A success clears any earlier 'revoked' flag — the account IS healthy.
-    get_email_store().mark_status(account_id, user.id, "connected")
+    get_email_store().mark_status(account_id, user.id, "connected", tenant_id=tenant_id)
     logger.info("POST /email-accounts/%d/send-test -> OK via %s", account_id, creds["email"])
     return {"id": account_id, "sent": True, "to": creds["email"]}

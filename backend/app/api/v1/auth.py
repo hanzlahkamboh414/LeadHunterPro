@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.auth.activity import get_activity
-from app.auth.dependencies import get_current_user
+from app.auth.dependencies import get_current_user, multi_tenant_enabled
 from app.auth.jwt import create_access_token
 from app.auth.models import User, UserStore
 
@@ -71,6 +71,12 @@ class MeOut(BaseModel):
     category: str = "both"
 
 
+class TenantOut(BaseModel):
+    id: str
+    name: str
+    role: str
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -78,6 +84,8 @@ class MeOut(BaseModel):
 @router.post("/signup", response_model=AuthOut, status_code=201)
 def signup(body: SignupRequest) -> AuthOut:
     """Register a new user account."""
+    if multi_tenant_enabled():
+        raise HTTPException(status_code=403, detail="Tenant invitation required")
     store = _get_store()
     try:
         user = store.create(
@@ -133,6 +141,8 @@ def login(body: LoginRequest) -> AuthOut:
 @router.post("/reset-password")
 def reset_password(body: ResetPasswordRequest) -> dict:
     """Reset a user's password by username (no email verification)."""
+    if multi_tenant_enabled():
+        raise HTTPException(status_code=403, detail="Unverified password reset disabled")
     store = _get_store()
     updated = store.reset_password(body.username, body.new_password)
     if not updated:
@@ -148,6 +158,8 @@ def auth_mode() -> dict:
     The admin can turn login auth off from the admin panel; the site then
     opens straight into the normal user UI.
     """
+    if multi_tenant_enabled():
+        return {"auth_enabled": True, "tenant_mode": True}
     from app.auth.settings import get_settings
 
     return {"auth_enabled": get_settings().auth_enabled()}
@@ -164,6 +176,14 @@ def me(user: User = Depends(get_current_user)) -> MeOut:
         is_admin=user.is_admin,
         category=user.category,
     )
+
+
+@router.get("/tenants", response_model=list[TenantOut])
+def my_tenants(user: User = Depends(get_current_user)) -> list[TenantOut]:
+    """Show only current memberships; a tenant header cannot grant access."""
+    if not multi_tenant_enabled():
+        raise HTTPException(status_code=404, detail="Tenant mode is not enabled")
+    return [TenantOut(**row) for row in _get_store().list_user_tenants(user.id)]
 
 
 @router.post("/logout")

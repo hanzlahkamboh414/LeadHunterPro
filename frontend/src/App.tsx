@@ -29,7 +29,8 @@ import { canSeeEmails, canSeePhones, isPhoneOnly } from "./lib/verticals";
 // flex children lets them shrink: flex items default to min-height:auto and will
 // otherwise refuse to scroll.
 export default function App() {
-  const { user, token, loading, authEnabled } = useAuth();
+  const { user, token, loading, authEnabled, tenantMode, activeTenantId,
+    tenantError, logout } = useAuth();
 
   // While checking auth state, show nothing (prevents flash)
   if (loading) {
@@ -97,6 +98,15 @@ export default function App() {
         <Route path="/terms" element={<TermsOfService />} />
         <Route path="*" element={<Navigate to="/login" replace />} />
       </Routes>
+    );
+  }
+
+  if (tenantMode && !activeTenantId) {
+    return (
+      <div className="h-screen w-full flex flex-col items-center justify-center gap-4 bg-[#0B0E14] text-slate-200">
+        <p>{tenantError || "No active workspace is assigned to this account."}</p>
+        <button type="button" onClick={logout} className="rounded-lg bg-indigo-600 px-4 py-2 text-white">Sign out</button>
+      </div>
     );
   }
 

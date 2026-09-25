@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.discovery.tradefold import normalize_trade
+from app.core.db_paths import operational_db_path
 
 _INIT_LOCK = threading.RLock()
 
@@ -40,6 +41,33 @@ _LINKEDIN_PERSON_RE = re.compile(
 
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _owner_tenant(
+    conn: sqlite3.Connection, tenant_id: str | None,
+) -> str | None:
+    """Require explicit scope in tenant mode, or the sole legacy tenant."""
+    if tenant_id is not None and not tenant_id.strip():
+        raise ValueError("tenant_id must not be blank")
+    if os.environ.get("LEADHUNTER_MULTI_TENANT_ENABLED") == "1" and tenant_id is None:
+        raise ValueError("tenant_id is required in multi-tenant mode")
+    columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(linkedin_lead_owners)")
+    }
+    if "tenant_id" not in columns:
+        if tenant_id is not None:
+            raise ValueError("LinkedIn ownership is not tenant-ready")
+        return None
+    if tenant_id is not None:
+        if conn.execute(
+            "SELECT 1 FROM tenants WHERE id = ?", (tenant_id,),
+        ).fetchone() is None:
+            raise ValueError("unknown tenant_id for LinkedIn ownership")
+        return tenant_id
+    tenants = conn.execute("SELECT id FROM tenants LIMIT 2").fetchall()
+    if len(tenants) != 1:
+        raise ValueError("ambiguous legacy tenant for LinkedIn ownership")
+    return str(tenants[0][0])
 
 
 def is_person_linkedin_url(raw: str) -> bool:
@@ -74,10 +102,10 @@ class LinkedInLeadsStore:
 
     def __init__(self, db_path: str | None = None) -> None:
         if db_path is None:
-            db_path = os.path.join(
+            db_path = operational_db_path(os.path.join(
                 os.path.dirname(__file__), "..", "..", "output",
                 "linkedin_leads.db",
-            )
+            ))
         self._db_path = db_path
         self._init_db()
 
@@ -193,6 +221,7 @@ class LinkedInLeadsStore:
 
     def serve(
         self, trade: str, state: str, city: str, limit: int, user_id: str,
+        tenant_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Claim up to ``limit`` unowned-or-mine leads and stamp ownership
         (exclusivity at serve — the dossier_owners rule)."""
@@ -201,28 +230,48 @@ class LinkedInLeadsStore:
         frag, args = self._serve_clauses(trade, state, city)
         conn = self._conn()
         try:
+            conn.execute("BEGIN IMMEDIATE")
+            tenant_id = _owner_tenant(conn, tenant_id)
+            if tenant_id is None:
+                owner_filter = (
+                    "l.id NOT IN (SELECT lead_id FROM linkedin_lead_owners "
+                    "WHERE user_id != ?)"
+                )
+                owner_args: list[Any] = [user_id]
+            else:
+                owner_filter = (
+                    "NOT EXISTS (SELECT 1 FROM linkedin_lead_owners o "
+                    "WHERE o.lead_id = l.id AND "
+                    "(o.user_id != ? OR o.tenant_id != ?))"
+                )
+                owner_args = [user_id, tenant_id]
             cur = conn.execute(
                 f"""
                 SELECT l.* FROM linkedin_leads l
-                WHERE l.id NOT IN (
-                    SELECT lead_id FROM linkedin_lead_owners
-                    WHERE user_id != ?
-                ){frag}
+                WHERE {owner_filter}{frag}
                 ORDER BY l.id ASC
                 LIMIT ?
                 """,
-                [user_id, *args, limit],
+                [*owner_args, *args, limit],
             )
             rows = cur.fetchall()
             cols = [d[0] for d in cur.description]
             leads = [dict(zip(cols, r, strict=True)) for r in rows]
             ts = _now()
             for lead in leads:
-                conn.execute(
-                    "INSERT OR IGNORE INTO linkedin_lead_owners "
-                    "(lead_id, user_id, created_at) VALUES (?, ?, ?)",
-                    (lead["id"], user_id, ts),
-                )
+                if tenant_id is None:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO linkedin_lead_owners "
+                        "(lead_id, user_id, created_at) VALUES (?, ?, ?)",
+                        (lead["id"], user_id, ts),
+                    )
+                else:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO linkedin_lead_owners "
+                        "(lead_id, user_id, created_at, tenant_id) "
+                        "VALUES (?, ?, ?, ?)",
+                        (lead["id"], user_id, ts, tenant_id),
+                    )
             conn.commit()
             return leads
         finally:
@@ -250,20 +299,26 @@ class LinkedInLeadsStore:
     def list_owned(
         self, user_id: str, trade: str = "", state: str = "", city: str = "",
         limit: int = 200,
+        tenant_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """The user's own LinkedIn leads (claimed at serve), newest first."""
         frag, args = self._serve_clauses(trade, state, city)
         conn = self._conn()
         try:
+            tenant_id = _owner_tenant(conn, tenant_id)
+            tenant_clause = " AND o.tenant_id = ?" if tenant_id is not None else ""
+            owner_args: list[Any] = [user_id]
+            if tenant_id is not None:
+                owner_args.append(tenant_id)
             cur = conn.execute(
                 f"""
                 SELECT l.*, o.created_at AS claimed_at FROM linkedin_leads l
                 JOIN linkedin_lead_owners o ON o.lead_id = l.id
-                AND o.user_id = ?{frag}
+                AND o.user_id = ?{tenant_clause}{frag}
                 ORDER BY o.created_at DESC, l.id DESC
                 LIMIT ?
                 """,
-                [user_id, *args, limit],
+                [*owner_args, *args, limit],
             )
             rows = cur.fetchall()
             cols = [d[0] for d in cur.description]

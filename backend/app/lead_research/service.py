@@ -16,6 +16,7 @@ from typing import Any
 
 from app.lead_research.agent import AILeadResearchAgent, DEAD_DOMAIN_MARKER
 from app.lead_research.models import CRM_STATUSES, LeadDossier, LeadMeta
+from app.core.db_paths import operational_db_path
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +92,7 @@ class LeadResearchStore:
     def __init__(self, db_path: str | None = None) -> None:
         if db_path is None:
             import os
-            db_path = os.path.join(os.path.dirname(__file__), "..", "..", "output", "lead_research.db")
+            db_path = operational_db_path(os.path.join(os.path.dirname(__file__), "..", "..", "output", "lead_research.db"))
         self._db_path = db_path
         self._init_db()
 
@@ -1776,7 +1777,7 @@ class PendingLeadsStore:
     def __init__(self, db_path: str | None = None) -> None:
         if db_path is None:
             import os
-            db_path = os.path.join(os.path.dirname(__file__), "..", "..", "output", "lead_research.db")
+            db_path = operational_db_path(os.path.join(os.path.dirname(__file__), "..", "..", "output", "lead_research.db"))
         self._db_path = db_path
         self._init_db()
 

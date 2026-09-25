@@ -23,11 +23,13 @@ from datetime import datetime, timezone
 from email.utils import getaddresses
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from app.auth.dependencies import get_current_user
+from app.auth.dependencies import (
+    get_current_user, get_tenant_context, multi_tenant_enabled,
+)
 from app.auth.models import User
 from app.campaigns.scheduler import ensure_access_token
 from app.email.heuristic_verifier import ROLE_LOCALS
@@ -38,6 +40,15 @@ from app.email_accounts.store import get_email_store
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/gmail", tags=["Gmail Inbox"])
+
+
+def gmail_tenant_id(
+    request: Request, user: User = Depends(get_current_user),
+) -> str | None:
+    """Resolve a current membership before any Gmail account is touched."""
+    if not multi_tenant_enabled():
+        return None
+    return get_tenant_context(request, user).tenant_id
 
 #: Mail systems and services that send notifications, not people — the
 #: received-export "person only" filter. Curated like DISPOSABLE_DOMAINS:
@@ -157,18 +168,20 @@ def _rate_retry(fn):
                 bursts += 1
 
 
-def _account_token(account_id: int, user: User) -> tuple[dict[str, Any], str]:
+def _account_token(
+    account_id: int, user: User, tenant_id: str | None = None,
+) -> tuple[dict[str, Any], str]:
     """The caller's account creds + a live access token, or an HTTP error.
 
     One shared door: 404 for a missing/foreign account, 409 for tokens that
     cannot be refreshed (the honest "reconnect Gmail" state).
     """
-    creds = get_email_store().get_credentials(account_id, user.id)
+    creds = get_email_store().get_credentials(account_id, user.id, tenant_id=tenant_id)
     if creds is None:
         raise HTTPException(status_code=404, detail="no such account")
     token = ensure_access_token(
         get_email_store(), account_id=account_id, user_id=user.id,
-        creds=creds, now=datetime.now(timezone.utc),
+        creds=creds, now=datetime.now(timezone.utc), tenant_id=tenant_id,
     )
     if not token:
         raise HTTPException(
@@ -225,7 +238,10 @@ def _require_inbox_enabled() -> None:
 # ---------------------------------------------------------------------------
 
 @router.get("/mode")
-def inbox_mode(user: User = Depends(get_current_user)) -> dict[str, Any]:
+def inbox_mode(
+    user: User = Depends(get_current_user),
+    tenant_id: str | None = Depends(gmail_tenant_id),
+) -> dict[str, Any]:
     """Which parts of the Gmail feature are on: the browsing interface and/or
     the address export (the export has no switch — it is always available)."""
     from app.auth.settings import get_settings
@@ -246,12 +262,13 @@ def list_messages(
     page_token: str = Query(default=""),
     limit: int = Query(default=50, ge=1, le=100),
     user: User = Depends(get_current_user),
+    tenant_id: str | None = Depends(gmail_tenant_id),
     _enabled: None = Depends(_require_inbox_enabled),
 ) -> dict[str, Any]:
     """One page of message rows for a folder/search — metadata only (from,
     to, subject, snippet, unread/starred flags), bodies are fetched by the
     per-message endpoint when a row is opened."""
-    creds, token = _account_token(account_id, user)
+    creds, token = _account_token(account_id, user, tenant_id)
     _require_scope(creds, "gmail.readonly")
     label = _label(folder)
     try:
@@ -290,11 +307,12 @@ def read_message(
     message_id: str,
     account_id: int = Query(),
     user: User = Depends(get_current_user),
+    tenant_id: str | None = Depends(gmail_tenant_id),
     _enabled: None = Depends(_require_inbox_enabled),
 ) -> dict[str, Any]:
     """One full message (body + attachments), marked read like the Gmail
     site marks a message read when you open it."""
-    creds, token = _account_token(account_id, user)
+    creds, token = _account_token(account_id, user, tenant_id)
     _require_scope(creds, "gmail.readonly")
     try:
         message = google.get_message(token, message_id)
@@ -319,11 +337,12 @@ def download_attachment(
     attachment_id: str,
     account_id: int = Query(),
     user: User = Depends(get_current_user),
+    tenant_id: str | None = Depends(gmail_tenant_id),
     _enabled: None = Depends(_require_inbox_enabled),
 ) -> Response:
     """One attachment's bytes as a download. The message is fetched first
     only to name the file honestly (the attachment id alone is opaque)."""
-    creds, token = _account_token(account_id, user)
+    creds, token = _account_token(account_id, user, tenant_id)
     _require_scope(creds, "gmail.readonly")
     filename, mime_type = "attachment", "application/octet-stream"
     try:
@@ -364,11 +383,12 @@ class SendInput(BaseModel):
 
 @router.post("/send")
 def send(input: SendInput, user: User = Depends(get_current_user),
+         tenant_id: str | None = Depends(gmail_tenant_id),
          _enabled: None = Depends(_require_inbox_enabled)) -> dict[str, Any]:
     """Compose / reply / forward — one plain-text email from the connected
     account. Replies carry In-Reply-To/References so they thread properly
     in the recipient's (and this) inbox."""
-    creds, token = _account_token(input.account_id, user)
+    creds, token = _account_token(input.account_id, user, tenant_id)
     _require_scope(creds, "gmail.send")
     try:
         out = google.send_gmail(
@@ -393,6 +413,7 @@ class ModifyInput(BaseModel):
 def modify(
     message_id: str, input: ModifyInput,
     user: User = Depends(get_current_user),
+    tenant_id: str | None = Depends(gmail_tenant_id),
     _enabled: None = Depends(_require_inbox_enabled),
 ) -> dict[str, Any]:
     """Star/unstar, mark read/unread, trash, archive — Gmail label changes.
@@ -404,7 +425,7 @@ def modify(
             status_code=400,
             detail=f"unknown labels: {', '.join(sorted(bad))}",
         )
-    creds, token = _account_token(input.account_id, user)
+    creds, token = _account_token(input.account_id, user, tenant_id)
     _require_scope(creds, "gmail.modify")
     try:
         google.modify_message(
@@ -469,6 +490,7 @@ def export_addresses(
     from_date: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
     to_date: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
     user: User = Depends(get_current_user),
+    tenant_id: str | None = Depends(gmail_tenant_id),
 ) -> Response:
     """Download the account's email addresses as a one-column XLSX.
 
@@ -478,7 +500,7 @@ def export_addresses(
     ``year`` or ``from_date``/``to_date`` narrow the slice; none = complete.
     Unique + sorted; one honest sheet, no padding.
     """
-    creds, token = _account_token(account_id, user)
+    creds, token = _account_token(account_id, user, tenant_id)
     _require_scope(creds, "gmail.readonly")
     q = _export_query(source, year, from_date, to_date)
 
@@ -488,7 +510,7 @@ def export_addresses(
     pages = 0
     try:
         while scanned < _EXPORT_MESSAGE_CAP:
-            page = _rate_retry(lambda: google.list_message_ids(
+            page = _rate_retry(lambda page_token=page_token: google.list_message_ids(
                 token, label="", q=q, page_token=page_token, limit=100,
             ))
             if not page["ids"]:
@@ -498,7 +520,7 @@ def export_addresses(
             # past nginx's 10-minute timeout). Measured live: 1.2s per
             # 100-message batch.
             metas = _rate_retry(
-                lambda: google.batch_get_message_metadata(token, page["ids"]))
+                lambda ids=page["ids"]: google.batch_get_message_metadata(token, ids))
             for m in metas:
                 h = m["headers"]
                 if source == "sent":

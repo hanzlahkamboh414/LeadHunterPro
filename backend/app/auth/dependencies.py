@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+import os
+import sqlite3
+
 from fastapi import Depends, HTTPException, Request
 
 from app.auth import settings as auth_settings
@@ -14,6 +18,17 @@ def _user_store() -> UserStore:
     if not hasattr(_user_store, "_instance"):
         _user_store._instance = UserStore()  # type: ignore[attr-defined]
     return _user_store._instance
+
+
+@dataclass(frozen=True)
+class TenantContext:
+    tenant_id: str
+    user_id: str
+    role: str
+
+
+def multi_tenant_enabled() -> bool:
+    return os.environ.get("LEADHUNTER_MULTI_TENANT_ENABLED") == "1"
 
 
 def get_current_user(request: Request) -> User:
@@ -36,13 +51,34 @@ def get_current_user(request: Request) -> User:
                 return user
 
     # No valid token. Open site? → shared account. Otherwise → 401.
-    if not auth_settings.get_settings().auth_enabled():
+    if (
+        not multi_tenant_enabled()
+        and not auth_settings.get_settings().auth_enabled()
+    ):
         return _user_store().ensure_shared()
 
     raise HTTPException(
         status_code=401,
         detail="Not authenticated — provide Authorization: Bearer <token>",
     )
+
+
+def get_tenant_context(
+    request: Request, user: User = Depends(get_current_user),
+) -> TenantContext:
+    """Require an explicit tenant selector and a live persisted membership."""
+    tenant_id = request.headers.get("X-Tenant-ID", "").strip()
+    if not tenant_id:
+        raise HTTPException(status_code=400, detail="X-Tenant-ID is required")
+    try:
+        role = _user_store().tenant_role(user.id, tenant_id)
+    except sqlite3.Error as exc:
+        raise HTTPException(
+            status_code=503, detail="Tenant registry unavailable"
+        ) from exc
+    if role is None:
+        raise HTTPException(status_code=403, detail="Tenant access denied")
+    return TenantContext(tenant_id=tenant_id, user_id=user.id, role=role)
 
 
 def require_admin(user: User = Depends(get_current_user)) -> User:

@@ -9,14 +9,15 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.lead_research.models import LeadDossier
+from app.core.db_paths import operational_db_path
 from app.lead_research.scoring import regate_recommendation
 from app.schemas.admin import AdminDashboardOut, AdminJobSummary
 
 
 def default_database_path() -> str:
-    return os.path.abspath(
+    return operational_db_path(os.path.abspath(
         os.path.join(os.path.dirname(__file__), "..", "output", "lead_research.db")
-    )
+    ))
 
 
 class AdminReadRepository:
@@ -193,7 +194,7 @@ def search_cache_status() -> dict[str, Any]:
     from app.core.config import settings
     from app.search_providers.cache import default_db_path, get_search_cache
 
-    path = getattr(settings, "SEARCH_CACHE_DB", "") or default_db_path()
+    path = operational_db_path(getattr(settings, "SEARCH_CACHE_DB", "") or default_db_path())
     cache = get_search_cache()
     stats = cache.stats() if cache else {}
     conn = None

@@ -45,6 +45,7 @@ import json
 import os
 import sqlite3
 import threading
+from app.core.db_paths import operational_db_path
 from collections.abc import Mapping
 from typing import Any
 
@@ -204,9 +205,9 @@ def default_db_path() -> str:
     constructing a store — a machine that never ran the scout must not get
     a DB created just because the harvester imported the module.
     """
-    return os.path.join(
+    return operational_db_path(os.path.join(
         os.path.dirname(__file__), "..", "..", "output", "source_scout.db",
-    )
+    ))
 
 
 class ScoutStore:

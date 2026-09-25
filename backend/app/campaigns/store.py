@@ -45,6 +45,7 @@ import threading
 from typing import Any
 
 from app.auth.models import _now
+from app.core.db_paths import operational_db_path
 from app.campaigns.tracking import is_repeat_view, is_sender_selfcheck
 
 _INIT_LOCK = threading.RLock()
@@ -56,14 +57,37 @@ CAMPAIGN_STATUSES = ("scheduled", "running", "paused", "completed")
 SEND_STATES = ("pending", "sent", "failed", "skipped")
 
 
+def _campaign_tenant(
+    conn: sqlite3.Connection, tenant_id: str | None,
+) -> str | None:
+    """Require explicit scope in tenant mode, or the sole legacy tenant."""
+    if tenant_id is not None and not tenant_id.strip():
+        raise ValueError("tenant_id must not be blank")
+    if os.environ.get("LEADHUNTER_MULTI_TENANT_ENABLED") == "1" and tenant_id is None:
+        raise ValueError("tenant_id is required in multi-tenant mode")
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(campaigns)")}
+    if "tenant_id" not in columns:
+        if tenant_id is not None:
+            raise ValueError("campaigns is not tenant-ready")
+        return None
+    if tenant_id is not None:
+        if conn.execute("SELECT 1 FROM tenants WHERE id = ?", (tenant_id,)).fetchone() is None:
+            raise ValueError("unknown tenant_id for campaign")
+        return tenant_id
+    tenants = conn.execute("SELECT id FROM tenants LIMIT 2").fetchall()
+    if len(tenants) != 1:
+        raise ValueError("ambiguous legacy tenant for campaign")
+    return str(tenants[0][0])
+
+
 class CampaignStore:
     """SQLite persistence for campaigns and their send queue."""
 
     def __init__(self, db_path: str | None = None) -> None:
         if db_path is None:
-            db_path = os.path.join(
+            db_path = operational_db_path(os.path.join(
                 os.path.dirname(__file__), "..", "..", "output", "campaigns.db"
-            )
+            ))
         self._db_path = db_path
         self._init_db()
 
@@ -221,6 +245,7 @@ class CampaignStore:
         followups: list[dict[str, Any]] | None = None,
         account_ids: list[int] | None = None,
         ai_personalize: bool = False,
+        tenant_id: str | None = None,
     ) -> dict[str, Any]:
         """One campaign + its pending step-0 send queue (insertion order =
         send order) + its follow-up definitions (steps 1..N). Duplicate
@@ -237,14 +262,20 @@ class CampaignStore:
                 accounts.append(int(a))
         now = _now()
         conn = self._conn()
+        tenant_id = _campaign_tenant(conn, tenant_id)
+        tenant_column = ", tenant_id" if tenant_id is not None else ""
+        tenant_value = ", ?" if tenant_id is not None else ""
+        params = (user_id, account_id, name, subject, body, start_at,
+                  int(daily_limit), int(delay_min_s), int(delay_max_s),
+                  1 if ai_personalize else 0, now, now)
+        if tenant_id is not None:
+            params += (tenant_id,)
         cur = conn.execute(
             "INSERT INTO campaigns (user_id, account_id, name, subject, body, "
             "status, start_at, daily_limit, delay_min_s, delay_max_s, "
-            "ai_personalize, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, ?, ?, ?, ?)",
-            (user_id, account_id, name, subject, body, start_at,
-             int(daily_limit), int(delay_min_s), int(delay_max_s),
-             1 if ai_personalize else 0, now, now),
+            "ai_personalize, created_at, updated_at" + tenant_column + ") "
+            "VALUES (?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, ?, ?, ?, ?" + tenant_value + ")",
+            params,
         )
         campaign_id = cur.lastrowid
         conn.executemany(
@@ -265,7 +296,7 @@ class CampaignStore:
             )
         conn.commit()
         conn.close()
-        return self.get(campaign_id, user_id) or {}
+        return self.get(campaign_id, user_id, tenant_id=tenant_id) or {}
 
     # -- Read -----------------------------------------------------------
 
@@ -274,13 +305,17 @@ class CampaignStore:
                       "delay_min_s, delay_max_s, ai_personalize, "
                       "created_at, updated_at")
 
-    def get(self, campaign_id: int, user_id: str) -> dict[str, Any] | None:
+    def get(self, campaign_id: int, user_id: str,
+            tenant_id: str | None = None) -> dict[str, Any] | None:
         """One campaign (None when missing or not the caller's) + progress."""
         conn = self._conn()
+        tenant_id = _campaign_tenant(conn, tenant_id)
+        clause = " AND tenant_id = ?" if tenant_id is not None else ""
         row = conn.execute(
             f"SELECT {self._CAMPAIGN_COLS} FROM campaigns "
-            f"WHERE id = ? AND user_id = ?",
-            (campaign_id, user_id),
+            f"WHERE id = ? AND user_id = ?" + clause,
+            (campaign_id, user_id, tenant_id) if tenant_id is not None
+            else (campaign_id, user_id),
         ).fetchone()
         counts = self._counts(conn, [campaign_id]).get(campaign_id, {})
         conn.close()
@@ -290,12 +325,15 @@ class CampaignStore:
         out["account_ids"] = self.campaign_accounts(campaign_id)
         return out
 
-    def list_for_user(self, user_id: str) -> list[dict[str, Any]]:
+    def list_for_user(self, user_id: str,
+                      tenant_id: str | None = None) -> list[dict[str, Any]]:
         conn = self._conn()
+        tenant_id = _campaign_tenant(conn, tenant_id)
+        clause = " AND tenant_id = ?" if tenant_id is not None else ""
         rows = conn.execute(
             f"SELECT {self._CAMPAIGN_COLS} FROM campaigns "
-            f"WHERE user_id = ? ORDER BY id DESC",
-            (user_id,),
+            f"WHERE user_id = ?" + clause + " ORDER BY id DESC",
+            (user_id, tenant_id) if tenant_id is not None else (user_id,),
         ).fetchall()
         counts = self._counts(conn, [r[0] for r in rows])
         conn.close()
@@ -305,13 +343,17 @@ class CampaignStore:
         return out
 
     def sends(self, campaign_id: int, user_id: str,
-              limit: int = 200) -> list[dict[str, Any]] | None:
+              limit: int = 200,
+              tenant_id: str | None = None) -> list[dict[str, Any]] | None:
         """The send queue (pending order first, then sent/failed/skipped).
         None when the campaign is not the caller's."""
         conn = self._conn()
+        tenant_id = _campaign_tenant(conn, tenant_id)
+        clause = " AND tenant_id = ?" if tenant_id is not None else ""
         owns = conn.execute(
-            "SELECT 1 FROM campaigns WHERE id = ? AND user_id = ?",
-            (campaign_id, user_id),
+            "SELECT 1 FROM campaigns WHERE id = ? AND user_id = ?" + clause,
+            (campaign_id, user_id, tenant_id) if tenant_id is not None
+            else (campaign_id, user_id),
         ).fetchone()
         if owns is None:
             conn.close()
@@ -338,13 +380,17 @@ class CampaignStore:
             for r in rows
         ]
 
-    def followups(self, campaign_id: int) -> list[dict[str, Any]]:
+    def followups(self, campaign_id: int,
+                  tenant_id: str | None = None) -> list[dict[str, Any]]:
         """The campaign's follow-up definitions, in step order."""
         conn = self._conn()
+        tenant_id = _campaign_tenant(conn, tenant_id)
+        clause = " AND c.tenant_id = ?" if tenant_id is not None else ""
         rows = conn.execute(
-            "SELECT step, after_days, subject, body FROM campaign_followups "
-            "WHERE campaign_id = ? ORDER BY step ASC",
-            (campaign_id,),
+            "SELECT f.step, f.after_days, f.subject, f.body "
+            "FROM campaign_followups f JOIN campaigns c ON c.id = f.campaign_id "
+            "WHERE f.campaign_id = ?" + clause + " ORDER BY f.step ASC",
+            (campaign_id, tenant_id) if tenant_id is not None else (campaign_id,),
         ).fetchall()
         conn.close()
         return [{"step": r[0], "after_days": r[1], "subject": r[2],
@@ -522,18 +568,23 @@ class CampaignStore:
         return row[0] if row else 0
 
     def already_sent_emails(self, user_id: str,
-                            emails: list[str]) -> set[str]:
+                            emails: list[str],
+                            tenant_id: str | None = None) -> set[str]:
         """Which of these emails were ALREADY sent to (any campaign, this
         user)? Used at create time to never double-email a lead."""
-        if not emails:
-            return set()
         conn = self._conn()
+        tenant_id = _campaign_tenant(conn, tenant_id)
+        if not emails:
+            conn.close()
+            return set()
         marks = ",".join("?" * len(emails))
+        clause = " AND c.tenant_id = ?" if tenant_id is not None else ""
         rows = conn.execute(
-            f"SELECT DISTINCT s.email FROM campaign_sends s "
-            f"JOIN campaigns c ON s.campaign_id = c.id "
-            f"WHERE c.user_id = ? AND s.state = 'sent' AND s.email IN ({marks})",
-            [user_id, *emails],
+            "SELECT DISTINCT s.email FROM campaign_sends s "
+            "JOIN campaigns c ON s.campaign_id = c.id "
+            "WHERE c.user_id = ?" + clause +
+            f" AND s.state = 'sent' AND s.email IN ({marks})",
+            [user_id, *([tenant_id] if tenant_id is not None else []), *emails],
         ).fetchall()
         conn.close()
         return {r[0] for r in rows}
@@ -685,14 +736,19 @@ class CampaignStore:
         return cur.rowcount > 0
 
     def update_campaign(self, campaign_id: int, user_id: str, *,
-                        name: str, subject: str, body: str) -> bool:
+                        name: str, subject: str, body: str,
+                        tenant_id: str | None = None) -> bool:
         """Edit the pitch of an existing campaign (name/subject/body).
         Applies to every send that has NOT gone out yet — already-sent
         rows keep the subject they were sent with (their own record)."""
         conn = self._conn()
+        tenant_id = _campaign_tenant(conn, tenant_id)
+        clause = " AND tenant_id = ?" if tenant_id is not None else ""
         cur = conn.execute(
             "UPDATE campaigns SET name = ?, subject = ?, body = ?, "
-            "updated_at = ? WHERE id = ? AND user_id = ?",
+            "updated_at = ? WHERE id = ? AND user_id = ?" + clause,
+            (name, subject, body, _now(), campaign_id, user_id, tenant_id)
+            if tenant_id is not None else
             (name, subject, body, _now(), campaign_id, user_id),
         )
         conn.commit()
@@ -700,13 +756,18 @@ class CampaignStore:
         return cur.rowcount > 0
 
     def set_status(self, campaign_id: int, *, status: str,
-                   paused_reason: str = "", resume_at: str = "") -> bool:
+                   paused_reason: str = "", resume_at: str = "",
+                   tenant_id: str | None = None) -> bool:
         if status not in CAMPAIGN_STATUSES:
             raise ValueError(f"invalid campaign status: {status}")
         conn = self._conn()
+        tenant_id = _campaign_tenant(conn, tenant_id)
+        clause = " AND tenant_id = ?" if tenant_id is not None else ""
         cur = conn.execute(
             "UPDATE campaigns SET status = ?, paused_reason = ?, resume_at = ?, "
-            "updated_at = ? WHERE id = ?",
+            "updated_at = ? WHERE id = ?" + clause,
+            (status, paused_reason, resume_at, _now(), campaign_id, tenant_id)
+            if tenant_id is not None else
             (status, paused_reason, resume_at, _now(), campaign_id),
         )
         conn.commit()
@@ -758,11 +819,15 @@ class CampaignStore:
         conn.close()
         return [(r[0], r[1]) for r in rows]
 
-    def delete(self, campaign_id: int, user_id: str) -> bool:
+    def delete(self, campaign_id: int, user_id: str,
+               tenant_id: str | None = None) -> bool:
         conn = self._conn()
+        tenant_id = _campaign_tenant(conn, tenant_id)
+        clause = " AND tenant_id = ?" if tenant_id is not None else ""
         owns = conn.execute(
-            "SELECT 1 FROM campaigns WHERE id = ? AND user_id = ?",
-            (campaign_id, user_id),
+            "SELECT 1 FROM campaigns WHERE id = ? AND user_id = ?" + clause,
+            (campaign_id, user_id, tenant_id) if tenant_id is not None
+            else (campaign_id, user_id),
         ).fetchone()
         if owns is None:
             conn.close()

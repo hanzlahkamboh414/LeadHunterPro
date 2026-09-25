@@ -35,6 +35,7 @@ import logging
 import os
 import sqlite3
 import threading
+from app.core.db_paths import operational_db_path
 
 logger = logging.getLogger(__name__)
 
@@ -44,9 +45,9 @@ logger = logging.getLogger(__name__)
 #: evidence instead; that metric belongs to the deep-query follow-on.
 PROVEN_GOOD = 3
 
-_DEFAULT_DB = os.path.join(
+_DEFAULT_DB = operational_db_path(os.path.join(
     os.path.dirname(__file__), "..", "..", "output", "lead_research.db"
-)
+))
 
 #: Serializes writes across concurrent discovery passes / research threads.
 _write_lock = threading.Lock()

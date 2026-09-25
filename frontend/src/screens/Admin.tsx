@@ -31,6 +31,7 @@ import type {
   AdminLaneRepeat,
   AdminLeadScope,
   AdminLeadScopeKind,
+  AdminTenant,
   AdminUser,
   AdminVisibilityDate,
 } from "../types";
@@ -57,9 +58,9 @@ const TABS: { id: Tab; label: string; icon: typeof ShieldCheck }[] = [
   { id: "audit", label: "Audit Log", icon: ActivityIcon },
 ];
 
-export default function Admin() {
+export default function Admin({ initialTab = "overview" }: { initialTab?: Tab }) {
   const qc = useQueryClient();
-  const [tab, setTab] = useState<Tab>("overview");
+  const [tab, setTab] = useState<Tab>(initialTab);
 
   const dashboard = useQuery({
     queryKey: ["admin-dashboard"],
@@ -758,6 +759,9 @@ function UsersTab({
   const qc = useQueryClient();
   const [expanded, setExpanded] = useState<string | null>(null);
   const [activityFilter, setActivityFilter] = useState<string>("");
+  const [tenantName, setTenantName] = useState("");
+  const [selectedTenant, setSelectedTenant] = useState("");
+  const [selectedMember, setSelectedMember] = useState("");
 
   const activity = useQuery({
     queryKey: ["admin-activity", activityFilter],
@@ -777,9 +781,13 @@ function UsersTab({
   };
 
   const createUser = useMutation({
-    mutationFn: (body: { username: string; email: string; password: string; name?: string }) =>
+    mutationFn: (body: { username: string; email: string; password: string; name?: string; tenant_id?: string }) =>
       api.adminCreateUser(body),
-    onSuccess: invalidateUsers,
+    onSuccess: () => {
+      invalidateUsers();
+      qc.invalidateQueries({ queryKey: ["admin-tenants"] });
+      qc.invalidateQueries({ queryKey: ["admin-tenant-members"] });
+    },
   });
   const deleteUser = useMutation({
     mutationFn: (userId: string) => api.adminDeleteUser(userId),
@@ -801,6 +809,42 @@ function UsersTab({
   const authMode = useQuery({
     queryKey: ["auth-mode"],
     queryFn: () => api.authMode(),
+  });
+  const tenantMode = authMode.data?.tenant_mode === true;
+  const tenants = useQuery({
+    queryKey: ["admin-tenants"],
+    queryFn: () => api.adminTenants(),
+    enabled: tenantMode,
+  });
+  const members = useQuery({
+    queryKey: ["admin-tenant-members", selectedTenant],
+    queryFn: () => api.adminTenantMembers(selectedTenant),
+    enabled: tenantMode && !!selectedTenant,
+  });
+  const createTenant = useMutation({
+    mutationFn: (name: string) => api.adminCreateTenant(name),
+    onSuccess: (created) => {
+      setTenantName("");
+      setSelectedTenant(created.id);
+      qc.invalidateQueries({ queryKey: ["admin-tenants"] });
+    },
+  });
+  const addTenantMember = useMutation({
+    mutationFn: ({ tenantId, userId }: { tenantId: string; userId: string }) =>
+      api.adminAddTenantMember(tenantId, userId),
+    onSuccess: () => {
+      setSelectedMember("");
+      qc.invalidateQueries({ queryKey: ["admin-tenants"] });
+      qc.invalidateQueries({ queryKey: ["admin-tenant-members", selectedTenant] });
+    },
+  });
+  const removeTenantMember = useMutation({
+    mutationFn: ({ tenantId, userId }: { tenantId: string; userId: string }) =>
+      api.adminRemoveTenantMember(tenantId, userId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["admin-tenants"] });
+      qc.invalidateQueries({ queryKey: ["admin-tenant-members", selectedTenant] });
+    },
   });
   const toggleAuth = useMutation({
     mutationFn: (enabled: boolean) => api.adminSetAuthMode(enabled),
@@ -873,7 +917,7 @@ function UsersTab({
           </div>
           <button
             onClick={flipAuth}
-            disabled={toggleAuth.isPending || authMode.isLoading}
+            disabled={tenantMode || toggleAuth.isPending || authMode.isLoading}
             className={`rounded-lg px-3.5 py-2 text-[12.5px] font-medium disabled:opacity-50 ${
               (authMode.data?.auth_enabled ?? true)
                 ? "border border-amber-500/40 text-amber-300 hover:bg-amber-500/10"
@@ -888,7 +932,9 @@ function UsersTab({
           </button>
         </div>
         <p className="mt-1 text-[12px] text-slate-500">
-          {(authMode.data?.auth_enabled ?? true)
+          {tenantMode
+            ? "Tenant mode mein login hamesha ON rahega."
+            : (authMode.data?.auth_enabled ?? true)
             ? "Har visitor ko login karna zaroori hai. OFF karne par site seedha normal user UI me khulegi aur admin panel sirf /admin4269 password gate se milega."
             : "Site open hai — sab visitors shared account par kaam rahe hain. Admin panel ke liye leadhuntarpro.online/admin4269 par admin password chahiye."}
         </p>
@@ -1004,6 +1050,95 @@ function UsersTab({
         {recoverWrong.isError && <p className="mt-2 text-xs text-rose-300">Recovery failed: {(recoverWrong.error as Error).message}</p>}
       </section>
 
+      {tenantMode && (
+        <section className={`${cardClass} mt-6`}>
+          <div className="flex items-center gap-2">
+            <UsersIcon className="h-4 w-4 text-indigo-400" />
+            <h2 className="text-[16px] font-semibold text-white">Tenants</h2>
+          </div>
+          <p className="mt-1 text-[12px] text-slate-500">
+            Har company ka alag workspace. Naya tenant banane par aap us ke pehle owner honge.
+          </p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <input
+              value={tenantName}
+              onChange={(e) => setTenantName(e.target.value)}
+              placeholder="Company / tenant name"
+              className={`${inputClass} max-w-sm`}
+            />
+            <button
+              type="button"
+              disabled={!tenantName.trim() || createTenant.isPending}
+              onClick={() => createTenant.mutate(tenantName.trim())}
+              className="rounded-lg bg-indigo-600 px-4 py-2 text-[13px] font-semibold text-white disabled:opacity-50"
+            >
+              Create tenant
+            </button>
+          </div>
+          {createTenant.isError && <p className="mt-2 text-xs text-rose-300">{(createTenant.error as Error).message}</p>}
+          {tenants.isError && <p className="mt-2 text-xs text-rose-300">Tenants unavailable: {(tenants.error as Error).message}</p>}
+          <div className="mt-4 flex flex-wrap items-center gap-3">
+            <Select
+              className="w-64"
+              value={selectedTenant}
+              onChange={(value) => { setSelectedTenant(value); setSelectedMember(""); }}
+              placeholder="Select tenant"
+              options={(tenants.data ?? []).map((tenant) => ({
+                value: tenant.id,
+                label: `${tenant.name} (${tenant.member_count} users)`,
+              }))}
+            />
+            <span className="text-xs text-slate-500">
+              {(tenants.data ?? []).length} tenant(s) total
+            </span>
+          </div>
+          {selectedTenant && (
+            <div className="mt-4">
+              <p className="text-[13px] font-medium text-slate-200">
+                {(tenants.data ?? []).find((tenant) => tenant.id === selectedTenant)?.name ?? "Tenant"} members
+              </p>
+              {members.isLoading && <p className="mt-2 text-xs text-slate-500">Loading members…</p>}
+              {members.isError && <p className="mt-2 text-xs text-rose-300">Members unavailable: {(members.error as Error).message}</p>}
+              {(members.data ?? []).map((member) => (
+                <div key={member.user_id} className="flex items-center justify-between border-b border-white/5 py-2 text-xs">
+                  <span className="text-slate-300">{member.username} · {member.role}</span>
+                  {member.role === "member" && (
+                    <button
+                      type="button"
+                      disabled={removeTenantMember.isPending}
+                      onClick={() => {
+                        if (window.confirm(`Remove ${member.username} from this tenant?`)) {
+                          removeTenantMember.mutate({ tenantId: selectedTenant, userId: member.user_id });
+                        }
+                      }}
+                      className="text-rose-300 hover:text-rose-200 disabled:opacity-50"
+                    >Remove</button>
+                  )}
+                </div>
+              ))}
+              <div className="mt-3 flex flex-wrap gap-2">
+                <Select
+                  className="w-64"
+                  value={selectedMember}
+                  onChange={setSelectedMember}
+                  placeholder="Select existing user"
+                  options={users.filter((user) => !(members.data ?? []).some((member) => member.user_id === user.id))
+                    .map((user) => ({ value: user.id, label: user.username }))}
+                />
+                <button
+                  type="button"
+                  disabled={!selectedMember || addTenantMember.isPending}
+                  onClick={() => addTenantMember.mutate({ tenantId: selectedTenant, userId: selectedMember })}
+                  className="rounded-lg bg-indigo-600 px-4 py-2 text-[13px] font-semibold text-white disabled:opacity-50"
+                >Add member</button>
+              </div>
+              {addTenantMember.isError && <p className="mt-2 text-xs text-rose-300">{(addTenantMember.error as Error).message}</p>}
+              {removeTenantMember.isError && <p className="mt-2 text-xs text-rose-300">{(removeTenantMember.error as Error).message}</p>}
+            </div>
+          )}
+        </section>
+      )}
+
       {/* Create account */}
       <section className={`${cardClass} mt-6`}>
         <div className="flex items-center gap-2">
@@ -1013,7 +1148,12 @@ function UsersTab({
         <p className="mt-1 text-[12px] text-slate-500">
           Create a user account directly — the user logs in with this username + password.
         </p>
-        <CreateUserForm busy={createUser.isPending} error={createUser.error as Error | null} onCreate={(b) => createUser.mutate(b)} />
+        <CreateUserForm
+          busy={createUser.isPending}
+          error={createUser.error as Error | null}
+          tenants={tenantMode ? tenants.data ?? [] : undefined}
+          onCreate={(b) => createUser.mutate(b)}
+        />
         {createUser.data && (
           <p className="mt-3 text-[12.5px] text-emerald-300">
             Account “{createUser.data.username}” created — the user can log in now.
@@ -1156,18 +1296,32 @@ function UsersTab({
 function CreateUserForm({
   busy,
   error,
+  tenants,
   onCreate,
 }: {
   busy: boolean;
   error: Error | null;
-  onCreate: (body: { username: string; email: string; password: string; name?: string }) => void;
+  tenants?: AdminTenant[];
+  onCreate: (body: { username: string; email: string; password: string; name?: string; tenant_id?: string }) => void;
 }) {
   const [username, setUsername] = useState("");
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [tenantId, setTenantId] = useState("");
   return (
     <div className="mt-3">
+      {tenants && (
+        <div className="mb-3">
+          <Select
+            className="w-72"
+            value={tenantId}
+            onChange={setTenantId}
+            placeholder="Choose tenant for this account"
+            options={tenants.map((tenant) => ({ value: tenant.id, label: tenant.name }))}
+          />
+        </div>
+      )}
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-4">
         <input
           value={username}
@@ -1199,13 +1353,16 @@ function CreateUserForm({
       <div className="mt-2 flex items-center gap-3">
         <button
           onClick={() => {
-            onCreate({ username: username.trim(), email: email.trim(), password, name: name.trim() });
+            onCreate({
+              username: username.trim(), email: email.trim(), password,
+              name: name.trim(), ...(tenants ? { tenant_id: tenantId } : {}),
+            });
             setUsername("");
             setName("");
             setEmail("");
             setPassword("");
           }}
-          disabled={busy || !username.trim() || !email.trim() || !password || !name.trim()}
+          disabled={busy || !username.trim() || !email.trim() || !password || !name.trim() || (tenants !== undefined && !tenantId)}
           className="rounded-lg bg-indigo-600 px-4 py-2 text-[13px] font-semibold text-white hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
         >
           {busy ? <Spinner className="h-3.5 w-3.5" /> : <UserPlus className="h-3.5 w-3.5" />}

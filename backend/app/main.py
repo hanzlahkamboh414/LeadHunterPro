@@ -1,9 +1,38 @@
 from contextlib import asynccontextmanager
+import os
+from pathlib import Path
+import sqlite3
 
-from app.api.v1.router import api_router
 from fastapi import FastAPI
 import logging
 
+from app.auth.dependencies import multi_tenant_enabled
+
+
+def verify_tenant_startup() -> None:
+    """Reject unisolated storage before importing routers or starting workers."""
+    if not multi_tenant_enabled():
+        return
+    configured = os.environ.get("LEADHUNTER_UNIFIED_DB_PATH", "").strip()
+    if not configured:
+        raise RuntimeError("multi-tenant mode requires a unified database")
+    target = Path(configured)
+    if not target.is_absolute() or not target.is_file():
+        raise RuntimeError("multi-tenant mode requires an existing unified database")
+    try:
+        with sqlite3.connect(f"{target.resolve().as_uri()}?mode=ro", uri=True) as conn:
+            version = conn.execute("SELECT version FROM unified_metadata").fetchone()
+    except sqlite3.Error as exc:
+        raise RuntimeError("tenant isolation schema not ready") from exc
+    if version != (2,):
+        raise RuntimeError("tenant isolation schema not ready")
+    from app.auth.models import UserStore
+    UserStore().require_secure_platform_admin()
+
+
+verify_tenant_startup()
+
+from app.api.v1.router import api_router  # noqa: E402 - tenant preflight runs first
 
 from app.core.config import settings
 from app.core.logging import setup_logging
@@ -15,6 +44,8 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    verify_tenant_startup()
+
     # Server boot: fail any job left in a live state by a process that died
     # without finishing it (jobs.py recover_orphans). Deliberately a lifespan
     # hook and NOT module scope — merely importing this module (pytest, other
@@ -41,12 +72,15 @@ async def lifespan(app: FastAPI):
     # running campaigns (pacing, daily caps, 429 backoff). Started here —
     # NOT at import time — so pytest never spawns a real sending loop.
     scheduler = None
-    try:
-        from app.campaigns.scheduler import get_scheduler
-        scheduler = get_scheduler()
-        scheduler.start()
-    except Exception:  # noqa: BLE001 — a scheduler failure must not kill the app
-        logger.exception("campaign scheduler failed to start — continuing")
+    if multi_tenant_enabled():
+        logger.warning("campaign scheduler disabled until tenant isolation is complete")
+    else:
+        try:
+            from app.campaigns.scheduler import get_scheduler
+            scheduler = get_scheduler()
+            scheduler.start()
+        except Exception:  # noqa: BLE001 — a scheduler failure must not kill the app
+            logger.exception("campaign scheduler failed to start — continuing")
 
     # Phone-lead email enrichment (phones vertical): one daemon thread that
     # enriches claimed phone leads with emails from their own websites and

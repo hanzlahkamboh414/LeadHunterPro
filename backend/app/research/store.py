@@ -57,6 +57,7 @@ from app.research.outreach.models import OutreachTriggerRecord
 from app.research.pain.models import PainHypothesisRecord, PainVerdict
 from app.research.signals.models import SignalRecord
 from app.research.taxonomy import ResearchState
+from app.core.db_paths import operational_db_path
 
 _INIT_LOCK = threading.RLock()
 
@@ -78,9 +79,9 @@ def default_db_path() -> str:
     store — a machine that never ran the engine must not get a DB created
     just because a module was imported.
     """
-    return os.path.join(
+    return operational_db_path(os.path.join(
         os.path.dirname(__file__), "..", "..", "output", "research_evidence.db",
-    )
+    ))
 
 
 def _add_column(conn: sqlite3.Connection, table: str, name: str, decl: str) -> None:

@@ -667,6 +667,18 @@ export interface AdminUsers {
   users: AdminUser[];
 }
 
+export interface AdminTenant {
+  id: string;
+  name: string;
+  member_count: number;
+}
+
+export interface AdminTenantMember {
+  user_id: string;
+  username: string;
+  role: "owner" | "admin" | "member";
+}
+
 export interface AdminActivityRow {
   id: number;
   user_id: string;

@@ -26,6 +26,7 @@ import hashlib
 import os
 import sqlite3
 import threading
+from app.core.db_paths import operational_db_path
 
 #: What an outcome row can say. Both are real evidence, never a guess.
 OUTCOMES = ("bounced", "delivered")
@@ -46,10 +47,10 @@ class BounceStore:
 
     def __init__(self, db_path: str | None = None) -> None:
         if db_path is None:
-            db_path = os.path.join(
+            db_path = operational_db_path(os.path.join(
                 os.path.dirname(__file__), "..", "..", "output",
                 "email_outcomes.db",
-            )
+            ))
         self._db_path = db_path
         os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
         self._lock = threading.Lock()

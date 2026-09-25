@@ -36,6 +36,8 @@ import threading
 from datetime import datetime, timezone
 from typing import Any
 
+from app.core.db_paths import operational_db_path
+
 _INIT_LOCK = threading.RLock()
 
 #: The 50 states + DC — the demand log stores 2-letter codes, and the
@@ -134,10 +136,10 @@ class HarvesterStore:
 
     def __init__(self, db_path: str | None = None) -> None:
         if db_path is None:
-            db_path = os.path.join(
+            db_path = operational_db_path(os.path.join(
                 os.path.dirname(__file__), "..", "..", "output",
                 "harvester.db",
-            )
+            ))
         self._db_path = db_path
         self._init_db()
 

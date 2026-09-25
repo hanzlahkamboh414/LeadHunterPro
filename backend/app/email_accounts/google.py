@@ -152,6 +152,41 @@ def verify_state(state: str) -> str | None:
     return user_id or None
 
 
+def make_tenant_state(
+    user_id: str, tenant_id: str, nonce: str, *, now: float | None = None,
+) -> str:
+    """Signed tenant-bound OAuth state; nonce is consumed once by the store."""
+    if not all((user_id, tenant_id, nonce)) or any(
+        ":" in value for value in (user_id, tenant_id, nonce)
+    ):
+        raise ValueError("invalid tenant OAuth state component")
+    expiry = int(now if now is not None else time.time()) + STATE_TTL_SECONDS
+    payload = f"{user_id}:{tenant_id}:{expiry}:{nonce}"
+    sig = hmac.new(_state_secret(), payload.encode(), hashlib.sha256).hexdigest()
+    return f"{payload}:{sig}"
+
+
+def verify_tenant_state(state: str) -> tuple[str, str, str, int] | None:
+    """Verify signature/expiry; replay prevention belongs to persisted nonce."""
+    parts = (state or "").split(":")
+    if len(parts) != 5:
+        return None
+    user_id, tenant_id, expiry_text, nonce, sig = parts
+    if not all((user_id, tenant_id, nonce)):
+        return None
+    payload = f"{user_id}:{tenant_id}:{expiry_text}:{nonce}"
+    expected = hmac.new(_state_secret(), payload.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(sig, expected):
+        return None
+    try:
+        expiry = int(expiry_text)
+    except ValueError:
+        return None
+    if expiry < time.time():
+        return None
+    return user_id, tenant_id, nonce, expiry
+
+
 def authorize_url(state: str) -> str:
     """The Google consent page URL (offline access → refresh token)."""
     params = {

@@ -12,6 +12,8 @@ from __future__ import annotations
 import os
 import sqlite3
 
+from app.core.db_paths import operational_db_path
+
 
 class AuthSettings:
     """SQLite persistence for auth settings (key/value, same users.db as the
@@ -19,9 +21,9 @@ class AuthSettings:
 
     def __init__(self, db_path: str | None = None) -> None:
         if db_path is None:
-            db_path = os.path.join(
+            db_path = operational_db_path(os.path.join(
                 os.path.dirname(__file__), "..", "..", "output", "users.db"
-            )
+            ))
         self._db_path = db_path
         self._init_db()
 

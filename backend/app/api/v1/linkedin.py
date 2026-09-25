@@ -17,11 +17,13 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from app.auth.activity import get_activity
-from app.auth.dependencies import get_current_user
+from app.auth.dependencies import (
+    get_current_user, get_tenant_context, multi_tenant_enabled,
+)
 from app.auth.models import User
 from app.discovery.tradefold import normalize_trade
 from app.linkedin.store import LinkedInLeadsStore
@@ -81,9 +83,19 @@ def _lead_out(lead: dict[str, Any]) -> LinkedInLeadOut:
     )
 
 
+def linkedin_tenant_id(
+    request: Request, user: User = Depends(get_current_user),
+) -> str | None:
+    """Recheck current membership on every tenant-mode LinkedIn request."""
+    if not multi_tenant_enabled():
+        return None
+    return get_tenant_context(request, user).tenant_id
+
+
 @router.post("/search", response_model=LinkedInSearchOut)
 def search(
     body: LinkedInSearchIn, user: User = Depends(get_current_user),
+    tenant_id: str | None = Depends(linkedin_tenant_id),
 ) -> LinkedInSearchOut:
     """Serve LinkedIn person leads from the byproduct pool.
 
@@ -94,7 +106,7 @@ def search(
     slug = normalize_trade(body.trade)
     leads = _store.serve(
         slug, body.state.strip().upper()[:2], body.city.strip(),
-        body.target, user.id,
+        body.target, user.id, tenant_id=tenant_id,
     )
     reason = ""
     if len(leads) < body.target:
@@ -110,6 +122,7 @@ def search(
         user.id, user.username, "linkedin_search",
         detail=f"{body.trade or 'any'} · {body.state or 'any'} · "
                f"{body.target} targets",
+        tenant_id=tenant_id,
     )
     return LinkedInSearchOut(
         leads=[_lead_out(l) for l in leads],
@@ -125,17 +138,23 @@ def list_leads(
     city: str = Query("", max_length=60),
     limit: int = Query(200, ge=1, le=1000),
     user: User = Depends(get_current_user),
+    tenant_id: str | None = Depends(linkedin_tenant_id),
 ) -> list[LinkedInLeadOut]:
     """The caller's own LinkedIn leads (claimed at serve)."""
     leads = _store.list_owned(
         user.id, trade=normalize_trade(trade), state=state, city=city,
-        limit=limit,
+        limit=limit, tenant_id=tenant_id,
     )
     return [_lead_out(l) for l in leads]
 
 
 @router.get("/stats")
-def stats(user: User = Depends(get_current_user)) -> dict:
+def stats(
+    user: User = Depends(get_current_user),
+    tenant_id: str | None = Depends(linkedin_tenant_id),
+) -> dict:
     """Honest pool inventory — what email research has produced so far."""
     pool = _store.pool_stats()
-    return {**pool, "mine": len(_store.list_owned(user.id, limit=1000))}
+    return {**pool, "mine": len(_store.list_owned(
+        user.id, limit=1000, tenant_id=tenant_id,
+    ))}

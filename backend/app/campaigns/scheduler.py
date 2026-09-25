@@ -42,6 +42,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
+from app.auth.dependencies import multi_tenant_enabled
 from app.campaigns.personalize import (
     Ask,
     assemble_opening,
@@ -101,7 +102,8 @@ def _is_dsn_sender(addr: str) -> bool:
 
 def ensure_access_token(email_store: EmailAccountStore, *, account_id: int,
                         user_id: str, creds: dict[str, Any],
-                        now: datetime) -> str:
+                        now: datetime,
+                        tenant_id: str | None = None) -> str:
     """A valid access token, refreshing it if expired. Empty string =
     refresh failed (caller decides — the send path pauses the campaign /
     refuses a test send, reply detection simply waits)."""
@@ -124,7 +126,7 @@ def ensure_access_token(email_store: EmailAccountStore, *, account_id: int,
     expires_at = _iso(now + timedelta(seconds=int(tokens.get("expires_in", 3600))))
     email_store.update_tokens(
         account_id, user_id, access_token=new_access,
-        token_expires_at=expires_at,
+        token_expires_at=expires_at, tenant_id=tenant_id,
     )
     return new_access
 
@@ -169,6 +171,8 @@ class CampaignScheduler:
     # -- Thread plumbing (lifespan) ------------------------------------
 
     def start(self) -> None:
+        if multi_tenant_enabled():
+            raise RuntimeError("campaign scheduler tenant isolation is not ready")
         if self._thread and self._thread.is_alive():
             return
         self._stop.clear()
@@ -192,6 +196,8 @@ class CampaignScheduler:
 
     def run_once(self) -> dict[str, int]:
         """One full pass; returns what happened (for logs + tests)."""
+        if multi_tenant_enabled():
+            raise RuntimeError("campaign scheduler tenant isolation is not ready")
         now = self._clock()
         stats = {"promoted": 0, "resumed_rate_limited": 0,
                  "resumed_account": 0, "sent": 0, "paused": 0,

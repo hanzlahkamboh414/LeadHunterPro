@@ -26,11 +26,13 @@ import logging
 from datetime import date
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from app.auth.activity import get_activity
-from app.auth.dependencies import get_current_user
+from app.auth.dependencies import (
+    get_current_user, get_tenant_context, multi_tenant_enabled,
+)
 from app.auth.models import User
 from app.phones.service import phone_search
 from app.phones.store import PhoneLeadsStore
@@ -63,6 +65,15 @@ def require_phone_category(user: User = Depends(get_current_user)) -> User:
             "phone leads are not included."
         ),
     )
+
+
+def phone_tenant_id(
+    request: Request, user: User = Depends(require_phone_category),
+) -> str | None:
+    """Check live membership before any tenant-scoped phone operation."""
+    if not multi_tenant_enabled():
+        return None
+    return get_tenant_context(request, user).tenant_id
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +206,7 @@ def _saved_out(row: dict[str, Any]) -> PhoneSavedOut:
 @router.post("/search", response_model=PhoneSearchOut)
 def search(
     body: PhoneSearchIn, user: User = Depends(require_phone_category),
+    tenant_id: str | None = Depends(phone_tenant_id),
 ) -> PhoneSearchOut:
     """Serve phone leads — instant pure-SQL serve from the harvester's pool."""
     if not user.is_admin and body.target > MAX_USER_TARGET_PHONES:
@@ -203,17 +215,23 @@ def search(
             detail=f"User accounts are limited to {MAX_USER_TARGET_PHONES} "
                    "phone leads per search (the admin account is unlimited).",
         )
-    if not user.is_admin and body.target > _store.daily_remaining(user.id):
+    if (
+        not user.is_admin
+        and body.target > _store.daily_remaining(user.id, tenant_id)
+    ):
         raise HTTPException(
             status_code=422,
-            detail=f"Only {_store.daily_remaining(user.id)} phone numbers remain "
-                   "in today's allowance (UTC).",
+            detail=(
+                f"Only {_store.daily_remaining(user.id, tenant_id)} phone "
+                "numbers remain in today's allowance (UTC)."
+            ),
         )
     outcome = phone_search(
         _store,
         trade=body.trade, state=body.state, city=body.city,
         target=body.target, user_id=user.id,
         enforce_quota=not user.is_admin,
+        tenant_id=tenant_id,
     )
     logger.info(
         "POST /phones/search -> %d lead(s) for %s (trade=%s state=%s city=%r "
@@ -239,6 +257,7 @@ def search(
         user.id, user.username, "phone_search",
         detail=f"{body.trade or 'all trades'} · {body.state or 'any'} · "
                f"{body.target} targets",
+        tenant_id=tenant_id,
     )
     return PhoneSearchOut(
         leads=[_lead_out(l) for l in outcome["leads"]],
@@ -259,6 +278,7 @@ def list_leads(
     city: str = Query("", max_length=60),
     limit: int = Query(1000, ge=1, le=1000),
     user: User = Depends(require_phone_category),
+    tenant_id: str | None = Depends(phone_tenant_id),
 ) -> list[PhoneLeadOut]:
     """Today's still-owned claims from all searched states (UTC).
 
@@ -271,6 +291,7 @@ def list_leads(
     leads = _store.list_owned(
         user.id,
         trade=normalize_trade(trade), state=state, city=city, limit=limit,
+        tenant_id=tenant_id,
     )
     return [_lead_out(l) for l in leads]
 
@@ -279,17 +300,18 @@ def list_leads(
 def stats(
     target: int = Query(25, ge=1, le=5000),
     user: User = Depends(require_phone_category),
+    tenant_id: str | None = Depends(phone_tenant_id),
 ) -> dict:
     """Eligible states for users; full inventory counts only for admins."""
     servable = _store.servable_by_state()
     common = {
-        "mine": len(_store.list_owned(user.id, limit=1000)),
+        "mine": len(_store.list_owned(user.id, limit=1000, tenant_id=tenant_id)),
         "eligible_states": sorted(
             state for state, count in servable.items() if count >= target
         ),
-        "daily_limit": None if user.is_admin else _store.daily_limit(user.id),
-        "daily_used": _store.daily_usage(user.id),
-        "daily_remaining": None if user.is_admin else _store.daily_remaining(user.id),
+        "daily_limit": None if user.is_admin else _store.daily_limit(user.id, tenant_id),
+        "daily_used": _store.daily_usage(user.id, tenant_id),
+        "daily_remaining": None if user.is_admin else _store.daily_remaining(user.id, tenant_id),
     }
     if user.is_admin:
         return {
@@ -304,30 +326,39 @@ def stats(
 def call_activity(
     day: str = Query("", alias="date", max_length=10),
     user: User = Depends(require_phone_category),
+    tenant_id: str | None = Depends(phone_tenant_id),
 ) -> dict:
     if day:
         try:
             date.fromisoformat(day)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail="date must be YYYY-MM-DD") from exc
-    return _store.call_activity(user.id, day)
+    return _store.call_activity(user.id, day, tenant_id=tenant_id)
 
 
 @router.get("/activity/days")
-def call_days(user: User = Depends(require_phone_category)) -> list[str]:
-    return _store.call_days(user.id)
+def call_days(
+    user: User = Depends(require_phone_category),
+    tenant_id: str | None = Depends(phone_tenant_id),
+) -> list[str]:
+    return _store.call_days(user.id, tenant_id=tenant_id)
 
 
 @router.post("/leads/{lead_id}/event")
 def record_call_event(
     lead_id: int, body: PhoneEventIn,
     user: User = Depends(require_phone_category),
+    tenant_id: str | None = Depends(phone_tenant_id),
 ) -> dict:
     if body.action == "wrong_number":
-        result = _store.mark_wrong_number(lead_id, user.id)
+        result = _store.mark_wrong_number(
+            lead_id, user.id, tenant_id=tenant_id,
+        )
     else:
-        result = _store.record_call_event(lead_id, user.id, body.action)
-    return _act(lead_id, user, body.action, result)
+        result = _store.record_call_event(
+            lead_id, user.id, body.action, tenant_id=tenant_id,
+        )
+    return _act(lead_id, user, body.action, result, tenant_id=tenant_id)
 
 
 # ---------------------------------------------------------------------------
@@ -335,7 +366,8 @@ def record_call_event(
 # ---------------------------------------------------------------------------
 
 def _act(lead_id: int, user: User, action: str,
-         result: dict[str, Any] | None) -> dict[str, Any]:
+         result: dict[str, Any] | None,
+         tenant_id: str | None = None) -> dict[str, Any]:
     """Shared tail for the four action endpoints: owner-check outcome ->
     404 when the lead isn't the caller's, honest action result + activity
     log entry otherwise."""
@@ -346,38 +378,49 @@ def _act(lead_id: int, user: User, action: str,
                    "or already released).",
         )
     get_activity().record(user.id, user.username, f"phone_{action}",
-                          detail=f"lead {lead_id}")
+                          detail=f"lead {lead_id}", tenant_id=tenant_id)
     return result
 
 
 @router.post("/leads/{lead_id}/lead")
 def mark_lead(
     lead_id: int, user: User = Depends(require_phone_category),
+    tenant_id: str | None = Depends(phone_tenant_id),
 ) -> dict:
     """✓Lead: the person said "project doonga" — snapshot to My Leads,
     retire the number (never served to anyone else, never re-harvested)."""
-    return _act(lead_id, user, "lead", _store.mark_lead(lead_id, user.id))
+    return _act(
+        lead_id, user, "lead",
+        _store.mark_lead(lead_id, user.id, tenant_id=tenant_id),
+        tenant_id=tenant_id,
+    )
 
 
 @router.post("/leads/{lead_id}/voicemail")
 def mark_voicemail(
     lead_id: int, user: User = Depends(require_phone_category),
+    tenant_id: str | None = Depends(phone_tenant_id),
 ) -> dict:
     """☎Voicemail: park the number (14/30/60-day tiers) — it recirculates
     to the shared rotation after the cooldown; a 4th voicemail retires it."""
     return _act(
-        lead_id, user, "voicemail", _store.mark_voicemail(lead_id, user.id),
+        lead_id, user, "voicemail",
+        _store.mark_voicemail(lead_id, user.id, tenant_id=tenant_id),
+        tenant_id=tenant_id,
     )
 
 
 @router.post("/leads/{lead_id}/store")
 def store_contact(
     lead_id: int, user: User = Depends(require_phone_category),
+    tenant_id: str | None = Depends(phone_tenant_id),
 ) -> dict:
     """💾Store: keep the contact in the account (row stays claimed — it is
     still on the caller's sheet, never served to anyone else)."""
     return _act(
-        lead_id, user, "store", _store.store_contact(lead_id, user.id),
+        lead_id, user, "store",
+        _store.store_contact(lead_id, user.id, tenant_id=tenant_id),
+        tenant_id=tenant_id,
     )
 
 
@@ -385,10 +428,13 @@ def store_contact(
 def note_lead(
     lead_id: int, body: NoteIn,
     user: User = Depends(require_phone_category),
+    tenant_id: str | None = Depends(phone_tenant_id),
 ) -> dict:
     """📝Note: save a note against the lead (auto-stored as a contact)."""
     return _act(
-        lead_id, user, "note", _store.note_lead(lead_id, user.id, body.note),
+        lead_id, user, "note",
+        _store.note_lead(lead_id, user.id, body.note, tenant_id=tenant_id),
+        tenant_id=tenant_id,
     )
 
 
@@ -397,20 +443,25 @@ def list_saved(
     kind: str = Query("", pattern="^(lead|contact)?$"),
     limit: int = Query(1000, ge=1, le=5000),
     user: User = Depends(require_phone_category),
+    tenant_id: str | None = Depends(phone_tenant_id),
 ) -> list[PhoneSavedOut]:
     """My Leads + My Contacts — the caller's saved rows (✓Lead + 💾Store
     output, notes included). ``kind`` filters to 'lead' or 'contact'."""
-    return [_saved_out(r) for r in _store.list_saved(user.id, kind=kind,
-                                                     limit=limit)]
+    return [_saved_out(r) for r in _store.list_saved(
+        user.id, kind=kind, limit=limit, tenant_id=tenant_id,
+    )]
 
 
 @router.put("/saved/{saved_id}/note")
 def set_saved_note(
     saved_id: int, body: NoteIn,
     user: User = Depends(require_phone_category),
+    tenant_id: str | None = Depends(phone_tenant_id),
 ) -> dict:
     """Edit the note on a saved lead/contact row."""
-    if not _store.set_saved_note(saved_id, user.id, body.note):
+    if not _store.set_saved_note(
+        saved_id, user.id, body.note, tenant_id=tenant_id,
+    ):
         raise HTTPException(404, "No such saved row on your account.")
     return {"ok": True}
 
@@ -418,9 +469,10 @@ def set_saved_note(
 @router.delete("/saved/{saved_id}")
 def delete_saved(
     saved_id: int, user: User = Depends(require_phone_category),
+    tenant_id: str | None = Depends(phone_tenant_id),
 ) -> dict:
     """Delete a saved lead/contact (the user's own row only — the pool is
     untouched by this)."""
-    if not _store.delete_saved(saved_id, user.id):
+    if not _store.delete_saved(saved_id, user.id, tenant_id=tenant_id):
         raise HTTPException(404, "No such saved row on your account.")
     return {"ok": True}

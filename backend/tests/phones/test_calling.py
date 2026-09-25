@@ -8,6 +8,12 @@ trade-less serve + coverage, and the API endpoints wrapping them all.
 
 from __future__ import annotations
 
+import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+
+import pytest
+
 from app.phones.service import phone_search
 from app.phones.store import (
     MAX_VOICEMAILS,
@@ -110,6 +116,19 @@ def test_mark_lead_snapshots_and_retires(tmp_path):
     assert counts["suppressed"] == 1
 
 
+def test_mark_lead_retires_every_business_row_with_same_number(tmp_path):
+    store = _store(tmp_path)
+    store.add([
+        _rec("5031110001", "First Business"),
+        _rec("5031110001", "Second Business"),
+    ])
+    lead = store.serve("gc", "", "", 1, "alice")[0]
+
+    assert store.mark_lead(lead["id"], "alice")
+    assert store.pool_stats()["total"] == 0
+    assert store.serve("gc", "", "", 1, "bob") == []
+
+
 def test_mark_lead_owner_only(tmp_path):
     """Only the claimant can mark a lead; another user's row is a 404-style
     None, and the action never happens."""
@@ -120,6 +139,45 @@ def test_mark_lead_owner_only(tmp_path):
     assert store.mark_lead(99999, "alice") is None
     # Nothing changed: the row is still in the pool, still alice's.
     assert store.list_owned("alice") and store.pool_stats()["total"] == 1
+
+
+def test_mark_lead_failure_rolls_back_snapshot_and_event(tmp_path):
+    store = _store(tmp_path)
+    store.add([_rec("5031110001")])
+    lead = store.serve("gc", "", "", 1, "alice")[0]
+    with sqlite3.connect(tmp_path / "phones.db") as conn:
+        conn.execute("""
+            CREATE TRIGGER reject_lead_retirement BEFORE INSERT ON phone_suppressions
+            BEGIN SELECT RAISE(ABORT, 'retirement unavailable'); END
+        """)
+
+    with pytest.raises(sqlite3.IntegrityError, match="retirement unavailable"):
+        store.mark_lead(lead["id"], "alice")
+
+    assert store.list_saved("alice", kind="lead") == []
+    assert store.call_activity("alice")["outcomes"] == {}
+    assert len(store.list_owned("alice")) == 1
+    assert store.pool_stats()["total"] == 1
+
+
+def test_two_simultaneous_lead_actions_only_complete_once(tmp_path):
+    store = _store(tmp_path)
+    store.add([_rec("5031110001")])
+    lead = store.serve("gc", "", "", 1, "alice")[0]
+    start = Barrier(2)
+
+    def mark():
+        start.wait()
+        return store.mark_lead(lead["id"], "alice")
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(mark)
+        second = executor.submit(mark)
+        results = (first.result(), second.result())
+
+    assert sum(result is not None for result in results) == 1
+    assert len(store.list_saved("alice", kind="lead")) == 1
+    assert len(store.call_activity("alice")["events"]) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +198,35 @@ def test_voicemail_tiers_and_release(tmp_path):
     assert store.list_owned("alice") == []
     assert store.serve("gc", "", "", 10, "bob") == []
     assert store.unclaimed_count("gc") == 0  # resting, not servable
+
+
+def test_fourth_voicemail_retirement_failure_rolls_back_event(tmp_path):
+    store = _store(tmp_path)
+    store.add([_rec("5031110001")])
+    lead = store.serve("gc", "", "", 1, "alice")[0]
+    for _ in range(3):
+        store.mark_voicemail(lead["id"], "alice")
+        with sqlite3.connect(tmp_path / "phones.db") as conn:
+            conn.execute(
+                "UPDATE phone_leads SET voicemail_at = datetime('now', '-365 days')"
+            )
+        lead = store.serve("gc", "", "", 1, "alice")[0]
+    with sqlite3.connect(tmp_path / "phones.db") as conn:
+        conn.execute("""
+            CREATE TRIGGER reject_retirement BEFORE INSERT ON phone_suppressions
+            BEGIN SELECT RAISE(ABORT, 'retirement unavailable'); END
+        """)
+
+    with pytest.raises(sqlite3.IntegrityError, match="retirement unavailable"):
+        store.mark_voicemail(lead["id"], "alice")
+
+    assert len(store.call_activity("alice")["events"]) == 3
+    assert len(store.list_owned("alice")) == 1
+    with sqlite3.connect(tmp_path / "phones.db") as conn:
+        assert conn.execute(
+            "SELECT voicemail_count, voicemail_at FROM phone_leads WHERE id = ?",
+            (lead["id"],),
+        ).fetchone()[0] == 3
 
 
 def test_voicemail_resting_expires_and_recirculates(tmp_path):

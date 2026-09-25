@@ -48,6 +48,8 @@ import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from app.core.db_paths import operational_db_path
+
 logger = logging.getLogger(__name__)
 
 # Search answers move slowly for the facts this pipeline cites (company
@@ -84,9 +86,9 @@ def default_db_path() -> str:
     A dedicated file, not ``lead_research.db``: the cache is disposable
     infrastructure, so deleting it must never risk a dossier.
     """
-    return os.path.join(
+    return operational_db_path(os.path.join(
         os.path.dirname(__file__), "..", "..", "output", "search_cache.db"
-    )
+    ))
 
 
 def normalize_query(query: str) -> str:
@@ -391,7 +393,11 @@ def get_search_cache() -> SearchCache | None:
         except Exception:  # noqa: BLE001 — settings unavailable (early import/tests)
             enabled, ttl, extract_ttl, path = True, DEFAULT_TTL_DAYS, DEFAULT_EXTRACT_TTL_DAYS, None
         if enabled:
-            _CACHE = SearchCache(path, ttl_days=ttl, extract_ttl_days=extract_ttl)
+            _CACHE = SearchCache(
+                operational_db_path(path or default_db_path()),
+                ttl_days=ttl,
+                extract_ttl_days=extract_ttl,
+            )
             logger.info(
                 "SEARCH CACHE enabled path=%s ttl=%dd extract_ttl=%dd",
                 _CACHE.path,

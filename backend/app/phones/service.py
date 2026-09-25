@@ -40,6 +40,7 @@ def phone_search(
     target: int,
     user_id: str,
     enforce_quota: bool = True,
+    tenant_id: str | None = None,
 ) -> dict[str, Any]:
     """Serve ``target`` phone leads for one user from the shared pool.
 
@@ -65,8 +66,10 @@ def phone_search(
     state = (state or "").strip().upper()[:2]
     city = (city or "").strip()
 
-    leads = store.serve(slug, state, city, target, user_id,
-                        enforce_quota=enforce_quota)
+    serve_kwargs: dict[str, Any] = {"enforce_quota": enforce_quota}
+    if tenant_id is not None:
+        serve_kwargs["tenant_id"] = tenant_id
+    leads = store.serve(slug, state, city, target, user_id, **serve_kwargs)
     if slug:
         coverage = covered_sources(slug, state)
     else:

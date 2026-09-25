@@ -17,6 +17,8 @@ import type {
   AdminLeadAction,
   AdminLeadScope,
   AdminSearchCache,
+  AdminTenant,
+  AdminTenantMember,
   AdminUserLeadSummary,
   AdminUsers,
   AdminVisibility,
@@ -54,6 +56,8 @@ import type {
   WrongPhoneArchiveRow,
   SignupCategory,
 } from "../types";
+import { ACTIVE_TENANT_KEY } from "../lib/tenantSelection";
+import type { TenantMembership } from "../lib/tenantSelection";
 
 const BASE = import.meta.env?.VITE_API_BASE || "/api/v1";
 
@@ -97,6 +101,8 @@ function authHeaders(init?: RequestInit): Record<string, string> {
   try {
     const token = localStorage.getItem("leadhunter.jwt");
     if (token) headers["Authorization"] = `Bearer ${token}`;
+    const tenantId = localStorage.getItem(ACTIVE_TENANT_KEY);
+    if (tenantId) headers["X-Tenant-ID"] = tenantId;
   } catch {
     /* ignore private-mode failures */
   }
@@ -205,12 +211,14 @@ export interface ExportFilter {
  * for this one hop and a signed state carries the user back. */
 export function googleAuthorizeUrl(): string {
   let token = "";
+  let tenantId = "";
   try {
     token = localStorage.getItem("leadhunter.jwt") || "";
+    tenantId = localStorage.getItem(ACTIVE_TENANT_KEY) || "";
   } catch {
     /* private mode */
   }
-  return `${BASE}/email-accounts/google/authorize?token=${encodeURIComponent(token)}`;
+  return `${BASE}/email-accounts/google/authorize?token=${encodeURIComponent(token)}${tenantId ? `&tenant_id=${encodeURIComponent(tenantId)}` : ""}`;
 }
 
 export const api = {
@@ -250,8 +258,12 @@ export const api = {
   },
 
   /** PUBLIC boot check — is the login page on or off? (Admin panel toggle.) */
-  authMode(): Promise<{ auth_enabled: boolean }> {
+  authMode(): Promise<{ auth_enabled: boolean; tenant_mode?: boolean }> {
     return request("/auth/mode");
+  },
+
+  myTenants(): Promise<TenantMembership[]> {
+    return request<TenantMembership[]>("/auth/tenants");
   },
 
   /** Admin toggle: turn the login page on/off (open-site mode). */
@@ -405,6 +417,29 @@ export const api = {
   adminUsers(): Promise<AdminUsers> {
     return request<AdminUsers>("/admin/users");
   },
+  adminTenants(): Promise<AdminTenant[]> {
+    return request<AdminTenant[]>("/admin/tenants");
+  },
+  adminCreateTenant(name: string): Promise<AdminTenant> {
+    return request<AdminTenant>("/admin/tenants", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+  },
+  adminTenantMembers(tenantId: string): Promise<AdminTenantMember[]> {
+    return request<AdminTenantMember[]>(`/admin/tenants/${encodeURIComponent(tenantId)}/members`);
+  },
+  adminAddTenantMember(tenantId: string, userId: string): Promise<void> {
+    return request(`/admin/tenants/${encodeURIComponent(tenantId)}/members/${encodeURIComponent(userId)}`, {
+      method: "PUT",
+    });
+  },
+  adminRemoveTenantMember(tenantId: string, userId: string): Promise<void> {
+    return request(`/admin/tenants/${encodeURIComponent(tenantId)}/members/${encodeURIComponent(userId)}`, {
+      method: "DELETE",
+    });
+  },
   adminSetPhoneLimit(userId: string, dailyLimit: number): Promise<{ user_id: string; daily_limit: number }> {
     return request(`/admin/users/${encodeURIComponent(userId)}/phone-limit`, {
       method: "PUT",
@@ -417,6 +452,7 @@ export const api = {
     email: string;
     password: string;
     name?: string;
+    tenant_id?: string;
   }): Promise<AdminUsers["users"][number]> {
     return request("/admin/users", {
       method: "POST",

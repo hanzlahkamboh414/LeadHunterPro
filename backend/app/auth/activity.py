@@ -14,6 +14,7 @@ import os
 import sqlite3
 
 from app.auth.models import _now
+from app.core.db_paths import operational_db_path
 
 
 def get_activity() -> "ActivityStore":
@@ -36,9 +37,9 @@ class ActivityStore:
 
     def __init__(self, db_path: str | None = None) -> None:
         if db_path is None:
-            db_path = os.path.join(
+            db_path = operational_db_path(os.path.join(
                 os.path.dirname(__file__), "..", "..", "output", "users.db"
-            )
+            ))
         self._db_path = db_path
         self._init_db()
 
@@ -52,9 +53,13 @@ class ActivityStore:
                 username TEXT NOT NULL,
                 action TEXT NOT NULL,
                 detail TEXT NOT NULL DEFAULT '',
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                tenant_id TEXT
             )
         """)
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(activity_log)")}
+        if "tenant_id" not in columns:
+            conn.execute("ALTER TABLE activity_log ADD COLUMN tenant_id TEXT")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_activity_created "
             "ON activity_log (created_at DESC)"
@@ -62,15 +67,19 @@ class ActivityStore:
         conn.commit()
         conn.close()
 
-    def record(self, user_id: str, username: str, action: str, detail: str = "") -> None:
+    def record(
+        self, user_id: str, username: str, action: str, detail: str = "",
+        tenant_id: str | None = None,
+    ) -> None:
         """Append one activity row. Never raises into the request path — a
         failed audit write must not break the action it is describing."""
         conn = sqlite3.connect(self._db_path)
         try:
             conn.execute(
-                "INSERT INTO activity_log (user_id, username, action, detail, created_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (user_id, username, action, detail, _now()),
+                "INSERT INTO activity_log "
+                "(user_id, username, action, detail, created_at, tenant_id) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (user_id, username, action, detail, _now(), tenant_id),
             )
             conn.commit()
         except sqlite3.Error:
@@ -78,23 +87,33 @@ class ActivityStore:
         finally:
             conn.close()
 
-    def list(self, limit: int = 200, user_id: str = "") -> list[dict]:
+    def list(
+        self, limit: int = 200, user_id: str = "",
+        tenant_id: str | None = None,
+    ) -> list[dict]:
         """Recent activity, newest first — all users, or one user's history."""
+        if os.environ.get("LEADHUNTER_MULTI_TENANT_ENABLED") == "1" and not tenant_id:
+            raise ValueError("tenant_id is required in multi-tenant mode")
         conn = sqlite3.connect(self._db_path)
-        if user_id:
+        try:
+            clauses: list[str] = []
+            args: list[str | int] = []
+            if user_id:
+                clauses.append("user_id = ?")
+                args.append(user_id)
+            if tenant_id:
+                clauses.append("tenant_id = ?")
+                args.append(tenant_id)
+            where = " WHERE " + " AND ".join(clauses) if clauses else ""
+            args.append(int(limit))
             cur = conn.execute(
-                "SELECT id, user_id, username, action, detail, created_at "
-                "FROM activity_log WHERE user_id = ? ORDER BY id DESC LIMIT ?",
-                (user_id, int(limit)),
+                "SELECT id, user_id, username, action, detail, created_at, "
+                f"tenant_id FROM activity_log{where} ORDER BY id DESC LIMIT ?",
+                args,
             )
-        else:
-            cur = conn.execute(
-                "SELECT id, user_id, username, action, detail, created_at "
-                "FROM activity_log ORDER BY id DESC LIMIT ?",
-                (int(limit),),
-            )
-        rows = cur.fetchall()
-        conn.close()
+            rows = cur.fetchall()
+        finally:
+            conn.close()
         return [
             {
                 "id": r[0],
@@ -103,6 +122,7 @@ class ActivityStore:
                 "action": r[3],
                 "detail": r[4] or "",
                 "created_at": r[5],
+                "tenant_id": r[6],
             }
             for r in rows
         ]

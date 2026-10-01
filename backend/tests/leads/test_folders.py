@@ -499,6 +499,38 @@ def test_admin_own_dashboard_sees_own_and_legacy_folders(tmp_path):
     assert "User group" not in names
 
 
+def test_admin_legacy_and_own_same_name_is_one_folder(tmp_path):
+    store = LeadResearchStore(db_path=str(tmp_path / "db.sqlite"))
+    store.create_folder("Gohar")
+    store.create_folder("Gohar", user_id="admin1")
+    store.save(_dossier("legacy@x.com", "x.com"))
+    store.set_meta("legacy@x.com", folder="Gohar")
+    store.save(_dossier("admin@x.com", "x.com"), user_id="admin1")
+    store.set_meta("admin@x.com", folder="Gohar")
+
+    folders = store.list_folders(user_id="admin1", include_legacy=True)
+    catalog = store.folder_catalog(user_id="admin1", include_legacy=True)
+    assert [(f["name"], f["count"]) for f in folders] == [("Gohar", 2)]
+    assert [(f["name"], f["count"]) for f in catalog["folders"]] == [("Gohar", 2)]
+    # A case variant or legacy collision cannot create another visible chip.
+    assert store.create_folder("gohar", user_id="admin1", include_legacy=True) is False
+    assert store.create_folder("Fresh", user_id="admin1", include_legacy=True) is True
+    assert store.create_folder("fresh", user_id="admin1", include_legacy=True) is False
+
+
+def test_tag_case_variants_share_one_chip_and_filter(tmp_path):
+    store = LeadResearchStore(db_path=str(tmp_path / "db.sqlite"))
+    store.save(_dossier("a@x.com", "x.com"), user_id="u1")
+    store.save(_dossier("b@y.com", "y.com"), user_id="u1")
+    store.set_meta("a@x.com", tags=["New", "new"])
+    store.set_meta("b@y.com", tags=["new"])
+    assert store.get_meta("a@x.com").tags == ["New"]
+    assert store.tag_counts(user_id="u1") == [{"tag": "New", "count": 2}]
+    assert store.query_leads(tag="New", user_id="u1")[1] == 2
+    assert store.clear_tag("NEW", user_id="u1") == 2
+    assert store.tag_counts(user_id="u1") == []
+
+
 def test_rename_and_clear_never_touch_other_accounts_rows(tmp_path):
     """u1 renaming/clearing their folder leaves u2's same-named folder intact."""
     store = LeadResearchStore(db_path=str(tmp_path / "db.sqlite"))

@@ -24,6 +24,7 @@ from app.campaigns.templates import render, sample_context
 from app.campaigns.tracking import PIXEL_GIF, parse_token
 from app.email_accounts import google, smtp
 from app.email_accounts.store import get_email_store
+from app.email.bounce_learning import BounceStore
 from app.schemas.campaigns import (
     CampaignCreateIn,
     CampaignCreateOut,
@@ -42,6 +43,15 @@ from app.schemas.campaigns import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/campaigns", tags=["Campaigns"])
+
+
+def _bounced_addresses(emails: list[str]) -> set[str]:
+    store = BounceStore()
+    try:
+        return {str(email).lower() for email in emails
+                if store.lookup(str(email)) == "bounced"}
+    finally:
+        store.close()
 
 
 def _validate_start_at(start_at: str) -> str:
@@ -89,12 +99,13 @@ def create_campaign(
 
     store = get_campaign_store()
     already = store.already_sent_emails(user.id, body.emails)
-    emails = [e for e in body.emails if e not in already]
+    bounced = _bounced_addresses(body.emails)
+    excluded = {str(e).lower() for e in already} | bounced
+    emails = [e for e in body.emails if str(e).lower() not in excluded]
     if not emails:
         raise HTTPException(
             status_code=422,
-            detail=f"all {len(already)} leads were already emailed by an "
-                   f"earlier campaign — nothing to send",
+            detail="No sendable leads remain: recipients were already emailed or bounced",
         )
     campaign = store.create(
         user.id, account_id=body.account_id, name=body.name.strip(),
@@ -109,9 +120,9 @@ def create_campaign(
     campaign["account_emails"] = [owned[a]["email"] for a in wanted]
     logger.info("POST /campaigns -> %s (%d leads, %d excluded as already-sent, "
                 "%d accounts, ai_personalize=%s)",
-                campaign["name"], len(emails), len(already), len(wanted),
+                campaign["name"], len(emails), len(excluded), len(wanted),
                 body.ai_personalize)
-    return {"campaign": campaign, "excluded": len(already)}
+    return {"campaign": campaign, "excluded": len(excluded)}
 
 
 @router.post("/test-send", response_model=CampaignTestSendOut)
@@ -314,12 +325,19 @@ def update_campaign(
             if account["status"] != "connected" and aid not in current["account_ids"]:
                 raise HTTPException(status_code=409,
                                     detail=f"account {account['email']} must be reconnected")
+    safe_emails = None
+    if body.emails is not None:
+        bounced = _bounced_addresses(body.emails)
+        safe_emails = [email for email in body.emails
+                       if str(email).lower() not in bounced]
+        if body.emails and not safe_emails:
+            raise HTTPException(status_code=422, detail="All selected recipients have bounced")
     if not store.update_campaign(
             campaign_id, user.id, name=body.name.strip(),
             subject=body.subject, body=body.body,
             account_id=primary if body.account_id is not None or body.account_ids is not None else None,
             account_ids=wanted[1:] if body.account_id is not None or body.account_ids is not None else None,
-            emails=body.emails, start_at=new_start,
+            emails=safe_emails, start_at=new_start,
             daily_limit=body.daily_limit, delay_min_s=body.delay_min_s,
             delay_max_s=body.delay_max_s,
             followups=[fu.model_dump() for fu in body.followups]

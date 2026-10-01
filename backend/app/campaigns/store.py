@@ -585,6 +585,43 @@ class CampaignStore:
         conn.close()
         return cur.rowcount > 0
 
+    def purge_recipient(self, email: str) -> int:
+        """Remove a confirmed invalid address from every campaign queue.
+
+        Sent and pending rows are removed together as requested; the bounce
+        outcome remains in email_outcomes.db as the audit and send block.
+        """
+        addr = (email or "").strip().lower()
+        if not addr:
+            return 0
+        conn = self._conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            campaign_ids = [row[0] for row in conn.execute(
+                "SELECT DISTINCT campaign_id FROM campaign_sends "
+                "WHERE lower(email) = ?", (addr,),
+            )]
+            removed = conn.execute(
+                "DELETE FROM campaign_sends WHERE lower(email) = ?", (addr,),
+            ).rowcount
+            conn.execute("DELETE FROM campaign_hooks WHERE lower(email) = ?", (addr,))
+            conn.execute("DELETE FROM campaign_replies WHERE lower(email) = ?", (addr,))
+            for cid in campaign_ids:
+                conn.execute(
+                    "UPDATE campaigns SET status = 'completed', updated_at = ? "
+                    "WHERE id = ? AND status = 'running' AND NOT EXISTS "
+                    "(SELECT 1 FROM campaign_sends WHERE campaign_id = ? "
+                    "AND state = 'pending')",
+                    (_now(), cid, cid),
+                )
+            conn.commit()
+            return removed
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     def mark_skipped(self, send_id: int, *, error: str) -> None:
         """Drop one pending send without sending (e.g. a follow-up whose
         lead replied between queueing and send time)."""

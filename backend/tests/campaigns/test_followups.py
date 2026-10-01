@@ -481,7 +481,7 @@ def _bounce_setup(tmp_path, monkeypatch, *, emails=("jane@acme.com",
     bounce = BounceStore(db_path=str(tmp_path / "outcomes.db"))
     ctx["sched"]._bounce_store = bounce
     ctx["bounce"] = bounce
-    _make_campaign(ctx, emails=emails)
+    ctx["campaign_id"] = _make_campaign(ctx, emails=emails)["id"]
     monkeypatch.setattr(google, "send_gmail", lambda tok, **kw: {})
     return ctx
 
@@ -521,8 +521,26 @@ def test_dsn_is_recorded_as_bounce(tmp_path, monkeypatch):
 
     assert stats["bounced"] == 1
     assert ctx["bounce"].lookup("bob@dead.com") == "bounced"
+    assert ctx["leads"].get("bob@dead.com") is None
+    assert all(s["email"] != "bob@dead.com" for s in
+               ctx["store"].sends(ctx["campaign_id"], ctx["user"].id))
+    assert ctx["bounce"].pending_hard_bounces() == []
     # The DSN was never treated as a reply.
     assert stats["replied"] == 0
+
+
+def test_temporary_delivery_notice_keeps_lead_and_queue(tmp_path, monkeypatch):
+    ctx = _bounce_setup(tmp_path, monkeypatch, emails=("bob@dead.com",))
+    monkeypatch.setattr(google, "list_inbox_senders", lambda tok, **kw: [{
+        "from": "mailer-daemon@googlemail.com",
+        "subject": "Delivery Status Notification (Delay)",
+        "snippet": "Delivery delayed to bob@dead.com: 4.2.2 mailbox full; try again later",
+    }])
+    ctx["sched"].run_once()
+    ctx["sched"]._clock.advance(2 * 3600)
+    assert ctx["sched"].run_once()["bounced"] == 0
+    assert ctx["bounce"].lookup("bob@dead.com") is None
+    assert ctx["leads"].get("bob@dead.com") is not None
 
 
 def test_dsn_naming_no_sent_address_records_nothing(tmp_path, monkeypatch):

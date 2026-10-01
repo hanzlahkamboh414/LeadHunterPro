@@ -49,13 +49,14 @@ from app.campaigns.personalize import (
     default_ask,
     generate_hook,
 )
+from app.campaigns.hard_bounce import hard_bounce_target, invalid_recipient_reason
 from app.campaigns.store import CampaignStore
 from app.campaigns.templates import context_for, render
 from app.campaigns.tracking import pixel_url
 from app.email_accounts import google, smtp
 from app.email_accounts.store import EmailAccountStore
 from app.lead_research.models import CRM_STATUSES
-from app.lead_research.service import LeadResearchStore
+from app.lead_research.service import LeadResearchStore, PendingLeadsStore
 
 logger = logging.getLogger(__name__)
 
@@ -227,6 +228,7 @@ class CampaignScheduler:
                             stats["resumed_account"])
 
         self._check_replies(now, stats)
+        self._cleanup_hard_bounces()
 
         for c in self._store.running_campaigns():
             self._drain_one(c, now, stats)
@@ -285,35 +287,38 @@ class CampaignScheduler:
                     creds["email"], exc)
                 continue
 
-            by_email = {s["email"]: s for s in sent}
+            by_email = {s["email"].lower(): s for s in sent}
+            human_replies = {
+                google.parse_from(msg.get("from", "")) for msg in senders
+                if not _is_dsn_sender(google.parse_from(msg.get("from", "")))
+            }
             for msg in senders:
                 addr = google.parse_from(msg.get("from", ""))
                 target = by_email.get(addr)
                 if target is None:
-                    # P5-Lite bounce learning: a delivery-status notification
-                    # from the mail system names the failed address in its
-                    # snippet/subject. A DSN whose target cannot be extracted
-                    # is an honest miss (logged), never a guessed bounce.
+                    # Only a confirmed permanently invalid recipient is
+                    # eligible for removal. Generic failures, throttles and
+                    # quota notices leave the lead and campaigns intact.
                     if self._bounce_store is not None and _is_dsn_sender(addr):
                         text = " ".join(
                             (msg.get("subject") or "", msg.get("snippet") or "")
-                        ).lower()
-                        for sent_addr in by_email:
-                            if sent_addr.lower() in text:
-                                self._bounce_store.record(
-                                    sent_addr, "bounced",
-                                    evidence=f"DSN from {addr}: "
-                                             f"{(msg.get('subject') or '')[:120]}")
+                        )
+                        bounced = hard_bounce_target(text, set(by_email))
+                        if not bounced and msg.get("id"):
+                            try:
+                                full = google.get_message(access_token, msg["id"])
+                                text += " " + (full.get("text") or "")
+                                bounced = hard_bounce_target(text, set(by_email))
+                            except Exception as exc:  # noqa: BLE001 — inbox reads are best-effort
+                                logger.warning("DSN detail read failed: %s", exc)
+                        if bounced and bounced not in human_replies:
+                            if self._bounce_store.record(
+                                bounced, "bounced", hard_bounce=True,
+                                evidence=f"DSN from {addr}: "
+                                         f"{(msg.get('subject') or '')[:120]}",
+                            ):
                                 stats["bounced"] += 1
-                                logger.info(
-                                    "bounce recorded: %s (DSN from %s)",
-                                    sent_addr, addr)
-                                break
-                        else:
-                            logger.info(
-                                "DSN from %s names none of our %d sent "
-                                "address(es) — no bounce recorded", addr,
-                                len(by_email))
+                                logger.info("hard bounce confirmed: %s", bounced)
                     continue  # mail from someone we never emailed — not ours
                 subject = (msg.get("subject") or "")[:300]
                 self._store.mark_replied(
@@ -332,6 +337,20 @@ class CampaignScheduler:
                 self._crm_event(
                     addr, user_id=target["user_id"], promote_to="replied",
                     note=f"lead replied (subject: {subject[:120]})")
+
+    def _cleanup_hard_bounces(self) -> None:
+        """Retry cross-database cleanup until a confirmed bounce is removed."""
+        if self._bounce_store is None:
+            return
+        for email in self._bounce_store.pending_hard_bounces():
+            try:
+                self._lead_store.delete(email, reason="bounced", username="auto-bounce")
+                PendingLeadsStore(db_path=self._lead_store._db_path).remove([email])
+                removed = self._store.purge_recipient(email)
+                self._bounce_store.mark_cleaned(email)
+                logger.info("hard bounce cleanup: %s, %d campaign rows removed", email, removed)
+            except Exception:  # noqa: BLE001 — retry on the next pass
+                logger.exception("hard bounce cleanup failed for %s; will retry", email)
 
     # -- One campaign, at most one send ------------------------------------
 
@@ -418,6 +437,12 @@ class CampaignScheduler:
         send = self._store.next_pending(c["id"], _iso(now))
         if send is None:
             self._store.mark_completed_if_drained(c["id"])
+            return
+
+        if self._bounce_store is not None and self._bounce_store.lookup(send["email"]) == "bounced":
+            self._store.mark_skipped(send["id"], error="bounced recipient")
+            self._store.mark_completed_if_drained(c["id"])
+            stats["skipped"] += 1
             return
 
         # Honour the campaign's gap across all its accounts, and the same
@@ -587,6 +612,19 @@ class CampaignScheduler:
         pauses when NO account is left)."""
         resp = getattr(exc, "response", None)
         code = resp.status_code if resp is not None else None
+        if isinstance(exc, smtplib.SMTPRecipientsRefused) and self._bounce_store is not None:
+            refusal = next((v for k, v in exc.recipients.items()
+                            if k.lower() == send["email"].lower()), None)
+            if refusal is not None:
+                smtp_code, message = refusal
+                reason = message.decode("utf-8", "replace") if isinstance(message, bytes) else str(message)
+                if int(smtp_code) >= 500 and invalid_recipient_reason(reason):
+                    self._bounce_store.record(
+                        send["email"], "bounced", hard_bounce=True,
+                        evidence=f"SMTP {smtp_code}: {reason[:150]}",
+                    )
+                    self._cleanup_hard_bounces()
+                    return
         if isinstance(exc, smtplib.SMTPAuthenticationError):
             self._email_store.mark_status(account_id, c["user_id"], "revoked")
             remaining, reason = self._pick_account(c, now)

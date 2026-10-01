@@ -855,7 +855,7 @@ export const api = {
     return request<{ campaigns: Campaign[] }>("/campaigns").then((r) => r.campaigns);
   },
 
-  getCampaign(id: number): Promise<Campaign & { sends: CampaignSend[] }> {
+  getCampaign(id: number): Promise<Campaign & { sends: CampaignSend[]; followups: CampaignFollowup[] }> {
     return request(`/campaigns/${id}`);
   },
 

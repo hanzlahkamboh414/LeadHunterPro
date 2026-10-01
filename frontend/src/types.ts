@@ -343,11 +343,20 @@ export interface CampaignSend {
   replied_at: string;
 }
 
-/** PUT /campaigns/{id} body — edit the pitch of a started campaign. */
+/** PUT /campaigns/{id} body — edit future campaign sends. */
 export interface CampaignUpdateInput {
   name: string;
   subject: string;
   body: string;
+  account_id?: number;
+  account_ids?: number[];
+  emails?: string[];
+  start_at?: string;
+  daily_limit?: number;
+  delay_min_s?: number;
+  delay_max_s?: number;
+  followups?: FollowupInput[];
+  ai_personalize?: boolean;
 }
 
 /** One risky thing the spam analyzer found, in plain words. */

@@ -411,15 +411,15 @@ class CampaignScheduler:
             self._store.mark_completed_if_drained(c["id"])
             return
 
-        # Random pacing, measured PER ACCOUNT (E5): Gmail's sending rhythm
-        # is per account, so with N accounts each keeps its own 3-7 min gap
-        # and the campaign's daily volume scales with N. A fresh draw each
-        # pass — human-jitter by construction.
-        last = parse_ts(self._store.last_sent_at_for_account(account_id))
-        if last is not None:
-            gap = self._rng(int(c["delay_min_s"]), int(c["delay_max_s"]))
-            if (now - last).total_seconds() < gap:
-                return
+        # Honour the campaign's gap across all its accounts, and the same
+        # account's gap across campaigns. Both start when Gmail finished the
+        # previous send, not when the scheduler pass began.
+        last_campaign = parse_ts(self._store.last_sent_at(c["id"]))
+        last_account = parse_ts(self._store.last_sent_at_for_account(account_id))
+        gap = self._rng(int(c["delay_min_s"]), int(c["delay_max_s"]))
+        if any(last is not None and (now - last).total_seconds() < gap
+               for last in (last_campaign, last_account)):
+            return
 
         # A follow-up whose lead answered in the window between queueing and
         # now: drop it (the reply path usually catches this first).
@@ -478,7 +478,10 @@ class CampaignScheduler:
                                 now=now)
             return
 
-        self._store.mark_sent(send["id"], subject=subject, sent_at=_iso(now),
+        # Pace from Gmail's completed send, not the start of this pass (a
+        # slow network call must never eat into the requested gap).
+        sent_at = self._clock()
+        self._store.mark_sent(send["id"], subject=subject, sent_at=_iso(sent_at),
                               account_id=account_id)
         stats["sent"] += 1
         logger.info("campaign %d sent to %s (step %d, account %d)",
@@ -502,7 +505,7 @@ class CampaignScheduler:
             c["id"], send["step"] + 1)
         if after_days is not None and not self._store.is_replied(
                 c["id"], send["email"]):
-            not_before = _iso(now + timedelta(days=after_days))
+            not_before = _iso(sent_at + timedelta(days=after_days))
             self._store.queue_followup(
                 c["id"], send["email"], step=send["step"] + 1,
                 not_before=not_before)

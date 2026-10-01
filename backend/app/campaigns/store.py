@@ -42,6 +42,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import threading
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.auth.models import _now
@@ -685,19 +686,142 @@ class CampaignStore:
         return cur.rowcount > 0
 
     def update_campaign(self, campaign_id: int, user_id: str, *,
-                        name: str, subject: str, body: str) -> bool:
-        """Edit the pitch of an existing campaign (name/subject/body).
-        Applies to every send that has NOT gone out yet — already-sent
-        rows keep the subject they were sent with (their own record)."""
+                        name: str, subject: str, body: str,
+                        account_id: int | None = None,
+                        account_ids: list[int] | None = None,
+                        emails: list[str] | None = None,
+                        start_at: str | None = None,
+                        daily_limit: int | None = None,
+                        delay_min_s: int | None = None,
+                        delay_max_s: int | None = None,
+                        followups: list[dict[str, Any]] | None = None,
+                        ai_personalize: bool | None = None,
+                        ) -> bool:
+        """Edit future sends atomically; preserve sent rows and their history."""
         conn = self._conn()
-        cur = conn.execute(
-            "UPDATE campaigns SET name = ?, subject = ?, body = ?, "
-            "updated_at = ? WHERE id = ? AND user_id = ?",
-            (name, subject, body, _now(), campaign_id, user_id),
-        )
-        conn.commit()
-        conn.close()
-        return cur.rowcount > 0
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            scope = (campaign_id, user_id)
+            row = conn.execute(
+                "SELECT status, account_id, start_at, daily_limit, delay_min_s, "
+                "delay_max_s, ai_personalize FROM campaigns "
+                "WHERE id = ? AND user_id = ?",
+                scope,
+            ).fetchone()
+            if row is None or row[0] == "completed":
+                conn.rollback()
+                return False
+            primary = int(account_id if account_id is not None else row[1])
+            new_start = start_at if start_at is not None else row[2]
+            new_status = row[0]
+            if start_at is not None and row[0] == "running":
+                parsed = datetime.fromisoformat(start_at)
+                if parsed.astimezone(timezone.utc) > datetime.now(timezone.utc):
+                    new_status = "scheduled"
+            conn.execute(
+                "UPDATE campaigns SET name = ?, subject = ?, body = ?, "
+                "account_id = ?, start_at = ?, status = ?, daily_limit = ?, "
+                "delay_min_s = ?, delay_max_s = ?, ai_personalize = ?, "
+                "updated_at = ? WHERE id = ? AND user_id = ?",
+                (name, subject, body, primary, new_start, new_status,
+                 int(daily_limit if daily_limit is not None else row[3]),
+                 int(delay_min_s if delay_min_s is not None else row[4]),
+                 int(delay_max_s if delay_max_s is not None else row[5]),
+                 int(ai_personalize if ai_personalize is not None else row[6]),
+                 _now(), *scope),
+            )
+            if account_id is not None or account_ids is not None:
+                existing_accounts = [r[0] for r in conn.execute(
+                    "SELECT account_id FROM campaign_accounts WHERE campaign_id = ?",
+                    (campaign_id,),
+                )]
+                extras = account_ids if account_ids is not None else existing_accounts
+                wanted = list(dict.fromkeys([primary, *(a for a in extras if a != primary)]))
+                conn.execute("DELETE FROM campaign_accounts WHERE campaign_id = ?", (campaign_id,))
+                conn.executemany(
+                    "INSERT INTO campaign_accounts (campaign_id, account_id) VALUES (?, ?)",
+                    [(campaign_id, aid) for aid in wanted],
+                )
+
+            if emails is not None:
+                wanted_emails = list(dict.fromkeys(e.strip().lower() for e in emails if e.strip()))
+                # A sent or terminal first email stays in history and cannot
+                # be turned back into a pending send by an audience edit.
+                sent_elsewhere = {
+                    r[0] for r in conn.execute(
+                        "SELECT DISTINCT s.email FROM campaign_sends s "
+                        "JOIN campaigns c ON c.id = s.campaign_id "
+                        "WHERE c.user_id = ? AND s.state = 'sent'",
+                        (user_id,),
+                    )
+                }
+                terminal_here = {
+                    r[0] for r in conn.execute(
+                        "SELECT email FROM campaign_sends WHERE campaign_id = ? "
+                        "AND step = 0 AND state IN ('failed', 'skipped')",
+                        (campaign_id,),
+                    )
+                }
+                desired = [e for e in wanted_emails
+                           if e not in sent_elsewhere and e not in terminal_here]
+                keep = set(desired)
+                for (send_id, email) in conn.execute(
+                    "SELECT id, email FROM campaign_sends WHERE campaign_id = ? "
+                    "AND step = 0 AND state = 'pending'", (campaign_id,),
+                ).fetchall():
+                    if email not in keep:
+                        conn.execute("DELETE FROM campaign_sends WHERE id = ?", (send_id,))
+                conn.executemany(
+                    "INSERT OR IGNORE INTO campaign_sends (campaign_id, email) "
+                    "VALUES (?, ?)",
+                    [(campaign_id, email) for email in desired],
+                )
+
+            if followups is not None:
+                conn.execute("DELETE FROM campaign_followups WHERE campaign_id = ?", (campaign_id,))
+                conn.executemany(
+                    "INSERT INTO campaign_followups "
+                    "(campaign_id, step, after_days, subject, body) VALUES (?, ?, ?, ?, ?)",
+                    [(campaign_id, step, int(fu["after_days"]), fu["subject"], fu["body"])
+                     for step, fu in enumerate(followups, 1)],
+                )
+                conn.execute(
+                    "DELETE FROM campaign_sends WHERE campaign_id = ? "
+                    "AND state = 'pending' AND step > ?",
+                    (campaign_id, len(followups)),
+                )
+                for step, fu in enumerate(followups, 1):
+                    predecessors = conn.execute(
+                        "SELECT p.email, p.sent_at, queued.id FROM campaign_sends p "
+                        "LEFT JOIN campaign_sends queued ON queued.campaign_id = p.campaign_id "
+                        "AND queued.email = p.email AND queued.step = ? "
+                        "WHERE p.campaign_id = ? AND p.step = ? AND p.state = 'sent' "
+                        "AND NOT EXISTS (SELECT 1 FROM campaign_replies r "
+                        "WHERE r.campaign_id = p.campaign_id AND r.email = p.email)",
+                        (step, campaign_id, step - 1),
+                    ).fetchall()
+                    for email, sent_at, queued_id in predecessors:
+                        due = (datetime.fromisoformat(sent_at) + timedelta(
+                            days=int(fu["after_days"]))).isoformat()
+                        if queued_id is None:
+                            conn.execute(
+                                "INSERT INTO campaign_sends "
+                                "(campaign_id, email, step, not_before) VALUES (?, ?, ?, ?)",
+                                (campaign_id, email, step, due),
+                            )
+                        else:
+                            conn.execute(
+                                "UPDATE campaign_sends SET not_before = ? "
+                                "WHERE id = ? AND state = 'pending'",
+                                (due, queued_id),
+                            )
+            conn.commit()
+            return True
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def set_status(self, campaign_id: int, *, status: str,
                    paused_reason: str = "", resume_at: str = "") -> bool:

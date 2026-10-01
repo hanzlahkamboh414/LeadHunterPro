@@ -266,17 +266,48 @@ def update_campaign(
     campaign_id: int, body: CampaignUpdateIn,
     user: User = Depends(get_current_user),
 ) -> dict:
-    """Edit the pitch (name/subject/body) of a campaign that already
-    started. Every send that has NOT gone out yet uses the new text;
-    already-sent rows keep the subject they were actually sent with."""
+    """Change future campaign sends while preserving already-sent history."""
     store = get_campaign_store()
-    if store.get(campaign_id, user.id) is None:
+    current = store.get(campaign_id, user.id)
+    if current is None:
         raise HTTPException(status_code=404, detail="no such campaign")
+    if current["status"] == "completed":
+        raise HTTPException(status_code=409, detail="completed campaign cannot be edited")
+    effective_min = body.delay_min_s if body.delay_min_s is not None else current["delay_min_s"]
+    effective_max = body.delay_max_s if body.delay_max_s is not None else current["delay_max_s"]
+    if effective_min > effective_max:
+        raise HTTPException(status_code=422, detail="delay_min_s must be <= delay_max_s")
+    new_start = _validate_start_at(body.start_at) if body.start_at is not None else None
+
+    primary = body.account_id if body.account_id is not None else current["account_id"]
+    extras = (body.account_ids if body.account_ids is not None else
+              [aid for aid in current["account_ids"] if aid != primary])
+    wanted = list(dict.fromkeys([primary, *(aid for aid in extras if aid != primary)]))
+    if len(wanted) > 5:
+        raise HTTPException(status_code=422, detail="at most 5 sending accounts per campaign")
+    if body.account_id is not None or body.account_ids is not None:
+        owned = {a["id"]: a for a in get_email_store().list_for_user(
+            user.id)}
+        for aid in wanted:
+            account = owned.get(aid)
+            if account is None:
+                raise HTTPException(status_code=404, detail="no such connected account")
+            if account["status"] != "connected" and aid not in current["account_ids"]:
+                raise HTTPException(status_code=409,
+                                    detail=f"account {account['email']} must be reconnected")
     if not store.update_campaign(
             campaign_id, user.id, name=body.name.strip(),
-            subject=body.subject, body=body.body):
-        raise HTTPException(status_code=404, detail="no such campaign")
-    logger.info("campaign %d pitch edited by %s", campaign_id, user.username)
+            subject=body.subject, body=body.body,
+            account_id=primary if body.account_id is not None or body.account_ids is not None else None,
+            account_ids=wanted[1:] if body.account_id is not None or body.account_ids is not None else None,
+            emails=body.emails, start_at=new_start,
+            daily_limit=body.daily_limit, delay_min_s=body.delay_min_s,
+            delay_max_s=body.delay_max_s,
+            followups=[fu.model_dump() for fu in body.followups]
+            if body.followups is not None else None,
+            ai_personalize=body.ai_personalize):
+        raise HTTPException(status_code=409, detail="campaign is no longer editable")
+    logger.info("campaign %d settings edited by %s", campaign_id, user.username)
     by_id = {a["id"]: a["email"]
              for a in get_email_store().list_for_user(user.id)}
     c = _campaign_detail(store, campaign_id, user, by_id)

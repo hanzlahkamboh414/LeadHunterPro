@@ -92,6 +92,31 @@ function defaultStart(): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+function localDateTime(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function DelayFields({ min, max, setMin, setMax }: {
+  min: number; max: number; setMin: (n: number) => void; setMax: (n: number) => void;
+}) {
+  return <div className="mt-3">
+    <p className="text-[12px] text-slate-400">Delay between emails (seconds)</p>
+    <div className="mt-1 grid grid-cols-2 gap-3">
+      <label className="text-[11.5px] text-slate-500">Minimum
+        <input type="number" min={20} max={3600} className={`${INPUT} mt-1`} value={min} onChange={(e) => setMin(Number(e.target.value))} />
+      </label>
+      <label className="text-[11.5px] text-slate-500">Maximum
+        <input type="number" min={20} max={7200} className={`${INPUT} mt-1`} value={max} onChange={(e) => setMax(Number(e.target.value))} />
+      </label>
+    </div>
+    <p className="mt-1.5 text-[11.5px] text-slate-500">Minimum 20 seconds after the previous email finishes sending. Set both fields equal for a fixed gap.</p>
+    {(min < 20 || max < min || min > 3600 || max > 7200) && <p className="mt-1 text-[11.5px] text-rose-400">Use at least 20 seconds, with maximum no shorter than minimum.</p>}
+  </div>;
+}
+
 export default function Campaigns() {
   const [building, setBuilding] = useState(false);
   const [banner, setBanner] = useState<{ ok: boolean; text: string } | null>(null);
@@ -249,7 +274,7 @@ function CampaignCard({
   const detail = useQuery({
     queryKey: ["campaign", c.id],
     queryFn: () => api.getCampaign(c.id),
-    enabled: showSends,
+    enabled: showSends || editing,
     refetchInterval: 15000,
   });
   const sends: CampaignSend[] = detail.data?.sends || [];
@@ -314,7 +339,7 @@ function CampaignCard({
               }`}
             >
               <Pencil className="w-3.5 h-3.5" />
-              Edit pitch
+              Edit campaign
             </button>
           )}
           {(c.status === "running" || c.status === "scheduled") && (
@@ -365,7 +390,7 @@ function CampaignCard({
         </div>
       </div>
 
-      {editing && <EditPitchForm c={c} onSave={(input) => edit.mutate(input)} saving={edit.isPending} />}
+      {editing && (detail.isLoading ? <p className="mt-4 text-slate-500">Loading campaign…</p> : detail.isError || !detail.data ? <p className="mt-4 text-rose-400">Could not load campaign settings.</p> : <EditCampaignForm key={c.id} c={detail.data} onSave={(input) => edit.mutate(input)} saving={edit.isPending} error={edit.error instanceof ApiError ? edit.error.message : edit.isError ? "Could not save campaign" : ""} />)}
 
       {showSends && (
         <div className="mt-4">
@@ -460,31 +485,80 @@ function CampaignCard({
 }
 
 // ---------------------------------------------------------------------------
-// Edit the pitch of a started campaign (applies to not-yet-sent emails)
+// Edit every setting that affects future sends, including active campaigns.
 // ---------------------------------------------------------------------------
 
-function EditPitchForm({
+function EditCampaignForm({
   c,
   onSave,
   saving,
+  error,
 }: {
-  c: Campaign;
+  c: Campaign & { sends: CampaignSend[]; followups: FollowupInput[] };
   onSave: (input: CampaignUpdateInput) => void;
   saving: boolean;
+  error: string;
 }) {
   const [name, setName] = useState(c.name);
   const [subject, setSubject] = useState(c.subject);
   const [body, setBody] = useState(c.body);
-
+  const [accountId, setAccountId] = useState(c.account_id);
+  const [extraIds, setExtraIds] = useState(c.account_ids.filter((id) => id !== c.account_id));
+  const [aiPersonalize, setAiPersonalize] = useState(c.ai_personalize);
+  const [startAt, setStartAt] = useState(localDateTime(c.start_at));
+  const [dailyLimit, setDailyLimit] = useState(c.daily_limit);
+  const [delayMin, setDelayMin] = useState(c.delay_min_s);
+  const [delayMax, setDelayMax] = useState(c.delay_max_s);
+  const [followups, setFollowups] = useState<Array<FollowupInput & { on: boolean }>>(
+    [0, 1, 2].map((index) => ({
+      on: !!c.followups[index],
+      after_days: c.followups[index]?.after_days ?? [3, 7, 14][index],
+      subject: c.followups[index]?.subject ?? "",
+      body: c.followups[index]?.body ?? "",
+    })),
+  );
+  const [replaceAudience, setReplaceAudience] = useState(false);
+  const [folder, setFolder] = useState("");
+  const [recommendation, setRecommendation] = useState("contact_now");
+  const [testEmail, setTestEmail] = useState("");
+  const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null);
+  const accounts = useQuery({ queryKey: ["email-accounts"], queryFn: () => api.emailAccounts() });
+  const folders = useQuery({ queryKey: ["folders"], queryFn: () => api.listFolders() });
+  const pool = useQuery({
+    queryKey: ["campaign-pool", folder, recommendation],
+    queryFn: () => api.listLeads({ folder: folder || undefined, recommendation: recommendation || undefined, limit: 500 }),
+    enabled: replaceAudience,
+  });
+  const updateFollowup = (index: number, changes: Partial<FollowupInput & { on: boolean }>) =>
+    setFollowups((rows) => rows.map((row, i) => i === index ? { ...row, ...changes } : row));
+  const testSend = useMutation({
+    mutationFn: () => api.campaignTestSend({ account_id: accountId, to_email: testEmail.trim(), subject, body }),
+    onSuccess: (r) => setTestResult({ ok: true, text: `Sent to ${r.to} — check your inbox and spam folder.` }),
+    onError: (e) => setTestResult({ ok: false, text: e instanceof ApiError ? e.message : "Test send failed" }),
+  });
+  const activeFollowups = followups.filter((row, index) => row.on && (index === 0 || followups.slice(0, index).every((previous) => previous.on)));
+  const validFollowups = activeFollowups.every((row) => row.after_days >= 1 && row.after_days <= 30 && row.subject.trim() && row.body.trim());
   const canSave =
-    name.trim() !== "" && subject.trim() !== "" && body.trim() !== "" && !saving;
+    name.trim() !== "" && subject.trim() !== "" && body.trim() !== "" &&
+    !!accountId && !!startAt && !Number.isNaN(new Date(startAt).getTime()) &&
+    dailyLimit >= 1 && dailyLimit <= 200 && delayMin >= 20 && delayMin <= 3600 &&
+    delayMax >= delayMin && delayMax <= 7200 && validFollowups &&
+    (!replaceAudience || (!!pool.data?.length && !pool.isFetching)) && !saving;
+  const save = () => onSave({
+    name: name.trim(), subject, body, account_id: accountId,
+    account_ids: extraIds.filter((id) => id !== accountId),
+    start_at: new Date(startAt).toISOString(), daily_limit: dailyLimit,
+    delay_min_s: delayMin, delay_max_s: delayMax,
+    ai_personalize: aiPersonalize,
+    followups: activeFollowups.map(({ after_days, subject: s, body: b }) => ({ after_days, subject: s, body: b })),
+    ...(replaceAudience ? { emails: (pool.data || []).map((lead) => lead.email) } : {}),
+  });
 
   return (
     <div className="mt-4 rounded-lg border border-indigo-500/20 bg-white/[0.02] p-3.5">
-      <p className="text-[12px] font-semibold text-slate-300">Edit pitch</p>
+      <p className="text-[12px] font-semibold text-slate-300">Edit campaign</p>
       <p className="mt-1 text-[11.5px] text-slate-500">
-        Applies to emails that have not gone out yet. Emails already sent keep
-        their own record. The follow-up ladder stays as it is.
+        Changes apply to emails still waiting to send, including a running campaign. Already sent emails keep their history.
       </p>
       <div className="mt-2.5 space-y-2">
         <input
@@ -505,6 +579,8 @@ function EditPitchForm({
           onChange={(e) => setBody(e.target.value)}
           placeholder="Email script"
         />
+        <div className="flex flex-wrap gap-1.5">{TEMPLATE_VARS.map((v) => <code key={v} className="rounded bg-white/[0.05] px-1.5 py-0.5 text-[11px] text-slate-400">{v}</code>)}</div>
+        <label className="flex items-center gap-2 text-[12.5px] text-slate-300"><input type="checkbox" checked={aiPersonalize} onChange={(e) => setAiPersonalize(e.target.checked)} /> AI opening line from verified lead facts</label>
         <div className="mt-2.5">
           <SpamPanel
             subject={subject}
@@ -515,13 +591,38 @@ function EditPitchForm({
             }}
           />
         </div>
+        <div className="rounded-lg border border-white/5 p-3">
+          <p className="text-[12px] font-semibold text-slate-300">Inbox spam check (optional)</p>
+          <div className="mt-2 flex gap-2"><input type="email" className={INPUT} value={testEmail} onChange={(e) => setTestEmail(e.target.value)} placeholder="you@example.com" /><button className="shrink-0 rounded-lg border border-white/10 px-4 text-[12.5px] text-slate-200 disabled:opacity-50" disabled={testSend.isPending || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(testEmail.trim()) || !subject.trim() || !body.trim()} onClick={() => testSend.mutate()}>{testSend.isPending ? "Sending…" : "Send test"}</button></div>
+          {testResult && <p className={`mt-2 text-[12px] ${testResult.ok ? "text-emerald-400" : "text-rose-400"}`}>{testResult.text}</p>}
+        </div>
+        <div className="rounded-lg border border-white/5 p-3">
+          <p className="text-[12px] font-semibold text-slate-300">Sending accounts</p>
+          <select className={`${INPUT} mt-2`} value={accountId} onChange={(e) => { const id = Number(e.target.value); setAccountId(id); setExtraIds((prev) => prev.filter((x) => x !== id)); }}>
+            {(accounts.data || []).filter((a) => a.status === "connected" || a.id === accountId).map((a) => <option key={a.id} value={a.id}>{a.email}{a.status !== "connected" ? " (disconnected)" : ""}</option>)}
+          </select>
+          <div className="mt-2 space-y-1">{(accounts.data || []).filter((a) => a.id !== accountId && (a.status === "connected" || extraIds.includes(a.id))).map((a) => <label key={a.id} className="flex gap-2 text-[12px] text-slate-300"><input type="checkbox" checked={extraIds.includes(a.id)} onChange={(e) => setExtraIds((prev) => e.target.checked ? (prev.length >= 4 ? prev : [...prev, a.id]) : prev.filter((id) => id !== a.id))} /> Also send from {a.email}{a.status !== "connected" ? " (disconnected)" : ""}</label>)}</div>
+        </div>
+        <div className="rounded-lg border border-white/5 p-3">
+          <p className="text-[12px] font-semibold text-slate-300">Follow-ups (optional)</p>
+          <p className="mt-1 text-[11.5px] text-slate-500">Each follows the previous email after the chosen number of days. Replies stop the ladder.</p>
+          <div className="mt-2 space-y-2">{followups.map((row, index) => (index === 0 || followups[index - 1].on) && <FollowupEditor key={index} label={`Follow-up ${index + 1}`} on={row.on} setOn={(v) => updateFollowup(index, { on: v })} days={row.after_days} setDays={(v) => updateFollowup(index, { after_days: v })} subject={row.subject} setSubject={(v) => updateFollowup(index, { subject: v })} body={row.body} setBody={(v) => updateFollowup(index, { body: v })} input={INPUT} />)}</div>
+        </div>
+        <div className="rounded-lg border border-white/5 p-3">
+          <label className="flex gap-2 text-[12.5px] text-slate-300"><input type="checkbox" checked={replaceAudience} onChange={(e) => setReplaceAudience(e.target.checked)} /> Replace unsent lead selection</label>
+          <p className="mt-1 text-[11.5px] text-slate-500">Leave unchecked to keep the current queue. Sent emails remain in history.</p>
+          {replaceAudience && <><div className="mt-2 grid grid-cols-2 gap-2"><select className={INPUT} value={folder} onChange={(e) => setFolder(e.target.value)}><option value="">All leads</option>{(folders.data?.folders || []).map((f) => <option key={f.name} value={f.name}>{f.name} ({f.count})</option>)}</select><select className={INPUT} value={recommendation} onChange={(e) => setRecommendation(e.target.value)}><option value="">Any recommendation</option><option value="contact_now">Contact now</option><option value="nurture">Nurture</option></select></div><p className="mt-2 text-[12px] text-slate-400">{pool.isFetching ? "Counting leads…" : `${pool.data?.length || 0} leads selected (first 500 max)`}</p></>}
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3"><label className="text-[12px] text-slate-400">Start (your local time)<input type="datetime-local" className={`${INPUT} mt-1`} value={startAt} onChange={(e) => setStartAt(e.target.value)} /></label><label className="text-[12px] text-slate-400">Daily limit (per Gmail account)<input type="number" min={1} max={200} className={`${INPUT} mt-1`} value={dailyLimit} onChange={(e) => setDailyLimit(Number(e.target.value))} /></label></div>
+        <DelayFields min={delayMin} max={delayMax} setMin={setDelayMin} setMax={setDelayMax} />
+        {error && <p className="text-[12px] text-rose-400">{error}</p>}
         <div className="flex justify-end gap-2">
           <button
-            onClick={() => onSave({ name: name.trim(), subject, body })}
+            onClick={save}
             disabled={!canSave}
             className="rounded-lg bg-indigo-600 px-4 py-2 text-[12.5px] font-semibold text-white hover:bg-indigo-500 disabled:opacity-50"
           >
-            {saving ? "Saving…" : "Save pitch"}
+            {saving ? "Saving…" : "Save campaign"}
           </button>
         </div>
       </div>
@@ -850,6 +951,8 @@ function CampaignBuilder({
   const [recommendation, setRecommendation] = useState("contact_now");
   const [startAt, setStartAt] = useState(defaultStart());
   const [dailyLimit, setDailyLimit] = useState(30);
+  const [delayMin, setDelayMin] = useState(180);
+  const [delayMax, setDelayMax] = useState(420);
   // Follow-up ladder (Phase E4): two optional rungs, day 3 and day 7 by
   // default. Each is cancelled the moment the lead replies.
   const [fu1On, setFu1On] = useState(false);
@@ -860,6 +963,10 @@ function CampaignBuilder({
   const [fu2Days, setFu2Days] = useState(7);
   const [fu2Subject, setFu2Subject] = useState("");
   const [fu2Body, setFu2Body] = useState("");
+  const [fu3On, setFu3On] = useState(false);
+  const [fu3Days, setFu3Days] = useState(14);
+  const [fu3Subject, setFu3Subject] = useState("");
+  const [fu3Body, setFu3Body] = useState("");
   // Spam check: send the current draft to your own inbox before scheduling.
   const [testEmail, setTestEmail] = useState("");
   const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null);
@@ -895,6 +1002,9 @@ function CampaignBuilder({
       if (fu2On && fu2Subject.trim() && fu2Body.trim()) {
         followups.push({ after_days: fu2Days, subject: fu2Subject, body: fu2Body });
       }
+      if (fu1On && fu2On && fu3On && fu3Subject.trim() && fu3Body.trim()) {
+        followups.push({ after_days: fu3Days, subject: fu3Subject, body: fu3Body });
+      }
       return api.createCampaign({
         name: name.trim(),
         account_id: accountId!,
@@ -904,6 +1014,8 @@ function CampaignBuilder({
         emails: poolLeads.map((l) => l.email),
         start_at: new Date(startAt).toISOString(),
         daily_limit: dailyLimit,
+        delay_min_s: delayMin,
+        delay_max_s: delayMax,
         followups,
         ai_personalize: aiPersonalize,
       });
@@ -938,7 +1050,12 @@ function CampaignBuilder({
   });
 
   const canCreate =
-    name.trim() && accountId && subject.trim() && body.trim() && poolLeads.length > 0 && startAt;
+    name.trim() && accountId && subject.trim() && body.trim() && poolLeads.length > 0 && startAt &&
+    delayMin >= 20 && delayMin <= 3600 && delayMax >= delayMin && delayMax <= 7200 &&
+    dailyLimit >= 1 && dailyLimit <= 200 &&
+    (!fu1On || (fu1Subject.trim() && fu1Body.trim() && fu1Days >= 1 && fu1Days <= 30)) &&
+    (!fu2On || (fu2Subject.trim() && fu2Body.trim() && fu2Days >= 1 && fu2Days <= 30)) &&
+    (!fu3On || (fu3Subject.trim() && fu3Body.trim() && fu3Days >= 1 && fu3Days <= 30));
 
   const emailOk = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(testEmail.trim());
   const canTest = !!accountId && subject.trim() !== "" && body.trim() !== "" && emailOk;
@@ -1159,6 +1276,14 @@ function CampaignBuilder({
                   input={input}
                 />
               )}
+              {fu1On && fu2On && (
+                <FollowupEditor
+                  label="Follow-up 3" on={fu3On} setOn={setFu3On}
+                  days={fu3Days} setDays={setFu3Days}
+                  subject={fu3Subject} setSubject={setFu3Subject}
+                  body={fu3Body} setBody={setFu3Body} input={input}
+                />
+              )}
             </div>
           </div>
 
@@ -1230,11 +1355,9 @@ function CampaignBuilder({
                 value={dailyLimit}
                 onChange={(e) => setDailyLimit(Number(e.target.value) || 30)}
               />
-              <p className="mt-1.5 text-[11.5px] text-slate-500">
-                Random 3–7 min gap between emails (fixed, account-safe).
-              </p>
             </div>
           </div>
+          <DelayFields min={delayMin} max={delayMax} setMin={setDelayMin} setMax={setDelayMax} />
 
           {error && (
             <p className="mt-3 rounded-lg border border-rose-500/25 bg-rose-500/10 px-3.5 py-2.5 text-[12.5px] text-rose-300">

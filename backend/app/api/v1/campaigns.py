@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 
-from app.auth.dependencies import get_current_user
+from app.auth.vertical_access import require_email_access
 from app.auth.models import User
 from app.campaigns import spamcheck
 from app.campaigns.scheduler import ensure_access_token, parse_ts
@@ -52,7 +52,7 @@ def _validate_start_at(start_at: str) -> str:
 
 @router.post("", response_model=CampaignCreateOut)
 def create_campaign(
-    body: CampaignCreateIn, user: User = Depends(get_current_user)
+    body: CampaignCreateIn, user: User = Depends(require_email_access)
 ) -> dict:
     """Create a scheduled campaign. Leads that were already emailed (any
     earlier campaign of this user) are excluded and the response says how
@@ -115,7 +115,7 @@ def create_campaign(
 
 @router.post("/test-send", response_model=CampaignTestSendOut)
 def campaign_test_send(
-    body: CampaignTestSendIn, user: User = Depends(get_current_user)
+    body: CampaignTestSendIn, user: User = Depends(require_email_access)
 ) -> dict:
     """Send the DRAFT pitch to your own address — the spam check. The drafted
     subject/body render with a sample lead, then go out immediately via the
@@ -183,7 +183,7 @@ def campaign_test_send(
 
 @router.post("/spam-check", response_model=SpamCheckOut)
 def spam_check(body: SpamCheckIn,
-               user: User = Depends(get_current_user)) -> dict:
+               user: User = Depends(require_email_access)) -> dict:
     """How spammy does this pitch look? The AI reads the rendered email as
     a deliverability expert (score, plain-words summary, findings with
     fixes) and the rules engine always runs underneath — a blended
@@ -194,7 +194,7 @@ def spam_check(body: SpamCheckIn,
 
 @router.post("/spam-improve", response_model=SpamImproveOut)
 def spam_improve(body: SpamImproveIn,
-                 user: User = Depends(get_current_user)) -> dict:
+                 user: User = Depends(require_email_access)) -> dict:
     """The one-click fix: the pitch rewritten without its spam triggers
     (AI best-effort, deterministic rules as the guaranteed fallback).
     Nothing is scheduled or sent — the result goes back to the user's
@@ -203,7 +203,7 @@ def spam_improve(body: SpamImproveIn,
 
 
 @router.get("", response_model=CampaignsOut)
-def list_campaigns(user: User = Depends(get_current_user)) -> dict:
+def list_campaigns(user: User = Depends(require_email_access)) -> dict:
     by_id = {a["id"]: a["email"]
              for a in get_email_store().list_for_user(user.id)}
     out = []
@@ -252,7 +252,7 @@ def _campaign_detail(store, campaign_id: int, user: User,
 
 @router.get("/{campaign_id}", response_model=CampaignDetailOut)
 def get_campaign(campaign_id: int,
-                 user: User = Depends(get_current_user)) -> dict:
+                 user: User = Depends(require_email_access)) -> dict:
     by_id = {a["id"]: a["email"]
              for a in get_email_store().list_for_user(user.id)}
     c = _campaign_detail(get_campaign_store(), campaign_id, user, by_id)
@@ -264,7 +264,7 @@ def get_campaign(campaign_id: int,
 @router.put("/{campaign_id}", response_model=CampaignDetailOut)
 def update_campaign(
     campaign_id: int, body: CampaignUpdateIn,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_email_access),
 ) -> dict:
     """Change future campaign sends while preserving already-sent history."""
     store = get_campaign_store()
@@ -318,7 +318,7 @@ def update_campaign(
 
 @router.post("/{campaign_id}/pause")
 def pause_campaign(campaign_id: int,
-                   user: User = Depends(get_current_user)) -> dict:
+                   user: User = Depends(require_email_access)) -> dict:
     store = get_campaign_store()
     c = store.get(campaign_id, user.id)
     if c is None:
@@ -333,7 +333,7 @@ def pause_campaign(campaign_id: int,
 
 @router.post("/{campaign_id}/resume")
 def resume_campaign(campaign_id: int,
-                    user: User = Depends(get_current_user)) -> dict:
+                    user: User = Depends(require_email_access)) -> dict:
     store = get_campaign_store()
     c = store.get(campaign_id, user.id)
     if c is None:
@@ -355,7 +355,7 @@ def resume_campaign(campaign_id: int,
 
 @router.delete("/{campaign_id}")
 def delete_campaign(campaign_id: int,
-                    user: User = Depends(get_current_user)) -> dict:
+                    user: User = Depends(require_email_access)) -> dict:
     store = get_campaign_store()
     if not store.delete(campaign_id, user.id):
         raise HTTPException(status_code=404, detail="no such campaign")

@@ -27,7 +27,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import RedirectResponse
 
 from app.auth.activity import get_activity
-from app.auth.dependencies import get_current_user
+from app.auth.dependencies import _user_store
+from app.auth.vertical_access import is_phone_only, require_email_access
 from app.auth.jwt import decode_access_token
 from app.auth.models import User
 from app.core.config import settings
@@ -74,6 +75,9 @@ def google_authorize(token: str = Query(default="")) -> RedirectResponse:
     user_id = (payload or {}).get("sub") or ""
     if not user_id:
         raise HTTPException(status_code=401, detail="invalid or expired token")
+    account_user = _user_store().get_by_id(user_id)
+    if account_user is None or is_phone_only(account_user):
+        raise HTTPException(status_code=403, detail="This account has Phones access only")
     return RedirectResponse(google.authorize_url(google.make_state(user_id)),
                             status_code=302)
 
@@ -92,6 +96,9 @@ def google_callback(
     user_id = google.verify_state(state)
     if not user_id:
         return RedirectResponse(_spa_settings("gmail=error:expired-state"), status_code=302)
+    account_user = _user_store().get_by_id(user_id)
+    if account_user is None or is_phone_only(account_user):
+        return RedirectResponse(_spa_settings("gmail=error:account-access"), status_code=302)
     if not code:
         return RedirectResponse(_spa_settings("gmail=error:missing-code"), status_code=302)
     try:
@@ -121,13 +128,13 @@ def google_callback(
 
 
 @router.get("")
-def list_accounts(user: User = Depends(get_current_user)) -> list[dict[str, Any]]:
+def list_accounts(user: User = Depends(require_email_access)) -> list[dict[str, Any]]:
     """The caller's connected sending accounts — tokens NEVER appear."""
     return get_email_store().list_for_user(user.id)
 
 
 @router.delete("/{account_id}")
-def disconnect(account_id: int, user: User = Depends(get_current_user)) -> dict[str, Any]:
+def disconnect(account_id: int, user: User = Depends(require_email_access)) -> dict[str, Any]:
     """Disconnect one account — its tokens are deleted, not just hidden."""
     store = get_email_store()
     creds = store.get_credentials(account_id, user.id)
@@ -142,7 +149,7 @@ def disconnect(account_id: int, user: User = Depends(get_current_user)) -> dict[
 
 
 @router.post("/{account_id}/send-test")
-def send_test(account_id: int, user: User = Depends(get_current_user)) -> dict[str, Any]:
+def send_test(account_id: int, user: User = Depends(require_email_access)) -> dict[str, Any]:
     """Send a test email FROM the connected account TO ITSELF — the
     end-to-end proof (OAuth token -> Gmail API -> delivered) without
     touching anyone else's inbox."""

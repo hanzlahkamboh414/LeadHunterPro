@@ -19,7 +19,7 @@ _INIT_LOCK = threading.RLock()
 
 
 class EmailAccountStore:
-    """SQLite persistence for connected email accounts (provider = google)."""
+    """SQLite persistence for connected Gmail and SMTP sending accounts."""
 
     def __init__(self, db_path: str | None = None) -> None:
         if db_path is None:
@@ -64,6 +64,15 @@ class EmailAccountStore:
                     "ALTER TABLE email_accounts "
                     "ADD COLUMN scopes TEXT NOT NULL DEFAULT ''"
                 )
+            for column, ddl in (
+                ("smtp_host", "TEXT NOT NULL DEFAULT ''"),
+                ("smtp_port", "INTEGER NOT NULL DEFAULT 0"),
+                ("smtp_security", "TEXT NOT NULL DEFAULT ''"),
+                ("smtp_username", "TEXT NOT NULL DEFAULT ''"),
+                ("smtp_password", "TEXT NOT NULL DEFAULT ''"),
+            ):
+                if column not in cols:
+                    conn.execute(f"ALTER TABLE email_accounts ADD COLUMN {column} {ddl}")
             conn.commit()
             conn.close()
 
@@ -99,7 +108,7 @@ class EmailAccountStore:
         )
         conn.commit()
         row = conn.execute(
-            "SELECT id FROM email_accounts WHERE user_id = ? AND email = ?",
+            "SELECT id FROM email_accounts WHERE user_id = ? AND provider = 'google' AND email = ?",
             (user_id, email),
         ).fetchone()
         conn.close()
@@ -108,6 +117,37 @@ class EmailAccountStore:
             "email": email, "display_name": display_name,
             "status": "connected", "scopes": scopes or "",
         })
+
+    def connect_smtp(
+        self, user_id: str, email: str, *, host: str, port: int,
+        security: str, username: str, password: str,
+    ) -> dict[str, Any]:
+        """Store a verified SMTP login; password is Fernet-encrypted at rest."""
+        conn = self._conn()
+        try:
+            conn.execute(
+                "INSERT INTO email_accounts (user_id, provider, email, "
+                "smtp_host, smtp_port, smtp_security, smtp_username, smtp_password, "
+                "status) VALUES (?, 'smtp', ?, ?, ?, ?, ?, ?, 'connected') "
+                "ON CONFLICT (user_id, provider, email) DO UPDATE SET "
+                "smtp_host=excluded.smtp_host, smtp_port=excluded.smtp_port, "
+                "smtp_security=excluded.smtp_security, smtp_username=excluded.smtp_username, "
+                "smtp_password=excluded.smtp_password, status='connected', "
+                "updated_at=CURRENT_TIMESTAMP",
+                (user_id, email, host, port, security, username, encrypt_text(password)),
+            )
+            row = conn.execute(
+                "SELECT id FROM email_accounts WHERE user_id=? AND provider='smtp' AND email=?",
+                (user_id, email),
+            ).fetchone()
+            conn.commit()
+            return self._public_row({
+                "id": row[0], "provider": "smtp", "email": email,
+                "display_name": "", "status": "connected", "scopes": "",
+                "smtp_host": host, "smtp_port": port, "smtp_security": security,
+            })
+        finally:
+            conn.close()
 
     def update_tokens(self, account_id: int, user_id: str, *,
                       access_token: str, token_expires_at: str) -> bool:
@@ -143,15 +183,18 @@ class EmailAccountStore:
         """The user's connected accounts — NO tokens ever leave the store."""
         conn = self._conn()
         rows = conn.execute(
-            "SELECT id, provider, email, display_name, status, scopes, created_at "
+            "SELECT id, provider, email, display_name, status, scopes, created_at, "
+            "smtp_host, smtp_port, smtp_security "
             "FROM email_accounts WHERE user_id = ? ORDER BY id ASC",
             (user_id,),
         ).fetchall()
         conn.close()
         return [
-            {"id": r[0], "provider": r[1], "email": r[2],
+            {**{"id": r[0], "provider": r[1], "email": r[2],
              "display_name": r[3] or "", "status": r[4],
-             "scopes": r[5] or "", "created_at": r[6] or ""}
+             "scopes": r[5] or "", "created_at": r[6] or ""},
+             **({"smtp_host": r[7] or "", "smtp_port": r[8] or 0,
+                 "smtp_security": r[9] or ""} if r[1] == "smtp" else {})}
             for r in rows
         ]
 
@@ -161,7 +204,8 @@ class EmailAccountStore:
         conn = self._conn()
         row = conn.execute(
             "SELECT email, access_token, refresh_token, token_expires_at, "
-            "status, scopes FROM email_accounts WHERE id = ? AND user_id = ?",
+            "status, scopes, provider, smtp_host, smtp_port, smtp_security, "
+            "smtp_username, smtp_password FROM email_accounts WHERE id = ? AND user_id = ?",
             (account_id, user_id),
         ).fetchone()
         conn.close()
@@ -174,6 +218,10 @@ class EmailAccountStore:
             "token_expires_at": row[3] or "",
             "status": row[4],
             "scopes": row[5] or "",
+            "provider": row[6], "smtp_host": row[7] or "",
+            "smtp_port": row[8] or 0, "smtp_security": row[9] or "",
+            "smtp_username": row[10] or "",
+            "smtp_password": decrypt_text(row[11]),
         }
 
     def delete(self, account_id: int, user_id: str) -> bool:
@@ -196,6 +244,10 @@ class EmailAccountStore:
             "email": base["email"], "display_name": base["display_name"],
             "status": base["status"], "scopes": base.get("scopes", ""),
             "created_at": "",
+            **({"smtp_host": base.get("smtp_host", ""),
+                "smtp_port": base.get("smtp_port", 0),
+                "smtp_security": base.get("smtp_security", "")}
+               if base["provider"] == "smtp" else {}),
         }
 
 

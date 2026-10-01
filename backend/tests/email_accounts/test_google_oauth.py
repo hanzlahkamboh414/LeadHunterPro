@@ -34,6 +34,8 @@ def _setup(tmp_path, monkeypatch):
 
     user_store = UserStore(db_path=str(tmp_path / "users.db"))
     monkeypatch.setattr(deps, "_user_store", lambda: user_store)
+    # OAuth routes import this helper directly; patch that reference too.
+    monkeypatch.setattr(ea, "_user_store", lambda: user_store)
     user = user_store.create("testuser", "test@example.com", "password")
 
     email_store = EmailAccountStore(db_path=str(tmp_path / "users.db"))

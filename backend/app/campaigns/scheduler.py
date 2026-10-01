@@ -39,6 +39,7 @@ from __future__ import annotations
 import logging
 import random
 import threading
+import smtplib
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
@@ -51,7 +52,7 @@ from app.campaigns.personalize import (
 from app.campaigns.store import CampaignStore
 from app.campaigns.templates import context_for, render
 from app.campaigns.tracking import pixel_url
-from app.email_accounts import google
+from app.email_accounts import google, smtp
 from app.email_accounts.store import EmailAccountStore
 from app.lead_research.models import CRM_STATUSES
 from app.lead_research.service import LeadResearchStore
@@ -212,8 +213,11 @@ class CampaignScheduler:
             accounts = self._email_store.list_for_user(user_id)
             status = next((a["status"] for a in accounts
                            if a["id"] == account_id), "")
-            if (creds is not None and status == "connected"
-                    and (creds["access_token"] or creds["refresh_token"])):
+            usable = creds is not None and (
+                bool(creds.get("smtp_password")) if creds and creds.get("provider") == "smtp"
+                else bool(creds and (creds["access_token"] or creds["refresh_token"]))
+            )
+            if status == "connected" and usable:
                 healthy.add(account_id)
         if healthy:
             stats["resumed_account"] = self._store.resume_for_accounts(
@@ -247,6 +251,10 @@ class CampaignScheduler:
                 continue
             creds = self._email_store.get_credentials(account_id, user_id)
             if creds is None:
+                continue
+            if creds.get("provider") == "smtp":
+                # SMTP is outbound only; it has no inbox permission for
+                # automatic reply/bounce detection.
                 continue
             if READONLY_SCOPE not in (creds.get("scopes") or ""):
                 # Connected before Phase E4: sending still works, replies
@@ -350,8 +358,9 @@ class CampaignScheduler:
             status = next((s["status"] for s in
                            self._email_store.list_for_user(c["user_id"])
                            if s["id"] == a), "")
-            if (status == "connected"
-                    and (creds["access_token"] or creds["refresh_token"])):
+            usable = (bool(creds.get("smtp_password")) if creds.get("provider") == "smtp"
+                      else bool(creds["access_token"] or creds["refresh_token"]))
+            if status == "connected" and usable:
                 healthy.append(a)
         if not healthy:
             return None, "account"
@@ -453,26 +462,37 @@ class CampaignScheduler:
             body = self._with_hook(c, send, dossier, body)
 
         creds = self._email_store.get_credentials(account_id, c["user_id"])
-        access_token = self._access_token(
-            account_id=account_id, user_id=c["user_id"], creds=creds,
-            now=now)
-        if not access_token:
-            self._email_store.mark_status(account_id, c["user_id"], "revoked")
-            remaining, rreason = self._pick_account(c, now)
-            if remaining is None and rreason == "account":
-                self._store.set_status(c["id"], status="paused",
-                                       paused_reason="account")
-                stats["paused"] += 1
-            logger.warning("campaign %d: token refresh failed for account %s",
-                           c["id"], creds["email"])
-            return
+        access_token = ""
+        if creds.get("provider") != "smtp":
+            access_token = self._access_token(
+                account_id=account_id, user_id=c["user_id"], creds=creds,
+                now=now)
+            if not access_token:
+                self._email_store.mark_status(account_id, c["user_id"], "revoked")
+                remaining, rreason = self._pick_account(c, now)
+                if remaining is None and rreason == "account":
+                    self._store.set_status(c["id"], status="paused",
+                                           paused_reason="account")
+                    stats["paused"] += 1
+                logger.warning("campaign %d: token refresh failed for account %s",
+                               c["id"], creds["email"])
+                return
 
         try:
-            google.send_gmail(
-                access_token, to=send["email"], subject=subject, body=body,
-                from_email=creds["email"],
-                tracking_url=pixel_url(send["id"]),
-            )
+            if creds.get("provider") == "smtp":
+                smtp.send_smtp(
+                    host=creds["smtp_host"], port=creds["smtp_port"],
+                    security=creds["smtp_security"],
+                    username=creds["smtp_username"], password=creds["smtp_password"],
+                    from_email=creds["email"], to=send["email"],
+                    subject=subject, body=body, tracking_url=pixel_url(send["id"]),
+                )
+            else:
+                google.send_gmail(
+                    access_token, to=send["email"], subject=subject, body=body,
+                    from_email=creds["email"],
+                    tracking_url=pixel_url(send["id"]),
+                )
         except Exception as exc:  # noqa: BLE001 — mapped below by cause
             self._on_send_error(c, send, exc, stats, account_id=account_id,
                                 now=now)
@@ -567,6 +587,16 @@ class CampaignScheduler:
         pauses when NO account is left)."""
         resp = getattr(exc, "response", None)
         code = resp.status_code if resp is not None else None
+        if isinstance(exc, smtplib.SMTPAuthenticationError):
+            self._email_store.mark_status(account_id, c["user_id"], "revoked")
+            remaining, reason = self._pick_account(c, now)
+            if remaining is None and reason == "account":
+                self._store.set_status(c["id"], status="paused", paused_reason="account")
+                stats["paused"] += 1
+            logger.warning("campaign %d: SMTP login failed for account %d", c["id"], account_id)
+            return
+        if isinstance(exc, smtplib.SMTPResponseException) and 400 <= exc.smtp_code < 500:
+            code = 429
         if code == 429:
             # Rate limited: cool THIS account down, self-healing. The
             # campaign pauses only when no other account is available.

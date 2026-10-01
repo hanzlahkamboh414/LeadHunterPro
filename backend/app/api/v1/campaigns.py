@@ -9,6 +9,7 @@ and reported, never silently re-mailed).
 from __future__ import annotations
 
 import logging
+import smtplib
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -21,7 +22,7 @@ from app.campaigns.scheduler import ensure_access_token, parse_ts
 from app.campaigns.store import get_campaign_store
 from app.campaigns.templates import render, sample_context
 from app.campaigns.tracking import PIXEL_GIF, parse_token
-from app.email_accounts import google
+from app.email_accounts import google, smtp
 from app.email_accounts.store import get_email_store
 from app.schemas.campaigns import (
     CampaignCreateIn,
@@ -135,30 +136,48 @@ def campaign_test_send(
                    f"reconnect it first",
         )
     creds = email_store.get_credentials(body.account_id, user.id)
-    if creds is None or (not creds["access_token"]
-                         and not creds["refresh_token"]):
+    if creds is None or (creds.get("provider") == "smtp" and not creds.get("smtp_password")) or (
+        creds.get("provider") != "smtp" and not creds["access_token"]
+        and not creds["refresh_token"]
+    ):
         # Undecryptable tokens (key rotated) — honest reset, not a fake send.
         raise HTTPException(status_code=409,
-                            detail="account tokens unreadable — reconnect Gmail")
+                            detail="account credentials unreadable — reconnect the account")
 
     ctx = sample_context()
     subject = render(body.subject, ctx)
     email_body = render(body.body, ctx)
 
-    access_token = ensure_access_token(
-        email_store, account_id=body.account_id, user_id=user.id,
-        creds=creds, now=datetime.now(timezone.utc))
-    if not access_token:
-        email_store.mark_status(body.account_id, user.id, "revoked")
-        raise HTTPException(status_code=409,
-                            detail="token refresh failed — reconnect the account")
+    access_token = ""
+    if creds.get("provider") != "smtp":
+        access_token = ensure_access_token(
+            email_store, account_id=body.account_id, user_id=user.id,
+            creds=creds, now=datetime.now(timezone.utc))
+        if not access_token:
+            email_store.mark_status(body.account_id, user.id, "revoked")
+            raise HTTPException(status_code=409,
+                                detail="token refresh failed — reconnect the account")
 
     try:
-        google.send_gmail(
-            access_token, to=body.to_email, subject=subject, body=email_body,
-            from_email=creds["email"],
-        )
+        if creds.get("provider") == "smtp":
+            smtp.send_smtp(
+                host=creds["smtp_host"], port=creds["smtp_port"],
+                security=creds["smtp_security"], username=creds["smtp_username"],
+                password=creds["smtp_password"], from_email=creds["email"],
+                to=str(body.to_email), subject=subject, body=email_body,
+            )
+        else:
+            google.send_gmail(
+                access_token, to=body.to_email, subject=subject, body=email_body,
+                from_email=creds["email"],
+            )
+    except smtplib.SMTPAuthenticationError as exc:
+        email_store.mark_status(body.account_id, user.id, "revoked")
+        raise HTTPException(status_code=409, detail="SMTP login failed; reconnect this account") from exc
     except Exception as exc:  # noqa: BLE001 — Gmail's error shape varies
+        if creds.get("provider") == "smtp":
+            logger.warning("Campaign SMTP test send failed for account %d", body.account_id)
+            raise HTTPException(status_code=502, detail="SMTP test send failed") from exc
         logger.warning("Campaign test send via %s failed: %s",
                        creds["email"], exc)
         email_store.mark_status(body.account_id, user.id, "revoked")

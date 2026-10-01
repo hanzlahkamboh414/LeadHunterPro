@@ -201,6 +201,10 @@ _ASSET_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico")
 #: ``1800-flowers@`` all survive.
 _PHONE_PREFIX_LOCAL_RE = re.compile(r"^\+?\d{2,4}[-.\s]\d{2,4}")
 
+# A scraped URL-encoded whitespace prefix is not part of the recipient's
+# mailbox. Observed in live campaign queues as ``%20info@...``.
+_ENCODED_SPACE_PREFIX_RE = re.compile(r"^%(?:20|09|0a|0d)", re.I)
+
 #: Machine keys that merely LOOK like mailboxes. A pure-hex local of 16+
 #: chars is a Sentry DSN / Wixpress crash key / Zhihu crash id embedded in
 #: page source (observed: 2062d0a4929b45348643784b5cb39c36@sentry.wixpress.com).
@@ -334,6 +338,8 @@ def is_acceptable_email(email: str) -> bool:
     if is_crawl_artifact(text):
         return False
     if _PHONE_PREFIX_LOCAL_RE.match(text.rpartition("@")[0]):
+        return False
+    if _ENCODED_SPACE_PREFIX_RE.match(text.rpartition("@")[0]):
         return False
     if is_noreply_address(text):
         return False

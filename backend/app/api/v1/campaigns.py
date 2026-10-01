@@ -45,11 +45,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/campaigns", tags=["Campaigns"])
 
 
-def _bounced_addresses(emails: list[str]) -> set[str]:
+def _blocked_addresses(emails: list[str]) -> set[str]:
     store = BounceStore()
     try:
-        return {str(email).lower() for email in emails
-                if store.lookup(str(email)) == "bounced"}
+        campaign_store = get_campaign_store()
+        invalid = campaign_store.invalid_checked_emails(emails)
+        bounced = {str(email).lower() for email in emails
+                   if store.lookup(str(email)) == "bounced"}
+        return invalid | bounced
     finally:
         store.close()
 
@@ -99,13 +102,13 @@ def create_campaign(
 
     store = get_campaign_store()
     already = store.already_sent_emails(user.id, body.emails)
-    bounced = _bounced_addresses(body.emails)
+    bounced = _blocked_addresses(body.emails)
     excluded = {str(e).lower() for e in already} | bounced
     emails = [e for e in body.emails if str(e).lower() not in excluded]
     if not emails:
         raise HTTPException(
             status_code=422,
-            detail="No sendable leads remain: recipients were already emailed or bounced",
+            detail="No sendable leads remain: recipients were already emailed or invalid",
         )
     campaign = store.create(
         user.id, account_id=body.account_id, name=body.name.strip(),
@@ -327,11 +330,11 @@ def update_campaign(
                                     detail=f"account {account['email']} must be reconnected")
     safe_emails = None
     if body.emails is not None:
-        bounced = _bounced_addresses(body.emails)
+        bounced = _blocked_addresses(body.emails)
         safe_emails = [email for email in body.emails
                        if str(email).lower() not in bounced]
         if body.emails and not safe_emails:
-            raise HTTPException(status_code=422, detail="All selected recipients have bounced")
+            raise HTTPException(status_code=422, detail="All selected recipients are invalid")
     if not store.update_campaign(
             campaign_id, user.id, name=body.name.strip(),
             subject=body.subject, body=body.body,

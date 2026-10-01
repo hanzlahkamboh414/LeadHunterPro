@@ -50,6 +50,7 @@ from app.campaigns.personalize import (
     generate_hook,
 )
 from app.campaigns.hard_bounce import hard_bounce_target, invalid_recipient_reason
+from app.campaigns.pre_send_verifier import CampaignEmailVerifier
 from app.campaigns.store import CampaignStore
 from app.campaigns.templates import context_for, render
 from app.campaigns.tracking import pixel_url
@@ -146,6 +147,7 @@ class CampaignScheduler:
         reply_interval_s: float = REPLY_CHECK_INTERVAL_S,
         ai_ask: Ask | None = None,
         bounce_store: Any | None = None,
+        verifier: CampaignEmailVerifier | None = None,
     ) -> None:
         self._store = store
         self._email_store = email_store
@@ -159,6 +161,7 @@ class CampaignScheduler:
         # P5-Lite bounce learning: real send/reply outcomes recorded as
         # email ground truth (None = the loop is off; sends unaffected).
         self._bounce_store = bounce_store
+        self._verifier = verifier
         # Per-account 429 cooldowns (E5): account_id -> send-again-not-before.
         # In-memory on purpose — a cooldown is transient, and a restart at
         # worst re-earns one 429 from Google.
@@ -174,6 +177,8 @@ class CampaignScheduler:
         if self._thread and self._thread.is_alive():
             return
         self._stop.clear()
+        if self._verifier is not None:
+            self._verifier.start()
         self._thread = threading.Thread(
             target=self._run_forever, name="campaign-scheduler", daemon=True
         )
@@ -182,6 +187,8 @@ class CampaignScheduler:
 
     def stop(self) -> None:
         self._stop.set()
+        if self._verifier is not None:
+            self._verifier.stop()
 
     def _run_forever(self) -> None:
         while not self._stop.wait(CHECK_INTERVAL_S):
@@ -434,7 +441,8 @@ class CampaignScheduler:
             # 'capped' — nothing more today, campaign stays running.
             return
 
-        send = self._store.next_pending(c["id"], _iso(now))
+        send = self._store.next_pending(
+            c["id"], _iso(now), verified_only=self._verifier is not None)
         if send is None:
             self._store.mark_completed_if_drained(c["id"])
             return
@@ -443,6 +451,11 @@ class CampaignScheduler:
             self._store.mark_skipped(send["id"], error="bounced recipient")
             self._store.mark_completed_if_drained(c["id"])
             stats["skipped"] += 1
+            return
+
+        # The independent worker must record a safe preflight before any send.
+        # Unknown DNS and suspicious syntax stay queued and never reach SMTP.
+        if self._verifier is not None and self._verifier.status(send["email"]) != "ready":
             return
 
         # Honour the campaign's gap across all its accounts, and the same
@@ -702,8 +715,10 @@ def get_scheduler() -> CampaignScheduler:
             logger.info("bounce store unavailable — outcome learning off",
                         exc_info=True)
             bounce_store = None
+        campaign_store = get_campaign_store()
         _scheduler = CampaignScheduler(
-            get_campaign_store(), get_email_store(), lead_store,
+            campaign_store, get_email_store(), lead_store,
             bounce_store=bounce_store,
+            verifier=CampaignEmailVerifier(campaign_store, lead_store),
         )
     return _scheduler

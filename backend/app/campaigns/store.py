@@ -179,6 +179,14 @@ class CampaignStore:
                     UNIQUE (campaign_id, email)
                 )
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS campaign_email_checks (
+                    email TEXT PRIMARY KEY COLLATE NOCASE,
+                    status TEXT NOT NULL CHECK(status IN ('ready', 'hold', 'invalid')),
+                    reason TEXT NOT NULL DEFAULT '',
+                    checked_at TEXT NOT NULL
+                )
+            """)
             # E5 additive migrations (plain ALTERs — no rebuild needed).
             cols = [r[1] for r in conn.execute("PRAGMA table_info(campaigns)")]
             if "ai_personalize" not in cols:
@@ -464,7 +472,8 @@ class CampaignStore:
         return [r[0] for r in rows]
 
     def next_pending(self, campaign_id: int,
-                     now_iso: str = "") -> dict[str, Any] | None:
+                     now_iso: str = "", *,
+                     verified_only: bool = False) -> dict[str, Any] | None:
         """The next send due: oldest pending row whose not_before (if any)
         has passed. An empty ``now_iso`` ignores not_before entirely (the
         E3 store-call shape — used by tests/admin inspection)."""
@@ -473,6 +482,9 @@ class CampaignStore:
         if now_iso:
             where += " AND (not_before = '' OR not_before <= ?)"
             params.append(now_iso)
+        if verified_only:
+            where += (" AND EXISTS (SELECT 1 FROM campaign_email_checks v "
+                      "WHERE v.email = campaign_sends.email AND v.status = 'ready')")
         conn = self._conn()
         row = conn.execute(
             f"SELECT id, email, step, attempts FROM campaign_sends "
@@ -483,6 +495,67 @@ class CampaignStore:
         if row is None:
             return None
         return {"id": row[0], "email": row[1], "step": row[2], "attempts": row[3]}
+
+    def email_check_status(self, email: str) -> str | None:
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT status, checked_at FROM campaign_email_checks WHERE email = ?",
+            ((email or "").strip().lower(),),
+        ).fetchone()
+        conn.close()
+        if row and row[0] == "ready":
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+            if row[1] <= cutoff:
+                return None
+        return row[0] if row else None
+
+    def invalid_checked_emails(self, emails: list[str]) -> set[str]:
+        if not emails:
+            return set()
+        conn = self._conn()
+        found: set[str] = set()
+        for offset in range(0, len(emails), 500):
+            chunk = [str(email).strip().lower() for email in emails[offset:offset + 500]]
+            marks = ",".join("?" for _ in chunk)
+            rows = conn.execute(
+                f"SELECT lower(email) FROM campaign_email_checks "
+                f"WHERE status = 'invalid' AND email IN ({marks})", chunk,
+            ).fetchall()
+            found.update(row[0] for row in rows)
+        conn.close()
+        return found
+
+    def emails_to_verify(self, *, limit: int = 100,
+                         retry_before: str = "",
+                         ready_before: str = "") -> list[str]:
+        """Distinct queued recipients without a result, plus old holds."""
+        conn = self._conn()
+        rows = conn.execute(
+            "SELECT lower(s.email) FROM campaign_sends s "
+            "LEFT JOIN campaign_email_checks v ON v.email = s.email "
+            "WHERE s.state = 'pending' AND (v.email IS NULL "
+            "OR v.status = 'invalid' "
+            "OR (v.status = 'hold' AND v.checked_at <= ?) "
+            "OR (v.status = 'ready' AND v.checked_at <= ?)) "
+            "GROUP BY lower(s.email) ORDER BY MIN(s.id) LIMIT ?",
+            (retry_before, ready_before, int(limit)),
+        ).fetchall()
+        conn.close()
+        return [row[0] for row in rows]
+
+    def save_email_check(self, email: str, status: str, reason: str) -> None:
+        if status not in {"ready", "hold", "invalid"}:
+            raise ValueError("bad email verification status")
+        conn = self._conn()
+        conn.execute(
+            "INSERT INTO campaign_email_checks(email, status, reason, checked_at) "
+            "VALUES (?, ?, ?, ?) ON CONFLICT(email) DO UPDATE SET "
+            "status=excluded.status, reason=excluded.reason, "
+            "checked_at=excluded.checked_at",
+            ((email or "").strip().lower(), status, reason[:150], _now()),
+        )
+        conn.commit()
+        conn.close()
 
     def last_sent_at(self, campaign_id: int) -> str:
         conn = self._conn()

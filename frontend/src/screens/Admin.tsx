@@ -47,11 +47,12 @@ function count(values: Record<string, number>, key: string): string {
   return (values[key] ?? 0).toLocaleString();
 }
 
-type Tab = "overview" | "users" | "data" | "lanes" | "keys" | "caches" | "audit";
+type Tab = "overview" | "users" | "access" | "data" | "lanes" | "keys" | "caches" | "audit";
 
 const TABS: { id: Tab; label: string; icon: typeof ShieldCheck }[] = [
   { id: "overview", label: "Overview", icon: Gauge },
   { id: "users", label: "Users & Activity", icon: UsersIcon },
+  { id: "access", label: "Admin Access", icon: ShieldCheck },
   { id: "data", label: "Data Control", icon: EyeOff },
   { id: "lanes", label: "AI Lanes", icon: Timer },
   { id: "keys", label: "API Keys", icon: KeyRound },
@@ -63,7 +64,8 @@ export default function Admin({ initialTab = "overview" }: { initialTab?: Tab })
   const qc = useQueryClient();
   const { user: activeUser } = useAuth();
   const isPrimaryAdmin = activeUser?.username === "admin4269" && activeUser.is_admin;
-  const allowedTabs = TABS.filter(({ id }) => isPrimaryAdmin || activeUser?.admin_permissions.includes(id));
+  const allowedTabs = TABS.filter(({ id }) => id === "access"
+    ? isPrimaryAdmin : isPrimaryAdmin || activeUser?.admin_permissions.includes(id));
   const [tab, setTab] = useState<Tab>(initialTab);
   useEffect(() => {
     if (allowedTabs.length && !allowedTabs.some(({ id }) => id === tab)) setTab(allowedTabs[0].id);
@@ -105,7 +107,7 @@ export default function Admin({ initialTab = "overview" }: { initialTab?: Tab })
   const users = useQuery({
     queryKey: ["admin-users"],
     queryFn: () => api.adminUsers(),
-    enabled: allowedTabs.some(({ id }) => id === "users" || id === "data"),
+    enabled: allowedTabs.some(({ id }) => id === "users" || id === "data" || id === "access"),
   });
 
   const invalidateVisibility = () => {
@@ -151,7 +153,7 @@ export default function Admin({ initialTab = "overview" }: { initialTab?: Tab })
     if (allowedTabs.some(({ id }) => id === "audit")) deleted.refetch();
     if (allowedTabs.some(({ id }) => id === "caches")) { pendingCache.refetch(); searchCache.refetch(); }
     if (allowedTabs.some(({ id }) => id === "data")) visibility.refetch();
-    if (allowedTabs.some(({ id }) => id === "users" || id === "data")) users.refetch();
+    if (allowedTabs.some(({ id }) => id === "users" || id === "data" || id === "access")) users.refetch();
     qc.invalidateQueries({ queryKey: ["admin-activity"] });
   };
 
@@ -281,6 +283,10 @@ export default function Admin({ initialTab = "overview" }: { initialTab?: Tab })
       {/* -------------------------------------------------------------- */}
       {tab === "users" && allowedTabs.some(({ id }) => id === tab) && (
         <UsersTab users={allUsers} usersLoading={users.isLoading} usersError={users.error as Error | null} />
+      )}
+
+      {tab === "access" && isPrimaryAdmin && (
+        <AdminAccessPanel users={allUsers} loading={users.isLoading} error={users.error as Error | null} />
       )}
 
       {/* -------------------------------------------------------------- */}
@@ -761,6 +767,82 @@ function AuditTab({
 // Users & Activity tab
 // ---------------------------------------------------------------------------
 
+function AdminAccessPanel({ users, loading, error }: {
+  users: AdminUser[];
+  loading: boolean;
+  error: Error | null;
+}) {
+  const qc = useQueryClient();
+  const manageable = users.filter((user) => user.username !== "admin4269" && user.username !== "shared");
+  const [selectedId, setSelectedId] = useState("");
+  const selected = manageable.find((user) => user.id === selectedId) ?? manageable[0];
+  const [draft, setDraft] = useState<string[]>([]);
+  const [savedName, setSavedName] = useState("");
+  useEffect(() => {
+    setDraft(selected?.admin_permissions ?? []);
+    setSavedName("");
+  }, [selected?.id, selected?.admin_permissions]);
+  const save = useMutation({
+    mutationFn: () => api.adminSetUserPermissions(selected!.id, draft),
+    onSuccess: (updated) => {
+      setSavedName(updated.username);
+      qc.invalidateQueries({ queryKey: ["admin-users"] });
+      qc.invalidateQueries({ queryKey: ["admin-activity"] });
+    },
+  });
+  const controls = TABS.filter(({ id }) => id !== "access");
+  const unchanged = JSON.stringify([...draft].sort()) ===
+    JSON.stringify([...(selected?.admin_permissions ?? [])].sort());
+
+  return <section className={`${cardClass} mt-6`} aria-label="Admin permissions">
+    <div className="flex items-center gap-2">
+      <ShieldCheck className="h-5 w-5 text-teal-300" />
+      <h2 className="text-lg font-semibold text-white">Admin permissions</h2>
+    </div>
+    <p className="mt-1 text-[13px] text-slate-400">
+      Choose an account, then grant only the admin sections it should manage. Clearing every control removes admin access.
+    </p>
+    {loading && <p className="mt-4 text-sm text-slate-400"><Spinner /> Loading accounts…</p>}
+    {error && <p role="alert" className="mt-4 text-sm text-rose-300">Accounts unavailable: {error.message}</p>}
+    {!loading && !error && manageable.length === 0 &&
+      <p className="mt-4 text-sm text-slate-400">Create a user account first, then grant admin access here.</p>}
+    {selected && <>
+      <label className="mt-5 block max-w-lg text-[12px] font-medium text-slate-300" htmlFor="admin-access-user">
+        Account
+        <select id="admin-access-user" value={selected.id} onChange={(event) => setSelectedId(event.target.value)}
+          className="mt-1 min-h-11 w-full rounded-lg border border-white/10 bg-[#151923] px-3 text-[13px] text-slate-100">
+          {manageable.map((user) => <option key={user.id} value={user.id}>
+            {user.name || user.username} ({user.username}) {user.is_admin ? "· admin" : "· user"}
+          </option>)}
+        </select>
+      </label>
+      <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+        {controls.map(({ id, label, icon: Icon }) => <label key={id}
+          className={`flex min-h-12 cursor-pointer items-center gap-3 rounded-lg border px-3 py-2 text-[13px] ${draft.includes(id)
+            ? "border-teal-500/40 bg-teal-500/10 text-white" : "border-white/10 bg-white/[0.02] text-slate-300"}`}>
+          <input type="checkbox" checked={draft.includes(id)}
+            onChange={() => setDraft((current) => current.includes(id)
+              ? current.filter((value) => value !== id) : [...current, id])}
+            className="h-4 w-4 accent-teal-500" />
+          <Icon className="h-4 w-4 shrink-0" />{label}
+        </label>)}
+      </div>
+      <div className="mt-4 flex flex-wrap items-center gap-3">
+        <button type="button" onClick={() => setDraft(controls.map(({ id }) => id))}
+          className="rounded-lg border border-white/10 px-3 py-2 text-xs text-slate-200 hover:bg-white/[0.05]">Select all</button>
+        <button type="button" onClick={() => setDraft([])}
+          className="rounded-lg border border-white/10 px-3 py-2 text-xs text-slate-200 hover:bg-white/[0.05]">Remove all</button>
+        <button type="button" disabled={save.isPending || unchanged} onClick={() => save.mutate()}
+          className="min-h-10 rounded-lg bg-teal-700 px-4 py-2 text-[13px] font-semibold text-white hover:bg-teal-600 disabled:opacity-50">
+          {save.isPending ? "Saving…" : "Save permissions"}
+        </button>
+      </div>
+      {savedName && <p role="status" className="mt-3 text-[12px] text-teal-300">Permissions saved for {savedName}.</p>}
+      {save.isError && <p role="alert" className="mt-3 text-[12px] text-rose-300">{(save.error as Error).message}</p>}
+    </>}
+  </section>;
+}
+
 function UsersTab({
   users,
   usersLoading,
@@ -835,11 +917,6 @@ function UsersTab({
   const setImportLimit = useMutation({
     mutationFn: ({ userId, limit }: { userId: string; limit: number }) =>
       api.adminSetImportLimit(userId, limit),
-    onSuccess: invalidateUsers,
-  });
-  const setPermissions = useMutation({
-    mutationFn: ({ userId, permissions }: { userId: string; permissions: string[] }) =>
-      api.adminSetUserPermissions(userId, permissions),
     onSuccess: invalidateUsers,
   });
 
@@ -1252,7 +1329,7 @@ function UsersTab({
         </div>
         <p className="mt-1 text-[12px] text-slate-500">
           Click a row to see that user's data (folders, dates, activity). Reset password or
-          delete accounts here. The main admin can also grant individual admin controls and set research limits.
+          delete accounts here. Use the Admin Access tab to grant admin controls.
         </p>
 
         {usersError && (
@@ -1304,8 +1381,6 @@ function UsersTab({
                   isPrimaryAdmin={Boolean(isPrimaryAdmin)}
                   onSetImportLimit={(limit) => setImportLimit.mutate({ userId: u.id, limit })}
                   importLimitPending={setImportLimit.isPending}
-                  onSetPermissions={(permissions) => setPermissions.mutate({ userId: u.id, permissions })}
-                  permissionsPending={setPermissions.isPending}
                 />
               ))}
               {users.length === 0 && !usersLoading && (
@@ -1319,7 +1394,6 @@ function UsersTab({
             Password reset for “{resetPassword.data.username}”.
           </p>
         )}
-        {setPermissions.isError && <p role="alert" className="mt-3 text-[12px] text-rose-300">{(setPermissions.error as Error).message}</p>}
         {setImportLimit.isError && <p role="alert" className="mt-3 text-[12px] text-rose-300">{(setImportLimit.error as Error).message}</p>}
       </section>
 
@@ -1486,8 +1560,6 @@ function UserRow({
   isPrimaryAdmin,
   onSetImportLimit,
   importLimitPending,
-  onSetPermissions,
-  permissionsPending,
 }: {
   user: AdminUser;
   expanded: boolean;
@@ -1503,15 +1575,11 @@ function UserRow({
   isPrimaryAdmin: boolean;
   onSetImportLimit: (limit: number) => void;
   importLimitPending: boolean;
-  onSetPermissions: (permissions: string[]) => void;
-  permissionsPending: boolean;
 }) {
   const [phoneLimit, setPhoneLimit] = useState(user.phone_daily_limit);
   const [importLimit, setImportLimit] = useState(user.import_daily_limit ?? 100);
-  const [permissions, setPermissions] = useState<string[]>(user.admin_permissions ?? []);
   useEffect(() => { setPhoneLimit(user.phone_daily_limit); }, [user.phone_daily_limit]);
   useEffect(() => { setImportLimit(user.import_daily_limit ?? 100); }, [user.import_daily_limit]);
-  useEffect(() => { setPermissions(user.admin_permissions ?? []); }, [user.admin_permissions]);
   return (
     <>
       <tr className={`border-t border-white/5 ${expanded ? "bg-white/[0.02]" : "hover:bg-white/[0.02]"}`}>
@@ -1566,23 +1634,6 @@ function UserRow({
                 onClick={() => onSetPhoneLimit(phoneLimit)}
                 className="rounded-md bg-indigo-500/20 px-2.5 py-1 text-indigo-200 disabled:opacity-50">Save limit</button>
               <span className="text-slate-500">{user.phone_daily_used} used today</span>
-            </div>}
-            {isPrimaryAdmin && user.username !== "admin4269" && user.username !== "shared" && <div className="mb-4 rounded-lg border border-white/10 bg-white/[0.03] p-3">
-              <p className="mb-2 text-[13px] font-medium text-slate-200">Admin access</p>
-              <div className="flex flex-wrap gap-x-4 gap-y-2">
-                {TABS.map(({ id, label }) => <label key={id} className="inline-flex items-center gap-1.5 text-[12px] text-slate-300">
-                  <input type="checkbox" checked={permissions.includes(id)} onChange={() => setPermissions((current) => current.includes(id) ? current.filter((value) => value !== id) : [...current, id])} className="accent-teal-500" />
-                  {label}
-                </label>)}
-              </div>
-              <div className="mt-3 flex flex-wrap items-center gap-3">
-                <button type="button" disabled={permissionsPending || JSON.stringify([...permissions].sort()) === JSON.stringify([...(user.admin_permissions ?? [])].sort())}
-                  onClick={() => onSetPermissions(permissions)}
-                  className="rounded-md bg-teal-700 px-3 py-1.5 text-[12px] font-semibold text-white hover:bg-teal-600 disabled:opacity-50">
-                  {permissionsPending ? "Saving…" : "Save admin access"}
-                </button>
-                <span className="text-[11px] text-slate-400">Uncheck every control to remove admin access.</span>
-              </div>
             </div>}
             {isPrimaryAdmin && user.username !== "admin4269" && user.username !== "shared" && <div className="mb-3 flex flex-wrap items-center gap-2 text-[12px] text-slate-300">
               <label htmlFor={`import-limit-${user.id}`}>Manual research per day</label>

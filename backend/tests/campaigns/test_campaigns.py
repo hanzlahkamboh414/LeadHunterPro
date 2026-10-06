@@ -502,6 +502,8 @@ def test_activity_explorer_pages_all_dates_and_filters_by_account(tmp_path, monk
     first, second = sends
     older = _iso(NOW - timedelta(days=15))
     recent = _iso(NOW - timedelta(days=1))
+    older_day = (datetime.fromisoformat(older) + timedelta(hours=5)).date().isoformat()
+    recent_day = (datetime.fromisoformat(recent) + timedelta(hours=5)).date().isoformat()
     store.mark_sent(first["id"], subject="First message", sent_at=older,
                     account_id=ctx["account_id"], body="Hello from our team")
     store.mark_sent(second["id"], subject="Second message", sent_at=recent,
@@ -517,12 +519,12 @@ def test_activity_explorer_pages_all_dates_and_filters_by_account(tmp_path, monk
 
     sent = store.explore_activity(ctx["user"].id, view="sent", limit=1)
     assert sent["total"] == 2 and len(sent["rows"]) == 1
-    assert sent["first_date"] == older[:10]
-    assert {row["date"] for row in sent["by_date"]} == {older[:10], recent[:10]}
+    assert sent["first_date"] == older_day
+    assert {row["date"] for row in sent["by_date"]} == {older_day, recent_day}
     assert sent["by_account"] == [{"account_id": ctx["account_id"], "count": 2}]
     assert store.explore_activity(ctx["user"].id, view="sent", limit=1, offset=1)["rows"][0]["email"] == first["email"]
-    assert store.explore_activity(ctx["user"].id, view="sent", from_date=older[:10],
-                                  to_date=older[:10])["total"] == 1
+    assert store.explore_activity(ctx["user"].id, view="sent", from_date=older_day,
+                                  to_date=older_day)["total"] == 1
     assert store.explore_activity(ctx["user"].id, view="sent",
                                   account_id=ctx["account_id"] + 1)["total"] == 0
     assert store.explore_activity(ctx["user"].id, view="replied")["rows"][0]["email"] == first["email"]
@@ -549,6 +551,23 @@ def test_activity_explorer_pages_all_dates_and_filters_by_account(tmp_path, monk
     assert ctx["client"].get(
         f"/api/v1/campaigns/activity/0/timeline?campaign_id={campaign['id']}&email={second['email']}"
     ).status_code == 200
+
+
+def test_activity_explorer_uses_pakistan_calendar_day(tmp_path):
+    store = CampaignStore(db_path=str(tmp_path / "campaigns.db"))
+    campaign = store.create(
+        "u1", account_id=1, name="Late send", subject="Hello", body="Body",
+        emails=["late@example.com"], start_at="2026-10-01T22:00:00+00:00",
+    )
+    send = store.next_pending(campaign["id"])
+    store.mark_sent(send["id"], subject="Hello",
+                    sent_at="2026-10-01T22:30:00+00:00", account_id=1)
+    history = store.explore_activity("u1", view="sent")
+    assert history["first_date"] == "2026-10-02"
+    assert history["by_date"] == [{"date": "2026-10-02", "count": 1}]
+    assert store.explore_activity("u1", view="sent", from_date="2026-10-02",
+                                  to_date="2026-10-02")["total"] == 1
+    assert store.explore_activity("u1", view="sent", to_date="2026-10-01")["total"] == 0
 
 def test_api_pause_resume_delete(tmp_path, monkeypatch):
     ctx = _setup(tmp_path, monkeypatch)

@@ -894,13 +894,16 @@ class CampaignStore:
                     "WHERE c.user_id = ?" + scope +
                     " AND s.state = 'sent' AND " + step_clause
                 )
+            # The campaign day and daily sending limit use Pakistan time.
+            # Keep history filters and totals on that same calendar day.
+            local_day = "date(event_at, '+5 hours')"
             filters = ["event_at != ''"]
             values: list[Any] = []
             if from_date:
-                filters.append("substr(event_at, 1, 10) >= ?")
+                filters.append(local_day + " >= ?")
                 values.append(from_date)
             if to_date:
-                filters.append("substr(event_at, 1, 10) <= ?")
+                filters.append(local_day + " <= ?")
                 values.append(to_date)
             if account_id:
                 filters.append("account_id = ?")
@@ -919,12 +922,12 @@ class CampaignStore:
                 (*args, limit, offset),
             ).fetchall()
             total, first_date = conn.execute(
-                "SELECT COUNT(*), MIN(substr(event_at, 1, 10)) FROM (" + filtered + ")",
+                "SELECT COUNT(*), MIN(" + local_day + ") FROM (" + filtered + ")",
                 args,
             ).fetchone()
             by_date = conn.execute(
-                "SELECT substr(event_at, 1, 10), COUNT(*) FROM (" + filtered + ") "
-                "GROUP BY substr(event_at, 1, 10) ORDER BY 1 DESC", args,
+                "SELECT " + local_day + ", COUNT(*) FROM (" + filtered + ") "
+                "GROUP BY " + local_day + " ORDER BY 1 DESC", args,
             ).fetchall()
             by_account = conn.execute(
                 "SELECT account_id, COUNT(*) FROM (" + filtered + ") "

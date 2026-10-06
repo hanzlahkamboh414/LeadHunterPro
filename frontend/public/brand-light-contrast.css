@@ -1,0 +1,34 @@
+/* Readable light theme: text colours and controls on pale surfaces. */
+html[data-theme="light"] {color-scheme:light}
+html[data-theme="light"] .workspace-main {color:#1c3542}
+html[data-theme="light"] .workspace-main .text-slate-400 {color:#455d6b}
+html[data-theme="light"] .workspace-main .text-slate-500 {color:#4d6371}
+html[data-theme="light"] .workspace-main .text-slate-600 {color:#566b78}
+html[data-theme="light"] .workspace-main .text-emerald-400 {color:#087861}
+html[data-theme="light"] .workspace-main .page-description,
+html[data-theme="light"] .dashboard-hero .page-description {color:#365a61}
+html[data-theme="light"] .workspace-main .metric-card > div:first-child > span {color:#405967}
+html[data-theme="light"] .workspace-main .screen-tip {color:#405d65;font-size:12px;font-weight:500}
+html[data-theme="light"] .workspace-main .ui-panel p.text-slate-500 {color:#4a6170}
+html[data-theme="light"] .workspace-main th {color:#3d5664}
+html[data-theme="light"] .workspace-sidebar .leading-tight > div:last-child {color:#496b73}
+html[data-theme="light"] .workspace-sidebar .nav-section-label {color:#4e6973;font-size:10px}
+html[data-theme="light"] .workspace-sidebar .sidebar-footer {color:#4c6571;font-size:11px}
+html[data-theme="light"] .workspace-topbar .topbar-breadcrumb {color:#506777}
+html[data-theme="light"] .workspace-topbar [role="status"] span:not(:first-child) {color:#405b67}
+html[data-theme="light"] .workspace-search input::placeholder {color:#536a77;opacity:1}
+html[data-theme="light"] .account-button > div:first-child {color:#0b665e !important;border-color:#78c6b5}
+html[data-theme="light"] .campaign-card button {
+  background:#f4faf8;
+  border-color:#b7d6ce;
+  color:#203e4b;
+}
+html[data-theme="light"] .campaign-card button:hover {background:#e3f3ed;border-color:#70b8a8;color:#12363d}
+html[data-theme="light"] .campaign-card button.text-emerald-300 {color:#08765f}
+html[data-theme="light"] .campaign-card button.text-rose-400 {color:#af2945}
+html[data-theme="light"] .campaign-card button.text-indigo-300 {color:#145d74}
+html[data-theme="light"] .campaign-card > div:first-child p {color:#4d6371}
+html[data-theme="light"] .campaign-card .text-slate-500 {color:#4d6371}
+html[data-theme="light"] .campaign-card .text-slate-600 {color:#596e7b}
+html[data-theme="light"] .campaign-card .h-1\.5 {background:#d9eae4}
+html[data-theme="light"] .auth-page input {color:#173441}

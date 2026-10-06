@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { Link, useNavigate, Navigate } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
-import { Search } from "lucide-react";
 
 export default function Login() {
   const { login, authEnabled } = useAuth();
@@ -37,8 +36,7 @@ export default function Login() {
         {/* Logo */}
         <div className="flex items-center justify-center gap-2.5 mb-8">
           <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center relative">
-            <Search className="w-5 h-5 text-white" strokeWidth={2.5} />
-            <span className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-emerald-400 ring-2 ring-[#0B0E14]" />
+            <img src="/lead-hunter-orbit.svg" alt="" width="42" height="42" />
           </div>
           <div className="text-xl font-semibold text-white">
             LeadHunter <span className="text-indigo-400">Pro</span>

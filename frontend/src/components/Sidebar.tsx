@@ -82,7 +82,7 @@ export default function Sidebar() {
       <div>
         <div className="flex items-center gap-2.5 px-2 pb-6 pt-1">
           <div className="brand-mark w-9 h-9 rounded-xl flex items-center justify-center relative shrink-0">
-            <Search className="w-4 h-4 text-white" strokeWidth={2.5} />
+            <img src="/lead-hunter-orbit.svg" alt="" width="42" height="42" />
           </div>
           <div className="leading-tight">
             <div className="text-[15px] font-semibold text-white">

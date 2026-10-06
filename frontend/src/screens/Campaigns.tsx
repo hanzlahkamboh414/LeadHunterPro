@@ -82,11 +82,9 @@ function fmtLocal(iso: string): string {
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
 }
 
-/** datetime-local default: tomorrow at 09:00, the user's own clock. */
+/** Suggest a nearby start on the user's own clock, without fixing it at 9 AM. */
 function defaultStart(): string {
-  const d = new Date();
-  d.setDate(d.getDate() + 1);
-  d.setHours(9, 0, 0, 0);
+  const d = new Date(Date.now() + 10 * 60_000);
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }

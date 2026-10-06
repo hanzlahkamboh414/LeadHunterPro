@@ -19,7 +19,10 @@ const BUTTON = "min-h-11 rounded-lg border border-white/10 px-3 text-xs font-med
 function formatDate(value: string): string {
   if (!value) return "—";
   const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString();
+  return Number.isNaN(parsed.getTime()) ? value : `${parsed.toLocaleString("en-PK", {
+    timeZone: "Asia/Karachi", year: "numeric", month: "short", day: "numeric",
+    hour: "numeric", minute: "2-digit", hour12: true,
+  })} PKT`;
 }
 
 export default function EmailHistory() {
@@ -49,9 +52,9 @@ export default function EmailHistory() {
     setFromDate(""); setToDate(""); setAccountId(0); setCampaignId(0);
     setEmailDraft(""); setEmail(""); setPage(0);
   };
-  return <div className="workspace-page page-focused">
+  return <div className="workspace-page page-focused email-history">
     <PageHeader eyebrow="Engage" title="Email History"
-      subtitle="Find every recorded send, reply, bounce and follow-up by date, campaign or Gmail account." />
+      subtitle="Find every recorded send, reply, bounce and follow-up by Pakistan date, campaign or Gmail account." />
     <section aria-label="Email history filters" className="mt-5 rounded-xl border border-white/10 bg-white/[0.02] p-4 sm:p-5">
       <div role="tablist" aria-label="Email activity" className="grid grid-cols-2 gap-2 sm:grid-cols-4">
         {VIEWS.map((tab) => <button key={tab.key} type="button" role="tab" aria-selected={view === tab.key}

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Check,
   Download,
+  PhoneCall,
   Save,
   Search,
   StickyNote,
@@ -305,6 +306,15 @@ export default function Phones() {
     }
   };
 
+  const recordSavedEvent = async (id: number, action: "dialed" | "copied") => {
+    try {
+      await api.phoneRecordSavedEvent(id, action);
+      refreshActivity();
+    } catch (err: any) {
+      setError(err?.message || "Could not save the call event");
+    }
+  };
+
   // Live email state by lead id: a search result is a snapshot, but the
   // enrichment outcome arrives later — the polled my-leads rows are the
   // truth for any lead shown.
@@ -345,7 +355,7 @@ export default function Phones() {
     [todayActivity],
   );
   const callMetrics = [
-    ["Dial attempts", activity?.dialed ?? 0, "bg-indigo-400"],
+    ["Dial attempts", activity?.attempts ?? activity?.dialed ?? 0, "bg-indigo-400"],
     ["Leads", activity?.outcomes.lead ?? 0, "bg-emerald-400"],
     ["Voicemail", activity?.outcomes.voicemail ?? 0, "bg-amber-400"],
     ["Not interested", activity?.outcomes.not_interested ?? 0, "bg-rose-400"],
@@ -370,13 +380,16 @@ export default function Phones() {
       <section className="ui-panel rounded-xl border border-white/5 bg-[#0D1017] p-5" aria-label="Daily calling progress">
         <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
           <div><h2 className="text-base font-semibold text-white">Daily calling progress</h2>
-            <p className="text-xs text-slate-500">Dial attempts are Zoom link clicks, not verified connected calls. Times use UTC.</p></div>
+            <p className="text-xs text-slate-500">A number counts once per user each UTC day, whether copied or opened in Zoom. Repeat actions stay in call history.</p></div>
           <select aria-label="Progress date" value={selectedDay} onChange={(e) => setSelectedDay(e.target.value)}
             className="rounded-lg border border-white/10 bg-[#151923] px-3 py-2 text-sm text-white">
             {[...new Set([selectedDay, new Date().toISOString().slice(0, 10), ...activityDays])].sort().reverse().map((day) =>
               <option key={day} value={day}>{day}</option>)}
           </select>
         </div>
+        <p className="mb-3 text-[12px] text-slate-400" role="status">
+          {activity?.unique_attempted ?? 0} unique numbers · {activity?.copied ?? 0} copies · {activity?.zoom_clicks ?? 0} Zoom clicks
+        </p>
         <div className="grid gap-2">
           {callMetrics.map(([label, count, color]) => <div key={label} className="grid grid-cols-[110px_1fr_50px] items-center gap-3 text-xs">
             <span className="text-slate-400">{label}</span>
@@ -562,11 +575,11 @@ export default function Phones() {
                         <span className="inline-flex items-center gap-1.5">
                           <a
                             href={`zoomphonecall://${l.phone}`}
-                            title="Open in Zoom Phone"
+                            title="Call in Zoom Phone (requires Zoom Phone on this device)"
                             onClick={() => { void recordEvent(l.id, "dialed"); }}
-                            className="text-indigo-300 hover:text-indigo-200"
+                            className="inline-flex items-center gap-1 text-indigo-300 hover:text-indigo-200"
                           >
-                            {prettyPhone(l.phone)}
+                            {prettyPhone(l.phone)} <PhoneCall className="h-3.5 w-3.5" aria-hidden="true" /><span className="sr-only">Call in Zoom Phone</span>
                           </a>
                           <CopyButton value={l.phone} label="phone" onCopied={() => { void recordEvent(l.id, "copied"); }} />
                           {lastTouch?.lead_id === l.id && <span className="text-[10px] text-indigo-300">Last {lastTouch.action}</span>}
@@ -720,12 +733,14 @@ export default function Phones() {
                         <td className="px-4 py-2.5">
                           <span className="inline-flex items-center gap-1.5">
                             <a
-                              href={`tel:${s.phone}`}
+                              href={`zoomphonecall://${s.phone}`}
+                              title="Call in Zoom Phone (requires the Zoom app and Zoom Phone sign-in)"
+                              onClick={() => { void recordSavedEvent(s.id, "dialed"); }}
                               className="text-indigo-300 hover:text-indigo-200"
                             >
                               {prettyPhone(s.phone)}
                             </a>
-                            <CopyButton value={s.phone} label="phone" />
+                            <CopyButton value={s.phone} label="phone" onCopied={() => { void recordSavedEvent(s.id, "copied"); }} />
                           </span>
                         </td>
                         <td className="px-4 py-2.5">

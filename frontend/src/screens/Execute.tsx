@@ -10,6 +10,7 @@ import { elapsed, recommendationBadge, recommendationLabel } from "../lib/format
 import { useAuth } from "../contexts/AuthContext";
 import { CITIES_BY_STATE, TRADES, US_STATES } from "../data/locations";
 import { Combobox, Select } from "../components/Select";
+import ManualResearch from "./ManualResearch";
 
 /** "Custom…" sentinel in the dropdowns — admin-only free-text escape hatch. */
 const CUSTOM = "__custom__";
@@ -20,6 +21,7 @@ function activeJobKey(userId: string): string {
 }
 
 export default function Execute() {
+  const [researchMode, setResearchMode] = useState<"market" | "file">("market");
   const { user } = useAuth();
   const isAdmin = !!user?.is_admin;
   const maxTargets = isAdmin ? 500 : 150;
@@ -156,6 +158,11 @@ export default function Execute() {
         title="Research"
         subtitle="Choose your market. Discover companies and follow their research as it happens."
       />
+      <div className="mt-4 flex flex-wrap gap-2" role="tablist" aria-label="Research type">
+        <button role="tab" aria-selected={researchMode === "market"} onClick={() => setResearchMode("market")} className={`min-h-11 rounded-lg px-4 text-sm font-semibold ${researchMode === "market" ? "bg-indigo-600 text-white" : "border border-white/10 text-slate-300"}`}>Find new leads</button>
+        <button role="tab" aria-selected={researchMode === "file"} onClick={() => setResearchMode("file")} className={`min-h-11 rounded-lg px-4 text-sm font-semibold ${researchMode === "file" ? "bg-indigo-600 text-white" : "border border-white/10 text-slate-300"}`}>Research my file</button>
+      </div>
+      {researchMode === "file" ? <ManualResearch /> : <>
       <div className="screen-tip"><span><b>01</b> Choose a market</span><span><b>02</b> Set your target</span><span><b>03</b> Review qualified leads</span></div>
 
       {/* API key (M12 baseline) */}
@@ -368,6 +375,7 @@ export default function Execute() {
           resumePending={resume.isPending}
         />
       )}
+      </>}
     </div>
   );
 }

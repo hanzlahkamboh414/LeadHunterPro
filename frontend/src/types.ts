@@ -737,6 +737,19 @@ export interface AdminUsers {
   users: AdminUser[];
 }
 
+export interface AdminTenant {
+  id: string;
+  name: string;
+  member_count: number;
+}
+
+export interface AdminTenantMember {
+  user_id: string;
+  username: string;
+  role: "owner" | "admin" | "member";
+  status: "active" | "disabled";
+}
+
 export interface AdminActivityRow {
   id: number;
   user_id: string;
@@ -858,6 +871,10 @@ export interface PhoneCallEvent {
 export interface PhoneCallActivity {
   date: string;
   dialed: number;
+  attempts: number;
+  unique_attempted: number;
+  copied: number;
+  zoom_clicks: number;
   outcomes: Record<string, number>;
   events: PhoneCallEvent[];
 }

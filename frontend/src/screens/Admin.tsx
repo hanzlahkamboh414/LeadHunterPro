@@ -22,6 +22,7 @@ import {
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { api } from "../api/client";
+import { useAuth } from "../contexts/AuthContext";
 import { DELETE_REASONS } from "../components/DeleteReasonDialog";
 import { Select } from "../components/Select";
 import { Spinner } from "../components/StatusChip";
@@ -31,6 +32,7 @@ import type {
   AdminLaneRepeat,
   AdminLeadScope,
   AdminLeadScopeKind,
+  AdminTenant,
   AdminUser,
   AdminVisibilityDate,
 } from "../types";
@@ -57,9 +59,9 @@ const TABS: { id: Tab; label: string; icon: typeof ShieldCheck }[] = [
   { id: "audit", label: "Audit Log", icon: ActivityIcon },
 ];
 
-export default function Admin() {
+export default function Admin({ initialTab = "overview" }: { initialTab?: Tab }) {
   const qc = useQueryClient();
-  const [tab, setTab] = useState<Tab>("overview");
+  const [tab, setTab] = useState<Tab>(initialTab);
 
   const dashboard = useQuery({
     queryKey: ["admin-dashboard"],
@@ -756,8 +758,21 @@ function UsersTab({
   usersError: Error | null;
 }) {
   const qc = useQueryClient();
+  const { user: activeUser, tenants: ownTenants } = useAuth();
+  const isPlatformAdmin = Boolean(activeUser?.is_platform_admin);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [activityFilter, setActivityFilter] = useState<string>("");
+  const [tenantName, setTenantName] = useState("");
+  const [selectedTenant, setSelectedTenant] = useState("");
+  const [selectedPhoneUserId, setSelectedPhoneUserId] = useState("");
+  const [phoneLimitDraft, setPhoneLimitDraft] = useState("");
+  const [phoneLimitSaved, setPhoneLimitSaved] = useState("");
+  const selectedPhoneUser = users.find((u) => u.id === selectedPhoneUserId && !u.is_admin)
+    ?? users.find((u) => !u.is_admin);
+  const validPhoneLimit = /^\d+$/.test(phoneLimitDraft) && Number(phoneLimitDraft) <= 5000;
+  useEffect(() => {
+    if (selectedPhoneUser) setPhoneLimitDraft(String(selectedPhoneUser.phone_daily_limit));
+  }, [selectedPhoneUser?.id, selectedPhoneUser?.phone_daily_limit]);
 
   const activity = useQuery({
     queryKey: ["admin-activity", activityFilter],
@@ -777,9 +792,13 @@ function UsersTab({
   };
 
   const createUser = useMutation({
-    mutationFn: (body: { username: string; email: string; password: string; name?: string }) =>
+    mutationFn: (body: { username: string; email: string; password: string; name?: string; tenant_id?: string; role?: "owner" | "member" }) =>
       api.adminCreateUser(body),
-    onSuccess: invalidateUsers,
+    onSuccess: () => {
+      invalidateUsers();
+      qc.invalidateQueries({ queryKey: ["admin-tenants"] });
+      qc.invalidateQueries({ queryKey: ["admin-tenant-members"] });
+    },
   });
   const deleteUser = useMutation({
     mutationFn: (userId: string) => api.adminDeleteUser(userId),
@@ -792,7 +811,12 @@ function UsersTab({
   const setPhoneLimit = useMutation({
     mutationFn: ({ userId, limit }: { userId: string; limit: number }) =>
       api.adminSetPhoneLimit(userId, limit),
-    onSuccess: invalidateUsers,
+    onSuccess: (result) => {
+      invalidateUsers();
+      setPhoneLimitSaved(`Saved ${result.daily_limit} numbers/day for ${
+        users.find((u) => u.id === result.user_id)?.username ?? "user"
+      }.`);
+    },
   });
 
   // Login-auth ON/OFF — the open-site switch. OFF means: no login page,
@@ -801,6 +825,41 @@ function UsersTab({
   const authMode = useQuery({
     queryKey: ["auth-mode"],
     queryFn: () => api.authMode(),
+  });
+  const tenantMode = authMode.data?.tenant_mode === true;
+  const tenants = useQuery({
+    queryKey: ["admin-tenants"],
+    queryFn: () => api.adminTenants(),
+    enabled: tenantMode && isPlatformAdmin,
+  });
+  const members = useQuery({
+    queryKey: ["admin-tenant-members", selectedTenant],
+    queryFn: () => api.adminTenantMembers(selectedTenant),
+    enabled: tenantMode && isPlatformAdmin && !!selectedTenant,
+  });
+  const createTenant = useMutation({
+    mutationFn: (name: string) => api.adminCreateTenant(name),
+    onSuccess: (created) => {
+      setTenantName("");
+      setSelectedTenant(created.id);
+      qc.invalidateQueries({ queryKey: ["admin-tenants"] });
+    },
+  });
+  const addTenantMember = useMutation({
+    mutationFn: ({ tenantId, userId }: { tenantId: string; userId: string }) =>
+      api.adminAddTenantMember(tenantId, userId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["admin-tenants"] });
+      qc.invalidateQueries({ queryKey: ["admin-tenant-members", selectedTenant] });
+    },
+  });
+  const removeTenantMember = useMutation({
+    mutationFn: ({ tenantId, userId }: { tenantId: string; userId: string }) =>
+      api.adminRemoveTenantMember(tenantId, userId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["admin-tenants"] });
+      qc.invalidateQueries({ queryKey: ["admin-tenant-members", selectedTenant] });
+    },
   });
   const toggleAuth = useMutation({
     mutationFn: (enabled: boolean) => api.adminSetAuthMode(enabled),
@@ -873,7 +932,7 @@ function UsersTab({
           </div>
           <button
             onClick={flipAuth}
-            disabled={toggleAuth.isPending || authMode.isLoading}
+            disabled={tenantMode || toggleAuth.isPending || authMode.isLoading}
             className={`rounded-lg px-3.5 py-2 text-[12.5px] font-medium disabled:opacity-50 ${
               (authMode.data?.auth_enabled ?? true)
                 ? "border border-amber-500/40 text-amber-300 hover:bg-amber-500/10"
@@ -888,7 +947,9 @@ function UsersTab({
           </button>
         </div>
         <p className="mt-1 text-[12px] text-slate-500">
-          {(authMode.data?.auth_enabled ?? true)
+          {tenantMode
+            ? "Tenant mode mein login hamesha ON rahega."
+            : (authMode.data?.auth_enabled ?? true)
             ? "Har visitor ko login karna zaroori hai. OFF karne par site seedha normal user UI me khulegi aur admin panel sirf /admin4269 password gate se milega."
             : "Site open hai — sab visitors shared account par kaam rahe hain. Admin panel ke liye leadhuntarpro.online/admin4269 par admin password chahiye."}
         </p>
@@ -1004,6 +1065,137 @@ function UsersTab({
         {recoverWrong.isError && <p className="mt-2 text-xs text-rose-300">Recovery failed: {(recoverWrong.error as Error).message}</p>}
       </section>
 
+      {tenantMode && isPlatformAdmin && (
+        <section className={`${cardClass} mt-6`}>
+          <div className="flex items-center gap-2">
+            <UsersIcon className="h-4 w-4 text-indigo-400" />
+            <h2 className="text-[16px] font-semibold text-white">Tenants</h2>
+          </div>
+          <p className="mt-1 text-[12px] text-slate-500">
+            Har company ka alag workspace. Naya tenant banane ke baad us ka pehla owner naya account hoga.
+          </p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <input
+              value={tenantName}
+              onChange={(e) => setTenantName(e.target.value)}
+              placeholder="Company / tenant name"
+              className={`${inputClass} max-w-sm`}
+            />
+            <button
+              type="button"
+              disabled={!tenantName.trim() || createTenant.isPending}
+              onClick={() => createTenant.mutate(tenantName.trim())}
+              className="rounded-lg bg-indigo-600 px-4 py-2 text-[13px] font-semibold text-white disabled:opacity-50"
+            >
+              Create tenant
+            </button>
+          </div>
+          {createTenant.isError && <p className="mt-2 text-xs text-rose-300">{(createTenant.error as Error).message}</p>}
+          {tenants.isError && <p className="mt-2 text-xs text-rose-300">Tenants unavailable: {(tenants.error as Error).message}</p>}
+          <div className="mt-4 flex flex-wrap items-center gap-3">
+            <Select
+              className="w-64"
+              value={selectedTenant}
+              onChange={setSelectedTenant}
+              placeholder="Select tenant"
+              options={(tenants.data ?? []).map((tenant) => ({
+                value: tenant.id,
+                label: `${tenant.name} (${tenant.member_count} users)`,
+              }))}
+            />
+            <span className="text-xs text-slate-500">
+              {(tenants.data ?? []).length} tenant(s) total
+            </span>
+          </div>
+          {selectedTenant && (
+            <div className="mt-4">
+              <p className="text-[13px] font-medium text-slate-200">
+                {(tenants.data ?? []).find((tenant) => tenant.id === selectedTenant)?.name ?? "Tenant"} members
+              </p>
+              {members.isLoading && <p className="mt-2 text-xs text-slate-500">Loading members…</p>}
+              {members.isError && <p className="mt-2 text-xs text-rose-300">Members unavailable: {(members.error as Error).message}</p>}
+              {(members.data ?? []).map((member) => (
+                <div key={member.user_id} className="flex items-center justify-between border-b border-white/5 py-2 text-xs">
+                  <span className="text-slate-300">{member.username} · {member.role}{member.status === "disabled" ? " · disabled" : ""}</span>
+                  {member.status === "disabled" ? (
+                    <button
+                      type="button"
+                      disabled={addTenantMember.isPending}
+                      onClick={() => addTenantMember.mutate({ tenantId: selectedTenant, userId: member.user_id })}
+                      className="text-emerald-300 hover:text-emerald-200 disabled:opacity-50"
+                    >Reactivate</button>
+                  ) : member.role === "member" && (
+                    <button
+                      type="button"
+                      disabled={removeTenantMember.isPending}
+                      onClick={() => {
+                        if (window.confirm(`Disable ${member.username}'s account? They will lose access immediately.`)) {
+                          removeTenantMember.mutate({ tenantId: selectedTenant, userId: member.user_id });
+                        }
+                      }}
+                      className="text-rose-300 hover:text-rose-200 disabled:opacity-50"
+                    >Disable</button>
+                  )}
+                </div>
+              ))}
+              {addTenantMember.isError && <p className="mt-2 text-xs text-rose-300">{(addTenantMember.error as Error).message}</p>}
+              {removeTenantMember.isError && <p className="mt-2 text-xs text-rose-300">{(removeTenantMember.error as Error).message}</p>}
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* Phone quota control stays visible instead of being hidden in a user row. */}
+      <section className={`${cardClass} mt-6`} aria-label="Phone number daily limits">
+        <div className="flex items-center gap-2">
+          <Phone className="h-4 w-4 text-teal-400" />
+          <h2 className="text-[16px] font-semibold text-white">Phone number limits</h2>
+        </div>
+        <p className="mt-1 text-[12px] text-slate-400">
+          Default: 600 numbers per user per UTC day. Set any limit from 0 to 5000.
+        </p>
+        {selectedPhoneUser ? (
+          <div className="mt-4 flex flex-wrap items-end gap-3">
+            <label className="flex min-w-[180px] flex-1 flex-col gap-1 text-[12px] text-slate-300">
+              Account
+              <select
+                value={selectedPhoneUser.id}
+                onChange={(event) => { setSelectedPhoneUserId(event.target.value); setPhoneLimitSaved(""); }}
+                className="min-h-11 rounded-lg border border-white/10 bg-[#151923] px-3 text-[13px] text-slate-100"
+              >
+                {users.filter((u) => !u.is_admin).map((u) => (
+                  <option key={u.id} value={u.id}>{u.name || u.username} ({u.username})</option>
+                ))}
+              </select>
+            </label>
+            <label className="flex w-36 flex-col gap-1 text-[12px] text-slate-300">
+              Numbers per day
+              <input
+                type="number" min={0} max={5000} step={1}
+                value={phoneLimitDraft}
+                onChange={(event) => { setPhoneLimitDraft(event.target.value); setPhoneLimitSaved(""); }}
+                className="min-h-11 rounded-lg border border-white/10 bg-[#151923] px-3 text-[13px] text-slate-100"
+              />
+            </label>
+            <button
+              type="button"
+              disabled={setPhoneLimit.isPending || !validPhoneLimit || Number(phoneLimitDraft) === selectedPhoneUser.phone_daily_limit}
+              onClick={() => setPhoneLimit.mutate({ userId: selectedPhoneUser.id, limit: Number(phoneLimitDraft) })}
+              className="min-h-11 rounded-lg bg-teal-700 px-4 text-[13px] font-semibold text-white hover:bg-teal-600 disabled:opacity-50"
+            >
+              {setPhoneLimit.isPending ? "Saving…" : "Save limit"}
+            </button>
+            <span className="pb-3 text-[12px] text-slate-400">
+              {selectedPhoneUser.phone_daily_used} used today
+            </span>
+          </div>
+        ) : (
+          <p className="mt-3 text-[12px] text-slate-400">Create a user account to set its phone limit.</p>
+        )}
+        {phoneLimitSaved && <p role="status" className="mt-2 text-[12px] text-teal-300">{phoneLimitSaved}</p>}
+        {setPhoneLimit.isError && <p role="alert" className="mt-2 text-[12px] text-rose-300">{(setPhoneLimit.error as Error).message}</p>}
+      </section>
+
       {/* Create account */}
       <section className={`${cardClass} mt-6`}>
         <div className="flex items-center gap-2">
@@ -1013,7 +1205,14 @@ function UsersTab({
         <p className="mt-1 text-[12px] text-slate-500">
           Create a user account directly — the user logs in with this username + password.
         </p>
-        <CreateUserForm busy={createUser.isPending} error={createUser.error as Error | null} onCreate={(b) => createUser.mutate(b)} />
+        <CreateUserForm
+          busy={createUser.isPending}
+          error={createUser.error as Error | null}
+          tenants={tenantMode ? (isPlatformAdmin ? tenants.data ?? [] : ownTenants.map(
+            (tenant) => ({ id: tenant.id, name: tenant.name, member_count: 1 }),
+          )) : undefined}
+          onCreate={(b) => createUser.mutate(b)}
+        />
         {createUser.data && (
           <p className="mt-3 text-[12.5px] text-emerald-300">
             Account “{createUser.data.username}” created — the user can log in now.
@@ -1156,18 +1355,35 @@ function UsersTab({
 function CreateUserForm({
   busy,
   error,
+  tenants,
   onCreate,
 }: {
   busy: boolean;
   error: Error | null;
-  onCreate: (body: { username: string; email: string; password: string; name?: string }) => void;
+  tenants?: AdminTenant[];
+  onCreate: (body: { username: string; email: string; password: string; name?: string; tenant_id?: string; role?: "owner" | "member" }) => void;
 }) {
   const [username, setUsername] = useState("");
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [tenantId, setTenantId] = useState("");
   return (
     <div className="mt-3">
+      {tenants && (
+        <div className="mb-3">
+          <Select
+            className="w-72"
+            value={tenantId}
+            onChange={setTenantId}
+            placeholder="Choose tenant for this account"
+            options={tenants.map((tenant) => ({ value: tenant.id, label: tenant.name }))}
+          />
+        </div>
+      )}
+      {tenants?.find((tenant) => tenant.id === tenantId)?.member_count === 0 && (
+        <p className="mb-2 text-xs text-amber-300">This first account will own the company.</p>
+      )}
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-4">
         <input
           value={username}
@@ -1199,13 +1415,20 @@ function CreateUserForm({
       <div className="mt-2 flex items-center gap-3">
         <button
           onClick={() => {
-            onCreate({ username: username.trim(), email: email.trim(), password, name: name.trim() });
+            onCreate({
+              username: username.trim(), email: email.trim(), password,
+              name: name.trim(), ...(tenants ? {
+                tenant_id: tenantId,
+                role: tenants.find((tenant) => tenant.id === tenantId)?.member_count === 0
+                  ? "owner" as const : "member" as const,
+              } : {}),
+            });
             setUsername("");
             setName("");
             setEmail("");
             setPassword("");
           }}
-          disabled={busy || !username.trim() || !email.trim() || !password || !name.trim()}
+          disabled={busy || !username.trim() || !email.trim() || !password || !name.trim() || (tenants !== undefined && !tenantId)}
           className="rounded-lg bg-indigo-600 px-4 py-2 text-[13px] font-semibold text-white hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
         >
           {busy ? <Spinner className="h-3.5 w-3.5" /> : <UserPlus className="h-3.5 w-3.5" />}

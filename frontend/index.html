@@ -2,10 +2,20 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link
-      rel="icon"
-      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎯</text></svg>"
-    />
+    <link rel="icon" type="image/svg+xml" href="/lead-hunter-orbit.svg" />
+    <link rel="stylesheet" href="/brand-redesign.css" />
+    <link rel="stylesheet" href="/brand-next.css" />
+    <link rel="stylesheet" href="/brand-quiet.css" />
+    <link rel="stylesheet" href="/brand-4d.css" />
+    <link rel="stylesheet" href="/brand-light-contrast.css" />
+    <link rel="stylesheet" href="/ui-repairs.css?v=20261006c" />
+    <script defer src="/brand-next.js"></script>
+    <script defer src="/brand-4d.js"></script>
+    <script defer src="/ui-repairs.js"></script>
+    <script>
+      try { document.documentElement.dataset.theme = localStorage.getItem("leadhunter-theme") === "light" ? "light" : "dark"; }
+      catch { document.documentElement.dataset.theme = "dark"; }
+    </script>
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>LeadHunter Pro</title>
   </head>

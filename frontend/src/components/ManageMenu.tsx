@@ -63,7 +63,8 @@ export default function ManageMenu({
   async function doCreateFolder() {
     const name = newName.trim();
     if (!name) return;
-    await createMut.mutateAsync(name);
+    try { await createMut.mutateAsync(name); }
+    catch { /* Error is shown in the panel. */ }
   }
 
   // Rename / delete — inline on every label row.
@@ -91,8 +92,10 @@ export default function ManageMenu({
     if (to && to !== from) {
       // Renaming the folder you are CURRENTLY viewing: follow it, else the URL
       // would point at a name that no longer exists (empty view).
-      if (renaming.kind === "folder" && from === activeFolder) onSelectFolder(to);
-      await renameMut.mutateAsync({ kind: renaming.kind, from_: from, to });
+      try {
+        await renameMut.mutateAsync({ kind: renaming.kind, from_: from, to });
+        if (renaming.kind === "folder" && from === activeFolder) onSelectFolder(to);
+      } catch { return; /* Keep the editor open so the user can correct it. */ }
     }
     setRenaming(null);
   }
@@ -100,8 +103,10 @@ export default function ManageMenu({
     if (!window.confirm(`'${name}' ${kind === "folder" ? "folder" : "tag"} saari leads se hatayein?`)) {
       return;
     }
-    if (kind === "folder" && name === activeFolder) onSelectFolder(""); // leave the deleted view
-    await clearMut.mutateAsync({ kind, value: name });
+    try {
+      await clearMut.mutateAsync({ kind, value: name });
+      if (kind === "folder" && name === activeFolder) onSelectFolder("");
+    } catch { /* Error is shown in the panel. */ }
   }
 
   function selectFolder(name: string) {
@@ -196,12 +201,15 @@ export default function ManageMenu({
       {/* Click-outside closes the menu. */}
       <div className="fixed inset-0 z-40" onClick={onClose} />
       <div
-        className="absolute right-0 z-50 mt-2 max-h-[520px] w-80 overflow-y-auto rounded-2xl border border-white/10 bg-[#11151E] p-3 shadow-2xl"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="manage-folders-title"
+        className="manage-panel fixed z-50 overflow-y-auto rounded-2xl border border-white/10 bg-[#11151E] p-3 shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between">
-          <h2 className="text-[13px] font-semibold text-white">Manage folders &amp; tags</h2>
-          <button onClick={onClose} className="text-slate-500 hover:text-slate-200">
+          <h2 id="manage-folders-title" className="text-[13px] font-semibold text-white">Manage folders &amp; tags</h2>
+          <button onClick={onClose} aria-label="Close folder management" className="text-slate-500 hover:text-slate-200">
             <X className="w-4 h-4" />
           </button>
         </div>
@@ -224,6 +232,11 @@ export default function ManageMenu({
             {createMut.isPending ? <Spinner className="h-3.5 w-3.5" /> : <Plus className="w-4 h-4" />}
           </button>
         </div>
+        {(createMut.isError || renameMut.isError || clearMut.isError) && (
+          <p role="alert" className="mt-2 rounded-lg bg-rose-500/10 px-2 py-1.5 text-[12px] text-rose-300">
+            {String((createMut.error || renameMut.error || clearMut.error) || "Folder update failed")}
+          </p>
+        )}
 
         {/* Folders — the actual mailbox places. */}
         <p className="mt-4 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-indigo-300">

@@ -68,7 +68,7 @@ export function ConnectionStatus() {
 export default function Topbar() {
   const [q, setQ] = useState("");
   const navigate = useNavigate();
-  const { user } = useAuth();
+  const { user, tenantMode, tenants, activeTenantId, switchTenant } = useAuth();
   const emailsVisible = canSeeEmails(user?.category, user?.is_admin, Boolean(user));
   const location = useLocation();
   const searchRef = useRef<HTMLInputElement>(null);
@@ -109,6 +109,18 @@ export default function Topbar() {
     // height instead of being squeezed by the scrolling <main> beside it.
     <header className="workspace-topbar shrink-0 flex items-center gap-4 border-b border-white/5">
       <div className="topbar-breadcrumb"><span>Workspace</span><span>/</span><strong>{pageTitle}</strong></div>
+      {tenantMode && (
+        <select
+          aria-label="Active workspace"
+          value={activeTenantId}
+          onChange={(event) => switchTenant(event.target.value)}
+          className="max-w-52 rounded-lg border border-white/10 bg-[#151923] px-2 py-2 text-xs text-slate-100"
+        >
+          {tenants.map((tenant) => (
+            <option key={tenant.id} value={tenant.id}>{tenant.name}</option>
+          ))}
+        </select>
+      )}
       {emailsVisible && <form onSubmit={onSubmit} role="search" className="workspace-search flex-1 max-w-xl relative">
         <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
         <input

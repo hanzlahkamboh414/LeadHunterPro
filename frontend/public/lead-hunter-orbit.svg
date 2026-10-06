@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" role="img" aria-label="LeadHunter Pro orbit mark">
+  <defs>
+    <linearGradient id="metal" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#DCFFF7"/><stop offset=".25" stop-color="#6FFFE0"/><stop offset=".59" stop-color="#159D9B"/><stop offset="1" stop-color="#08343F"/></linearGradient>
+    <linearGradient id="face" x1=".1" y1="0" x2=".9" y2="1"><stop stop-color="#114F5D"/><stop offset=".5" stop-color="#062831"/><stop offset="1" stop-color="#071820"/></linearGradient>
+    <radialGradient id="core"><stop stop-color="#E7FFF9"/><stop offset=".24" stop-color="#70FFDF"/><stop offset=".65" stop-color="#12B7AE"/><stop offset="1" stop-color="#064456"/></radialGradient>
+    <filter id="bloom" x="-80%" y="-80%" width="260%" height="260%"><feGaussianBlur stdDeviation="5"/></filter>
+  </defs>
+  <ellipse cx="60" cy="61" rx="48" ry="18" fill="none" stroke="#4CEBD6" stroke-opacity=".26" transform="rotate(-29 60 61)" stroke-width="2"/>
+  <ellipse cx="60" cy="61" rx="48" ry="18" fill="none" stroke="#B3FFF0" stroke-opacity=".34" transform="rotate(36 60 61)" stroke-width="1.5"/>
+  <path d="M60 6 105 31v55l-45 27L15 86V31Z" fill="#041B25" stroke="#60FFE0" stroke-opacity=".35" stroke-width="2"/>
+  <path d="M60 12 99 34 60 57 21 34Z" fill="url(#metal)" opacity=".6"/>
+  <path d="M21 34 60 57v48L21 82Z" fill="#0C5D65"/>
+  <path d="M99 34 60 57v48l39-23Z" fill="#073A4A"/>
+  <path d="M60 18 94 37v42L60 99 26 79V37Z" fill="url(#face)" stroke="#A3FFEC" stroke-opacity=".72" stroke-width="1.5"/>
+  <path d="M60 24 88 40v36L60 93 32 76V40Z" fill="none" stroke="#43DBC9" stroke-opacity=".3"/>
+  <circle cx="60" cy="58" r="27" fill="#2BFFE0" opacity=".3" filter="url(#bloom)"/>
+  <circle cx="60" cy="58" r="24" fill="none" stroke="url(#metal)" stroke-width="3.5"/>
+  <circle cx="60" cy="58" r="17" fill="#062C38" stroke="#4CE5D2" stroke-opacity=".55"/>
+  <circle cx="60" cy="58" r="11" fill="url(#core)"/>
+  <path d="m60 58 16-17" stroke="#E9FFF8" stroke-linecap="round" stroke-width="3.4"/>
+  <circle cx="77" cy="40" r="3" fill="#E9FFF8"/>
+  <path d="M22 30 60 9l38 21" fill="none" stroke="#D9FFF5" stroke-opacity=".6" stroke-width="1.4"/>
+  <circle cx="15" cy="57" r="2" fill="#87FFE6"/><circle cx="105" cy="69" r="2" fill="#87FFE6"/>
+</svg>

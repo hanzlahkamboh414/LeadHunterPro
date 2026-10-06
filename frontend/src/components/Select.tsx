@@ -223,9 +223,11 @@ export function Combobox({
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
-  const q = value.trim().toLowerCase();
+  const q = value.trim();
   const suggestions = useMemo(() => {
-    const pool = q ? options.filter((o) => o.toLowerCase().includes(q)) : options;
+    // Folder names are case-sensitive in storage. Keep suggestions exact-case
+    // so typing "abc" never steers a user into an existing "ABC" folder.
+    const pool = q ? options.filter((o) => o.includes(q)) : options;
     return pool.slice(0, 8);
   }, [options, q]);
 
@@ -250,8 +252,13 @@ export function Combobox({
         placeholder={placeholder}
         className="w-full rounded-lg border border-white/5 bg-white/[0.04] px-3.5 py-2.5 text-[13px] text-slate-300 placeholder:text-slate-500 outline-none focus:border-indigo-500/40 focus:ring-2 focus:ring-indigo-500/40"
       />
-      {open && suggestions.length > 0 && (
+      {open && (suggestions.length > 0 || (q && !options.includes(q))) && (
         <ul className="absolute left-0 right-0 top-full z-50 mt-1.5 max-h-48 overflow-y-auto rounded-lg border border-white/10 bg-[#0d1117] py-1 shadow-2xl shadow-black/60">
+          {q && !options.includes(q) && (
+            <li className="border-b border-white/10 px-3 py-2 text-[12px] text-indigo-200">
+              Use exact name “{q}” — press Save/Apply below
+            </li>
+          )}
           {suggestions.map((s) => (
             <li
               key={s}

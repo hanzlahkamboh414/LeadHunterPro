@@ -17,6 +17,8 @@ import type {
   AdminLeadAction,
   AdminLeadScope,
   AdminSearchCache,
+  AdminTenant,
+  AdminTenantMember,
   AdminUserLeadSummary,
   AdminUsers,
   AdminVisibility,
@@ -58,7 +60,16 @@ import type {
   WrongPhoneArchiveRow,
   SignupCategory,
 } from "../types";
+import { ACTIVE_TENANT_KEY } from "../lib/tenantSelection";
+import type { TenantMembership } from "../lib/tenantSelection";
 
+export interface LeadImportJob {
+  id: string; name: string; filename: string; status: string;
+  total: number; rejected: number; relevant: number; irrelevant: number;
+  failed: number; pending: number; created_at: string; updated_at: string;
+}
+export interface LeadImportQuota { day_utc: string; limit: number | null; used: number; remaining: number | null; }
+export interface LeadImportActivity { email: string; status: string; reason: string; }
 export interface CampaignBounce { email: string; account_id: number; bounced_at: string; reason: string; }
 
 const BASE = import.meta.env?.VITE_API_BASE || "/api/v1";
@@ -103,6 +114,8 @@ function authHeaders(init?: RequestInit): Record<string, string> {
   try {
     const token = localStorage.getItem("leadhunter.jwt");
     if (token) headers["Authorization"] = `Bearer ${token}`;
+    const tenantId = localStorage.getItem(ACTIVE_TENANT_KEY);
+    if (tenantId) headers["X-Tenant-ID"] = tenantId;
   } catch {
     /* ignore private-mode failures */
   }
@@ -130,6 +143,7 @@ function leadsParams(filter: LeadsFilter): string {
   if (filter.bound !== undefined) q.set("bound", String(filter.bound));
   if (filter.min_score !== undefined) q.set("min_score", String(filter.min_score));
   if (filter.source) q.set("source", filter.source);
+  if (filter.import_id) q.set("import_id", filter.import_id);
   if (filter.folder) q.set("folder", filter.folder);
   if (filter.tag) q.set("tag", filter.tag);
   if (filter.date) q.set("date", filter.date);
@@ -172,6 +186,7 @@ export interface CreateJobInput {
 }
 
 export interface LeadsFilter {
+  import_id?: string;
   recommendation?: string;
   bound?: boolean;
   min_score?: number;
@@ -192,8 +207,16 @@ export interface OrganizeInput {
   tags: string[];
 }
 
+export interface BulkOrganizeResult {
+  requested: number;
+  updated: number;
+  failed: string[];
+  skipped_in_campaign: string[];
+}
+
 /** CSV-export filter — the same user-view filters as the Companies list. */
 export interface ExportFilter {
+  import_id?: string;
   recommendation?: string;
   emails?: string[];
   folder?: string;
@@ -211,15 +234,29 @@ export interface ExportFilter {
  * for this one hop and a signed state carries the user back. */
 export function googleAuthorizeUrl(): string {
   let token = "";
+  let tenantId = "";
   try {
     token = localStorage.getItem("leadhunter.jwt") || "";
+    tenantId = localStorage.getItem(ACTIVE_TENANT_KEY) || "";
   } catch {
     /* private mode */
   }
-  return `${BASE}/email-accounts/google/authorize?token=${encodeURIComponent(token)}`;
+  return `${BASE}/email-accounts/google/authorize?token=${encodeURIComponent(token)}${tenantId ? `&tenant_id=${encodeURIComponent(tenantId)}` : ""}`;
 }
 
 export const api = {
+  uploadLeadFile(file: File, name: string): Promise<{ job: LeadImportJob; quota: LeadImportQuota }> {
+    const data = new FormData();
+    data.append("file", file);
+    if (name.trim()) data.append("name", name.trim());
+    return request("/leads/imports", { method: "POST", body: data });
+  },
+  listLeadImports(): Promise<LeadImportJob[]> { return request("/leads/imports"); },
+  leadImportQuota(): Promise<LeadImportQuota> { return request("/leads/imports/quota"); },
+  leadImportActivity(id: string): Promise<LeadImportActivity[]> { return request(`/leads/imports/${encodeURIComponent(id)}/activity`); },
+  cancelLeadImport(id: string): Promise<LeadImportJob> { return request(`/leads/imports/${encodeURIComponent(id)}/cancel`, { method: "POST" }); },
+  renameLeadImport(id: string, name: string): Promise<LeadImportJob> { return request(`/leads/imports/${encodeURIComponent(id)}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) }); },
+  deleteLeadImport(id: string): Promise<void> { return request(`/leads/imports/${encodeURIComponent(id)}`, { method: "DELETE" }); },
   // Auth -----------------------------------------------------------------
   login(username: string, password: string): Promise<{ user_id: string; username: string; is_admin: boolean; token: string }> {
     return request("/auth/login", {
@@ -256,8 +293,12 @@ export const api = {
   },
 
   /** PUBLIC boot check — is the login page on or off? (Admin panel toggle.) */
-  authMode(): Promise<{ auth_enabled: boolean }> {
+  authMode(): Promise<{ auth_enabled: boolean; tenant_mode?: boolean }> {
     return request("/auth/mode");
+  },
+
+  myTenants(): Promise<TenantMembership[]> {
+    return request<TenantMembership[]>("/auth/tenants");
   },
 
   /** Admin toggle: turn the login page on/off (open-site mode). */
@@ -411,6 +452,29 @@ export const api = {
   adminUsers(): Promise<AdminUsers> {
     return request<AdminUsers>("/admin/users");
   },
+  adminTenants(): Promise<AdminTenant[]> {
+    return request<AdminTenant[]>("/admin/tenants");
+  },
+  adminCreateTenant(name: string): Promise<AdminTenant> {
+    return request<AdminTenant>("/admin/tenants", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+  },
+  adminTenantMembers(tenantId: string): Promise<AdminTenantMember[]> {
+    return request<AdminTenantMember[]>(`/admin/tenants/${encodeURIComponent(tenantId)}/members`);
+  },
+  adminAddTenantMember(tenantId: string, userId: string): Promise<void> {
+    return request(`/admin/tenants/${encodeURIComponent(tenantId)}/members/${encodeURIComponent(userId)}`, {
+      method: "PUT",
+    });
+  },
+  adminRemoveTenantMember(tenantId: string, userId: string): Promise<void> {
+    return request(`/admin/tenants/${encodeURIComponent(tenantId)}/members/${encodeURIComponent(userId)}`, {
+      method: "DELETE",
+    });
+  },
   adminSetPhoneLimit(userId: string, dailyLimit: number): Promise<{ user_id: string; daily_limit: number }> {
     return request(`/admin/users/${encodeURIComponent(userId)}/phone-limit`, {
       method: "PUT",
@@ -423,6 +487,8 @@ export const api = {
     email: string;
     password: string;
     name?: string;
+    tenant_id?: string;
+    role?: "owner" | "member";
   }): Promise<AdminUsers["users"][number]> {
     return request("/admin/users", {
       method: "POST",
@@ -693,6 +759,59 @@ export const api = {
       body: JSON.stringify(input),
     });
   },
+  phoneRecordSavedEvent(savedId: number, action: "dialed" | "copied"): Promise<{ id: number }> {
+    return request(`/phones/saved/${savedId}/event`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action }),
+      keepalive: true,
+    });
+  },
+
+  organizeLeadsBulk(input: {
+    emails: string[];
+    folder?: string;
+    add_tags?: string[];
+    only_campaign_available?: boolean;
+  }): Promise<BulkOrganizeResult> {
+    return request<BulkOrganizeResult>("/leads/organize/bulk", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+  },
+
+  campaignRecipientStatus(): Promise<{ queued: string[]; emailed: string[] }> {
+    return request<{ queued: string[]; emailed: string[] }>("/campaigns/recipient-status");
+  },
+  campaignAvailableLeads(input: { count: number; folder: string; recommendation: string }): Promise<{ emails: string[]; count: number; requested: number }> {
+    const params = new URLSearchParams({
+      count: String(input.count), folder: input.folder,
+      recommendation: input.recommendation,
+    });
+    return request(`/campaigns/available-leads?${params.toString()}`);
+  },
+  campaignActivity(offset = 0, limit = 100): Promise<{ rows: CampaignActivityRow[] }> {
+    return request(`/campaigns/activity?offset=${offset}&limit=${limit}`);
+  },
+  exploreCampaignActivity(input: {
+    view: "sent" | "replied" | "bounced" | "followup";
+    from_date?: string; to_date?: string; account_id?: number;
+    campaign_id?: number; email?: string; offset?: number; limit?: number;
+  }): Promise<CampaignHistoryPage> {
+    const params = new URLSearchParams();
+    Object.entries(input).forEach(([key, value]) => {
+      if (value !== undefined && value !== "" && value !== 0) params.set(key, String(value));
+    });
+    return request(`/campaigns/activity/explore?${params.toString()}`);
+  },
+  campaignRecipientTimeline(sendId: number, campaignId = 0, email = ""): Promise<CampaignRecipientTimeline> {
+    const params = new URLSearchParams({ campaign_id: String(campaignId), email });
+    return request(`/campaigns/activity/${sendId}/timeline?${params.toString()}`);
+  },
+  campaignReplyContent(sendId: number): Promise<CampaignReplyContent> {
+    return request(`/campaigns/activity/${sendId}/reply`);
+  },
 
   // Folders catalog (Phase B.2/B.3): a folder is a persisted, clickable group —
   // empty folders exist FIRST, fill as leads are moved into them. Returns the
@@ -865,33 +984,6 @@ export const api = {
     return request(`/campaigns/${id}`);
   },
   campaignBounces(id: number): Promise<CampaignBounce[]> { return request(`/campaigns/${id}/bounces`); },
-  campaignAvailableLeads(input: { count: number; folder: string; recommendation: string }): Promise<{ emails: string[]; count: number; requested: number }> {
-    const params = new URLSearchParams({
-      count: String(input.count), folder: input.folder, recommendation: input.recommendation,
-    });
-    return request(`/campaigns/available-leads?${params.toString()}`);
-  },
-  campaignActivity(offset = 0, limit = 100): Promise<{ rows: CampaignActivityRow[] }> {
-    return request(`/campaigns/activity?offset=${offset}&limit=${limit}`);
-  },
-  exploreCampaignActivity(input: {
-    view: "sent" | "replied" | "bounced" | "followup";
-    from_date?: string; to_date?: string; account_id?: number;
-    campaign_id?: number; email?: string; offset?: number; limit?: number;
-  }): Promise<CampaignHistoryPage> {
-    const params = new URLSearchParams();
-    Object.entries(input).forEach(([key, value]) => {
-      if (value !== undefined && value !== "" && value !== 0) params.set(key, String(value));
-    });
-    return request(`/campaigns/activity/explore?${params.toString()}`);
-  },
-  campaignRecipientTimeline(sendId: number, campaignId = 0, email = ""): Promise<CampaignRecipientTimeline> {
-    const params = new URLSearchParams({ campaign_id: String(campaignId), email });
-    return request(`/campaigns/activity/${sendId}/timeline?${params.toString()}`);
-  },
-  campaignReplyContent(sendId: number): Promise<CampaignReplyContent> {
-    return request(`/campaigns/activity/${sendId}/reply`);
-  },
 
   /** Create a scheduled campaign. Leads already emailed by an earlier
    * campaign are excluded server-side — `excluded` says how many. */
@@ -1013,6 +1105,7 @@ export const api = {
     filter: ExportFilter = {},
   ): Promise<string> {
     const params = new URLSearchParams();
+    if (filter.import_id) params.set("import_id", filter.import_id);
     if (filter.recommendation) params.set("recommendation", filter.recommendation);
     if (filter.folder) params.set("folder", filter.folder);
     if (filter.tag) params.set("tag", filter.tag);

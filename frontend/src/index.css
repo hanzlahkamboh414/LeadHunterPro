@@ -28,6 +28,23 @@ html {
   color-scheme: dark;
 }
 
+/* Native select menus need an explicit palette: some browsers otherwise open
+   a white option panel with the dark theme's white text. */
+.email-history select,
+.email-history select option {
+  background-color: #172331;
+  color: #e8f4f2;
+  color-scheme: dark;
+}
+.email-history input[type="date"] { color-scheme: dark; }
+html[data-theme="light"] .email-history select,
+html[data-theme="light"] .email-history select option {
+  background-color: #fff;
+  color: #17343d;
+  color-scheme: light;
+}
+html[data-theme="light"] .email-history input[type="date"] { color-scheme: light; }
+
 body {
   margin: 0;
   background-color: #0b0e14;

@@ -1,7 +1,7 @@
 import { useCallback, useLayoutEffect, useMemo, useState } from "react";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useLocation, useSearchParams } from "react-router-dom";
-import { Download, CheckSquare, Flame, Gauge, Inbox, Layers, Square, Sprout, Tag, Trash2, UserCheck, X } from "lucide-react";
+import { Check, Download, CheckSquare, Flame, Gauge, Inbox, Layers, Pencil, Square, Sprout, Tag, Trash2, UserCheck, X } from "lucide-react";
 import { api } from "../api/client";
 import { PageHeader } from "../components/PageHeader";
 import { Combobox, Select } from "../components/Select";
@@ -92,6 +92,7 @@ export default function Leads() {
         : "";
   const minScore = params.get("min_score") ?? "";
   const src = (params.get("source") ?? "").trim();
+  const importId = (params.get("import_id") ?? "").trim();
   const q = (params.get("q") ?? "").trim().toLowerCase();
   const folder = (params.get("folder") ?? "").trim();
   const tag = (params.get("tag") ?? "").trim();
@@ -100,7 +101,7 @@ export default function Leads() {
   // A date/tag search is GLOBAL (har folder me dhundhta hai) — no single place
   // is active in the rail while it runs, so the view honestly shows the cross-
   // place recall, not the Unfiled inbox.
-  const inGlobalSearch = !folder && (!!date || !!tag);
+  const inGlobalSearch = !folder && (!!date || !!tag || !!importId);
 
   function setRec(v: RecFilter) {
     const p = new URLSearchParams(params);
@@ -157,6 +158,7 @@ export default function Leads() {
   // place switch resets the cross-place recall too.
   function setPlace(folderValue: string, tagValue: string) {
     const p = new URLSearchParams(params);
+    p.delete("import_id");
     if (folderValue) p.set("folder", folderValue);
     else p.delete("folder");
     if (tagValue) p.set("tag", tagValue);
@@ -165,6 +167,50 @@ export default function Leads() {
     setParams(p, { replace: true });
   }
   const [manageOpen, setManageOpen] = useState(false);
+  const [renamingFolder, setRenamingFolder] = useState("");
+  const [folderNameDraft, setFolderNameDraft] = useState("");
+  const [folderActionError, setFolderActionError] = useState("");
+  const renameFolder = useMutation({
+    mutationFn: ({ from, to }: { from: string; to: string }) =>
+      api.renameOrganize("folder", from, to),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["leads"] });
+      qc.invalidateQueries({ queryKey: ["folders"] });
+      qc.invalidateQueries({ queryKey: ["dates"] });
+    },
+  });
+  const deleteFolder = useMutation({
+    mutationFn: (name: string) => api.clearOrganize("folder", name),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["leads"] });
+      qc.invalidateQueries({ queryKey: ["folders"] });
+      qc.invalidateQueries({ queryKey: ["dates"] });
+    },
+  });
+  async function saveFolderRename() {
+    const to = folderNameDraft.trim();
+    if (!renamingFolder || !to) return;
+    if (to === renamingFolder) { setRenamingFolder(""); return; }
+    setFolderActionError("");
+    try {
+      await renameFolder.mutateAsync({ from: renamingFolder, to });
+      setRenamingFolder("");
+      setPlace(to, "");
+    } catch (error) {
+      setFolderActionError(error instanceof Error ? error.message : "Could not rename folder.");
+    }
+  }
+  async function removeSelectedFolder() {
+    if (!folder || folder === "*" || !window.confirm(`Delete "${folder}" folder? Its companies will remain in Inbox.`)) return;
+    setFolderActionError("");
+    try {
+      await deleteFolder.mutateAsync(folder);
+      setRenamingFolder("");
+      setPlace("", "");
+    } catch (error) {
+      setFolderActionError(error instanceof Error ? error.message : "Could not delete folder.");
+    }
+  }
 
   // The Companies screen pages IN THE DATABASE (Phase 2 — server speed): the
   // backend filters, sorts and paginates in SQL, so only ONE page is downloaded
@@ -172,14 +218,15 @@ export default function Leads() {
   // carries it and the old client-side filter memo is gone.
   const PAGE = 100;
   const pageQ = useInfiniteQuery({
-    queryKey: ["leads", rec, bound, minScore, src, folder, tag, date, stage, q],
+    queryKey: ["leads", rec, bound, minScore, src, folder, tag, date, stage, q, importId],
     queryFn: ({ pageParam = 0 }) =>
       api.pageLeads({
         recommendation: rec || undefined,
         bound: bound === "" ? undefined : bound === "true",
         min_score: minScore === "" ? undefined : Number(minScore),
         source: src || undefined,
-        folder: folder || undefined,
+        import_id: importId || undefined,
+        folder: importId ? "*" : folder || undefined,
         tag: tag || undefined,
         date: date || undefined,
         crm_status: stage || undefined,
@@ -198,6 +245,25 @@ export default function Leads() {
     () => pageQ.data?.pages.flatMap((p) => p.rows) ?? [],
     [pageQ.data],
   );
+  const campaignStatusQ = useQuery({
+    queryKey: ["campaign-recipient-status"],
+    queryFn: () => api.campaignRecipientStatus(),
+    staleTime: 15_000,
+  });
+  const [campaignView, setCampaignView] = useState<"all" | "available" | "used">("all");
+  const queuedEmails = useMemo(
+    () => new Set(campaignStatusQ.data?.queued ?? []), [campaignStatusQ.data],
+  );
+  const emailedEmails = useMemo(
+    () => new Set(campaignStatusQ.data?.emailed ?? []), [campaignStatusQ.data],
+  );
+  const visibleLeads = useMemo(() => leads.filter((lead) => {
+    const used = queuedEmails.has(lead.email.toLowerCase()) || emailedEmails.has(lead.email.toLowerCase());
+    return campaignView === "all" || (campaignView === "used" ? used : !used);
+  }), [leads, queuedEmails, emailedEmails, campaignView]);
+  const availableLoaded = leads.filter(
+    (lead) => !queuedEmails.has(lead.email.toLowerCase()) && !emailedEmails.has(lead.email.toLowerCase()),
+  ).length;
   // Honest total for the CURRENT filters (from X-Total-Count), so "Show more"
   // knows when it's done and the header can be accurate even on page 1.
   const totalLeads = pageQ.data?.pages[0]?.total ?? 0;
@@ -365,25 +431,49 @@ export default function Leads() {
   const [bulkFolder, setBulkFolder] = useState("");
   const [bulkTagsIn, setBulkTagsIn] = useState("");
   const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkNotice, setBulkNotice] = useState("");
+  const [bulkHasError, setBulkHasError] = useState(false);
   async function applyBulk() {
     if (selected.size === 0) return;
     const addTags = bulkTagsIn.split(",").map((s) => s.trim()).filter(Boolean);
     const folderToSet = bulkFolder.trim();
     setBulkBusy(true);
+    setBulkNotice("");
+    setBulkHasError(false);
     try {
-      await Promise.allSettled(
-        [...selected].map((email) => {
-          const lead = leads.find((l) => l.email === email);
-          const merged = [...new Set([...(lead?.tags ?? []), ...addTags])];
-          return organize.mutateAsync({
-            email,
-            folder: folderToSet || (lead?.folder ?? ""),
-            tags: merged,
+      const emails = [...selected];
+      let updated = 0;
+      let skipped = 0;
+      const failed: string[] = [];
+      for (let start = 0; start < emails.length; start += 500) {
+        const batch = emails.slice(start, start + 500);
+        setBulkNotice(`Moving ${Math.min(start + batch.length, emails.length)} of ${emails.length} selected emails…`);
+        try {
+          const result = await api.organizeLeadsBulk({
+            emails: batch,
+            ...(folderToSet ? { folder: folderToSet } : {}),
+            add_tags: addTags,
+            only_campaign_available: campaignView === "available",
           });
-        }),
-      );
-      setBulkFolder("");
-      setBulkTagsIn("");
+          updated += result.updated;
+          skipped += result.skipped_in_campaign.length;
+          failed.push(...result.failed);
+        } catch {
+          failed.push(...batch);
+        }
+      }
+      setBulkNotice(`${updated} lead(s) moved${skipped ? ` · ${skipped} already in campaigns skipped` : ""}${failed.length ? ` · ${failed.length} failed (still selected to retry)` : ""}.`);
+      setBulkHasError(failed.length > 0 || skipped > 0);
+      setSelected(new Set(failed));
+      qc.invalidateQueries({ queryKey: ["leads"] });
+      qc.invalidateQueries({ queryKey: ["folders"] });
+      if (failed.length === 0) {
+        setBulkFolder("");
+        setBulkTagsIn("");
+      }
+    } catch (error) {
+      setBulkNotice(error instanceof Error ? error.message : "Folder update failed. Selection is still saved.");
+      setBulkHasError(true);
     } finally {
       setBulkBusy(false);
     }
@@ -423,8 +513,7 @@ export default function Leads() {
 
   // --- Selection state ---
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  // Select-all mirrors the LOADED rows (page by page), so check-all stays honest
-  // as "Show more" reveals more — the user picks from what is actually on screen.
+  const allVisibleSelected = visibleLeads.length > 0 && visibleLeads.every((lead) => selected.has(lead.email));
 
   function toggleSelect(email: string) {
     setSelected((prev) => {
@@ -436,11 +525,15 @@ export default function Leads() {
   }
 
   function toggleSelectAll() {
-    if (selected.size === leads.length) {
-      setSelected(new Set());
-    } else {
-      setSelected(new Set(leads.map((l) => l.email)));
-    }
+    setSelected((previous) => {
+      const next = new Set(previous);
+      if (visibleLeads.every((lead) => next.has(lead.email))) {
+        visibleLeads.forEach((lead) => next.delete(lead.email));
+      } else {
+        visibleLeads.forEach((lead) => next.add(lead.email));
+      }
+      return next;
+    });
   }
 
   // --- Visited marker + last-opened accent + scroll restoration ---
@@ -509,6 +602,7 @@ export default function Leads() {
     try {
       const csv = await api.exportCsvData({
         recommendation: rec === "contact_now" || rec === "nurture" ? rec : undefined,
+        import_id: importId || undefined,
         folder: folder || undefined,
         tag: tag || undefined,
         date: date || undefined,
@@ -521,14 +615,14 @@ export default function Leads() {
     } catch {
       window.alert("Export done nahi ho saka (server ne CSV nahi diya).");
     }
-  }, [rec, folder, tag, date, src, bound, minScore, q]);
+  }, [rec, folder, tag, date, src, bound, minScore, q, importId]);
 
   return (
     <div className="workspace-page companies-page">
       <div className="directory-heading flex items-center justify-between flex-wrap gap-3">
         <PageHeader
           eyebrow="Company workspace"
-          title={q ? `Results for "${params.get("q")}"` : "Companies"}
+          title={q ? `Results for "${params.get("q")}"` : importId ? "File research leads" : "Companies"}
           subtitle="Explore your research, review the evidence and prioritize your next conversation."
         />
         <div className="directory-actions flex flex-wrap items-center gap-2">
@@ -605,7 +699,8 @@ export default function Leads() {
 
       <section className="company-library" aria-label="Company folders and tags">
       <div className="directory-section-heading"><h2>Your collections</h2><span>Organize companies by folder or tag</span></div>
-      <div className="collection-row flex flex-wrap items-center gap-1.5">
+      <div className="collection-row flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-1.5">
         <PlaceChip
           active={folder === "" && !tag && !date}
           icon={<Inbox className="w-3.5 h-3.5" />}
@@ -622,11 +717,29 @@ export default function Leads() {
         >
           All <span className="font-semibold">{catalog?.total ?? 0}</span>
         </PlaceChip>
+        </div>
+        {folder !== "" && folder !== "*" && folderList.some((f) => f.name === folder) && (
+          <div className="ml-auto flex shrink-0 items-center gap-1.5" aria-label={`Actions for ${folder} folder`}>
+            {renamingFolder === folder ? (
+              <>
+                <input autoFocus aria-label="New folder name" value={folderNameDraft} onChange={(e) => setFolderNameDraft(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void saveFolderRename(); if (e.key === "Escape") setRenamingFolder(""); }} className="min-h-10 w-28 rounded-lg border border-white/10 bg-white/[0.06] px-2 text-xs text-white outline-none focus:ring-2 focus:ring-indigo-500/50 sm:w-40" />
+                <button type="button" aria-label="Save folder name" disabled={!folderNameDraft.trim() || renameFolder.isPending} onClick={() => void saveFolderRename()} className="inline-flex min-h-10 items-center gap-1 rounded-lg border border-indigo-400/40 px-2.5 text-xs text-indigo-200 disabled:opacity-50"><Check className="h-3.5 w-3.5" /> Save</button>
+                <button type="button" aria-label="Cancel rename" onClick={() => setRenamingFolder("")} className="inline-flex min-h-10 min-w-10 items-center justify-center rounded-lg border border-white/10 text-slate-300"><X className="h-3.5 w-3.5" /></button>
+              </>
+            ) : (
+              <>
+                <button type="button" onClick={() => { setRenamingFolder(folder); setFolderNameDraft(folder); setFolderActionError(""); }} className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-white/10 px-3 text-xs font-medium text-slate-200 hover:bg-white/5"><Pencil className="h-3.5 w-3.5" /> Rename</button>
+                <button type="button" disabled={deleteFolder.isPending} onClick={() => void removeSelectedFolder()} className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-rose-400/25 px-3 text-xs font-medium text-rose-200 hover:bg-rose-500/10 disabled:opacity-50"><Trash2 className="h-3.5 w-3.5" /> Delete</button>
+              </>
+            )}
+          </div>
+        )}
       </div>
-      <div className="collection-row flex flex-wrap items-center gap-1.5">
-        <span className="collection-label">Folders</span>
-        {folderList.length === 0 && <span className="text-xs text-slate-500">No folders yet</span>}
-        {folderList.map((f) => (
+      <div className="collection-row flex flex-wrap items-center justify-between gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+          <span className="collection-label">Folders</span>
+          {folderList.length === 0 && <span className="text-xs text-slate-500">No folders yet</span>}
+          {folderList.map((f) => (
           <PlaceChip
             key={f.name}
             active={folder === f.name}
@@ -636,8 +749,10 @@ export default function Leads() {
           >
             {f.name} <span className="font-semibold">{f.count}</span>
           </PlaceChip>
-        ))}
+          ))}
+        </div>
       </div>
+      {folderActionError && <p role="alert" className="mt-1 text-xs text-rose-300">{folderActionError}</p>}
       <div className="collection-row flex flex-wrap items-center gap-1.5">
         <span className="collection-label">Tags</span>
         {globalTags.length === 0 && <span className="text-xs text-slate-500">No tags yet</span>}
@@ -671,6 +786,25 @@ export default function Leads() {
         </div>
       </div>
       </section>
+      <div className="mt-4 flex flex-wrap items-center gap-2" aria-label="Campaign email status filter">
+        {([
+          ["all", "All emails"],
+          ["available", `Available for campaigns (${availableLoaded} loaded)`],
+          ["used", `Already in campaigns (${leads.length - availableLoaded} loaded)`],
+        ] as const).map(([value, label]) => (
+          <button
+            key={value}
+            type="button"
+            onClick={() => { setCampaignView(value); setSelected(new Set()); setBulkNotice(""); }}
+            disabled={value !== "all" && !campaignStatusQ.data}
+            aria-pressed={campaignView === value}
+            className={`min-h-11 rounded-lg border px-3 py-2 text-[12.5px] font-medium disabled:opacity-50 ${campaignView === value ? "border-teal-400/40 bg-teal-500/15 text-teal-100" : "border-white/10 text-slate-300 hover:bg-white/[0.06]"}`}
+          >{label}</button>
+        ))}
+        {campaignStatusQ.isLoading && <span className="text-xs text-slate-400">Checking campaign status…</span>}
+        {campaignStatusQ.isError && <span role="alert" className="text-xs text-rose-300">Campaign status unavailable. <button type="button" className="underline" onClick={() => void campaignStatusQ.refetch()}>Retry</button></span>}
+      </div>
+      <p className="mt-1 text-xs text-slate-400">Select emails across loaded pages, then set one folder. Use Show more to load the next page; selection stays saved.</p>
           {junkNote && (
             <p className="mt-3 text-[12.5px] text-emerald-300 bg-emerald-500/10 rounded-lg px-3 py-2">
               {junkNote}
@@ -683,6 +817,7 @@ export default function Leads() {
           <span className="text-[12.5px] font-medium text-indigo-200">
             Bulk organize ({selected.size} selected)
           </span>
+          <button type="button" onClick={() => setSelected(new Set())} className="min-h-10 rounded-md px-2 text-xs text-slate-300 underline hover:text-white">Clear selection</button>
           <Combobox
             className="w-40"
             value={bulkFolder}
@@ -714,6 +849,7 @@ export default function Leads() {
           </button>
         </div>
       )}
+      {bulkNotice && <p role="status" className={`mt-2 rounded-lg border px-3 py-2 text-[12.5px] ${bulkHasError ? "border-rose-400/30 bg-rose-500/10 text-rose-200" : "border-teal-400/20 bg-teal-500/10 text-teal-100"}`}>{bulkNotice}</p>}
 
       {inGlobalSearch ? (
         <p className="text-[12.5px] text-indigo-300/90">
@@ -894,14 +1030,14 @@ export default function Leads() {
         </div>
       ) : (
         <>
-        <div className="directory-results-heading"><div><h2>Company directory</h2><span>{leads.length.toLocaleString()} loaded of {totalLeads.toLocaleString()} matching companies</span></div><p>Open a company to review its research · Scroll across for more details</p></div>
+        <div className="directory-results-heading"><div><h2>Company directory</h2><span>{visibleLeads.length.toLocaleString()} shown · {leads.length.toLocaleString()} loaded of {totalLeads.toLocaleString()} matching companies</span></div><p>Open a company to review its research · Scroll across for more details</p></div>
         <div className="company-table-scroll overflow-x-auto rounded-xl border border-white/5" tabIndex={0} role="region" aria-label="Company directory, scroll horizontally for all columns">
           <table className="company-table w-full text-[13.5px]">
             <thead>
               <tr className="bg-white/[0.02] text-left text-[12px] uppercase tracking-wide text-slate-500">
                 <th className="px-4 py-3 font-medium w-10">
-                  <button onClick={toggleSelectAll} aria-label="Select all loaded companies" aria-pressed={selected.size === leads.length && leads.length > 0} className="flex items-center justify-center">
-                    {selected.size === leads.length && leads.length > 0 ? (
+                  <button onClick={toggleSelectAll} disabled={visibleLeads.length === 0} aria-label="Select all shown companies" aria-pressed={allVisibleSelected} className="flex min-h-11 min-w-11 items-center justify-center disabled:opacity-50">
+                    {allVisibleSelected ? (
                       <CheckSquare className="w-4 h-4 text-indigo-400" />
                     ) : (
                       <Square className="w-4 h-4" />
@@ -921,7 +1057,7 @@ export default function Leads() {
               </tr>
             </thead>
             <tbody>
-              {leads.map((l) => {
+              {visibleLeads.map((l) => {
                 const expanded = expandedEmail === l.email;
                 const isChecked = selected.has(l.email);
                 const isVisited = visited.has(l.email);
@@ -996,7 +1132,8 @@ export default function Leads() {
                         )}
                         <span className="truncate" title={l.company || l.email}>{l.company || "—"}</span>
                       </div>
-                      <div className="truncate text-[12px] text-slate-500">{l.email}</div>
+                      <div className="truncate text-[12px] text-slate-400">{l.email}</div>
+                      {emailedEmails.has(l.email.toLowerCase()) ? <span className="mt-1 inline-flex rounded-md border border-amber-400/30 bg-amber-500/10 px-1.5 py-0.5 text-[10.5px] text-amber-200">Already emailed</span> : queuedEmails.has(l.email.toLowerCase()) ? <span className="mt-1 inline-flex rounded-md border border-sky-400/30 bg-sky-500/10 px-1.5 py-0.5 text-[10.5px] text-sky-200">In campaign queue</span> : null}
                       {l.source && (
                         <span className="mt-1 inline-flex max-w-full items-center truncate rounded-md border border-indigo-500/20 bg-indigo-500/10 px-1.5 py-0.5 text-[10.5px] text-indigo-300">
                           🔍 {l.source}
@@ -1174,6 +1311,11 @@ export default function Leads() {
                   </tr>
                 );
               })}
+              {visibleLeads.length === 0 && (
+                <tr><td colSpan={11} className="px-4 py-8 text-center text-[13px] text-slate-300">
+                  No emails in this group among loaded rows. {pageQ.hasNextPage ? "Use Show more to check the next page." : "Try another group."}
+                </td></tr>
+              )}
             </tbody>
           </table>
         </div>

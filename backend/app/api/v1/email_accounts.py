@@ -20,23 +20,35 @@ identity for the return hop.
 from __future__ import annotations
 
 import logging
+import smtplib
 import time
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import RedirectResponse
+from pydantic import BaseModel, EmailStr, Field
 
 from app.auth.activity import get_activity
-from app.auth.dependencies import get_current_user
+from app.auth.dependencies import _user_store
+from app.auth.vertical_access import is_phone_only, require_email_access
 from app.auth.jwt import decode_access_token
 from app.auth.models import User
 from app.core.config import settings
-from app.email_accounts import google
+from app.email_accounts import google, smtp
 from app.email_accounts.store import get_email_store
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/email-accounts", tags=["Email Accounts"])
+
+
+class SMTPConnectIn(BaseModel):
+    email: EmailStr
+    host: str = Field(min_length=1, max_length=253)
+    port: int = Field(ge=1, le=65535)
+    security: Literal["ssl", "starttls"]
+    username: str = Field(min_length=1, max_length=255)
+    password: str = Field(min_length=1, max_length=1024)
 
 
 def _spa_settings(params: str) -> str:
@@ -74,6 +86,9 @@ def google_authorize(token: str = Query(default="")) -> RedirectResponse:
     user_id = (payload or {}).get("sub") or ""
     if not user_id:
         raise HTTPException(status_code=401, detail="invalid or expired token")
+    account_user = _user_store().get_by_id(user_id)
+    if account_user is None or is_phone_only(account_user):
+        raise HTTPException(status_code=403, detail="This account has Phones access only")
     return RedirectResponse(google.authorize_url(google.make_state(user_id)),
                             status_code=302)
 
@@ -92,6 +107,9 @@ def google_callback(
     user_id = google.verify_state(state)
     if not user_id:
         return RedirectResponse(_spa_settings("gmail=error:expired-state"), status_code=302)
+    account_user = _user_store().get_by_id(user_id)
+    if account_user is None or is_phone_only(account_user):
+        return RedirectResponse(_spa_settings("gmail=error:account-access"), status_code=302)
     if not code:
         return RedirectResponse(_spa_settings("gmail=error:missing-code"), status_code=302)
     try:
@@ -121,13 +139,37 @@ def google_callback(
 
 
 @router.get("")
-def list_accounts(user: User = Depends(get_current_user)) -> list[dict[str, Any]]:
+def list_accounts(user: User = Depends(require_email_access)) -> list[dict[str, Any]]:
     """The caller's connected sending accounts — tokens NEVER appear."""
     return get_email_store().list_for_user(user.id)
 
 
+@router.post("/smtp", status_code=201)
+def connect_smtp(body: SMTPConnectIn,
+                 user: User = Depends(require_email_access)) -> dict[str, Any]:
+    """Verify a TLS SMTP login, then save its encrypted password."""
+    try:
+        smtp.verify_connection(
+            host=body.host, port=body.port, security=body.security,
+            username=body.username, password=body.password,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except smtplib.SMTPAuthenticationError as exc:
+        raise HTTPException(status_code=422, detail="SMTP login rejected; check username and app password") from exc
+    except (smtplib.SMTPException, OSError) as exc:
+        raise HTTPException(status_code=502, detail="Could not establish a secure SMTP connection") from exc
+    account = get_email_store().connect_smtp(
+        user.id, str(body.email).lower(), host=body.host.strip(), port=body.port,
+        security=body.security, username=body.username, password=body.password,
+    )
+    get_activity().record(user.id, user.username, "email_account",
+                          detail=f"SMTP connected: {account['email']}")
+    return account
+
+
 @router.delete("/{account_id}")
-def disconnect(account_id: int, user: User = Depends(get_current_user)) -> dict[str, Any]:
+def disconnect(account_id: int, user: User = Depends(require_email_access)) -> dict[str, Any]:
     """Disconnect one account — its tokens are deleted, not just hidden."""
     store = get_email_store()
     creds = store.get_credentials(account_id, user.id)
@@ -136,13 +178,13 @@ def disconnect(account_id: int, user: User = Depends(get_current_user)) -> dict[
     if not store.delete(account_id, user.id):
         raise HTTPException(status_code=404, detail="no such account")
     get_activity().record(user.id, user.username, "email_account",
-                          detail=f"Gmail disconnected: {creds['email']}")
+                          detail=f"{creds['provider'].upper()} disconnected: {creds['email']}")
     logger.info("DELETE /email-accounts/%d -> %s disconnected", account_id, creds["email"])
     return {"id": account_id, "deleted": True}
 
 
 @router.post("/{account_id}/send-test")
-def send_test(account_id: int, user: User = Depends(get_current_user)) -> dict[str, Any]:
+def send_test(account_id: int, user: User = Depends(require_email_access)) -> dict[str, Any]:
     """Send a test email FROM the connected account TO ITSELF — the
     end-to-end proof (OAuth token -> Gmail API -> delivered) without
     touching anyone else's inbox."""
@@ -150,6 +192,22 @@ def send_test(account_id: int, user: User = Depends(get_current_user)) -> dict[s
     creds = store.get_credentials(account_id, user.id)
     if creds is None:
         raise HTTPException(status_code=404, detail="no such account")
+    if creds.get("provider") == "smtp":
+        try:
+            smtp.send_smtp(
+                host=creds["smtp_host"], port=creds["smtp_port"],
+                security=creds["smtp_security"],
+                username=creds["smtp_username"], password=creds["smtp_password"],
+                from_email=creds["email"], to=creds["email"],
+                subject="LeadHunter Pro — SMTP test email",
+                body="Your secure SMTP connection is working.",
+            )
+        except smtplib.SMTPAuthenticationError as exc:
+            get_email_store().mark_status(account_id, user.id, "revoked")
+            raise HTTPException(status_code=409, detail="SMTP login failed; reconnect this account") from exc
+        except (smtplib.SMTPException, OSError, ValueError) as exc:
+            raise HTTPException(status_code=502, detail="SMTP test send failed") from exc
+        return {"id": account_id, "sent": True, "to": creds["email"]}
     if not creds["access_token"] and not creds["refresh_token"]:
         # Undecryptable tokens (key rotated) — honest reset, not a fake send.
         raise HTTPException(status_code=409, detail="account tokens unreadable — reconnect Gmail")

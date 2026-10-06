@@ -57,12 +57,24 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/leads", tags=["Leads"])
 
 # Shared singletons. Tests override these with tmp-db instances.
-_manager: JobManager = JobManager()
+if getattr(settings, "LEAD_JOBS_EXTERNAL", False):
+    # Production keeps research in the separately supervised worker service.
+    from app.leads.jobs import ExternalJobManager
+
+    _manager: JobManager = ExternalJobManager()
+else:
+    _manager = JobManager()
 _store: LeadResearchStore = LeadResearchStore()
 
 #: Simple (non-admin) accounts are capped at 150 targets per search — the plan
 #: limit the founder set. The admin is unlimited.
 MAX_USER_TARGET_EMAILS = 150
+
+
+def _can_admin_data(user: User) -> bool:
+    """Use the production permission grant when present; retain legacy admin support."""
+    can_admin = getattr(user, "can_admin", None)
+    return bool(can_admin("data")) if callable(can_admin) else bool(user.is_admin)
 
 
 def _view_scope(user: User) -> dict[str, Any]:
@@ -74,7 +86,7 @@ def _view_scope(user: User) -> dict[str, Any]:
     belong in the admin panel (per-user drill-down), not on the admin's own
     dashboard. Store methods take these exact kwargs.
     """
-    return {"user_id": user.id, "is_admin": False, "include_legacy": user.is_admin}
+    return {"user_id": user.id, "is_admin": False, "include_legacy": _can_admin_data(user)}
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +216,7 @@ def _user_owns_dossier(email: str, user: User) -> bool:
     ``user_id`` matches their own — never another user's, and never a legacy
     pre-auth row (those belong to the admin alone).
     """
-    if user.is_admin:
+    if _can_admin_data(user):
         return True
     if not user.id:
         return False
@@ -255,7 +267,7 @@ def _job_source_by_email(user_id: str = "", is_admin: bool = False,
 @router.post("/jobs", response_model=JobOut, status_code=201, dependencies=[Depends(require_api_key)])
 def create_job(body: JobCreate, user: User = Depends(get_current_user)) -> JobOut:
     """Submit a query run; it executes in the background."""
-    if not user.is_admin and body.target_emails > MAX_USER_TARGET_EMAILS:
+    if not _can_admin_data(user) and body.target_emails > MAX_USER_TARGET_EMAILS:
         raise HTTPException(
             status_code=422,
             detail=f"User accounts are limited to {MAX_USER_TARGET_EMAILS} "
@@ -578,7 +590,9 @@ def organize_lead(email: str, body: OrganizeIn,
     """
     if not _user_owns_dossier(email, user):
         raise HTTPException(status_code=404, detail=f"no dossier for {email}")
-    if not _store.set_meta(email, folder=body.folder, tags=body.tags):
+    folder = _store.canonical_folder_name(
+        body.folder, user_id=user.id, include_legacy=_can_admin_data(user))
+    if not _store.set_meta(email, folder=folder, tags=body.tags):
         raise HTTPException(status_code=404, detail=f"no dossier for {email}")
     dossier = _store.get(email)
     from app.lead_research.scoring import regate_verdict
@@ -586,7 +600,7 @@ def organize_lead(email: str, body: OrganizeIn,
     # Same pair as the list: the verdict AND the score it rests on are today's,
     # so organizing a row cannot hand back a number the list would not show.
     rec, score = regate_verdict(dossier) if dossier else ("skip", None)
-    logger.info("PUT /leads/%s/organize -> folder=%r tags=%r", email, body.folder, body.tags)
+    logger.info("PUT /leads/%s/organize -> folder=%r tags=%r", email, folder, body.tags)
     meta = _store.get_meta(email)
     crm = _store.get_crm(email)
     scope = _view_scope(user)
@@ -716,9 +730,11 @@ def create_folder(body: FolderCreate, user: User = Depends(get_current_user)) ->
     name = (body.name or "").strip()
     if not name:
         raise HTTPException(status_code=422, detail="folder name required")
-    created = _store.create_folder(name, user_id=user.id)
+    created = _store.create_folder(name, user_id=user.id,
+                                   include_legacy=_can_admin_data(user))
     item = next(
-        (f for f in _store.list_folders(**_view_scope(user)) if f["name"] == name),
+        (f for f in _store.list_folders(**_view_scope(user))
+         if f["name"].casefold() == name.casefold()),
         None,
     )
     if item is None:  # should be impossible after create — never silent
@@ -752,7 +768,7 @@ def delete_lead(email: str, reason: str = "manual",
     if not _user_owns_dossier(email, user):
         raise HTTPException(status_code=404, detail=f"no dossier for {email}")
     if not _store.delete(email, reason=reason, user_id=user.id,
-                         username=user.username, is_admin=user.is_admin):
+                         username=user.username, is_admin=_can_admin_data(user)):
         raise HTTPException(status_code=404, detail=f"no dossier for {email}")
     # Also drop it from the discovery cache so a future run does not re-discover
     # it and re-burn credits on an address the user chose to dismiss.

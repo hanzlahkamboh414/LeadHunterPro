@@ -2,7 +2,9 @@
 
 import logging
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+
+from app.auth.vertical_access import require_email_access, require_phone_access
 
 from app.api.v1.company import router as company_router
 from app.api.v1.connectors import router as connectors_router
@@ -39,9 +41,9 @@ api_router.include_router(email_router)
 api_router.include_router(discovery_router)
 api_router.include_router(source_intelligence_router)
 api_router.include_router(connectors_router)
-api_router.include_router(leads_router)
-api_router.include_router(phones_router)
-api_router.include_router(linkedin_router)
+api_router.include_router(leads_router, dependencies=[Depends(require_email_access)])
+api_router.include_router(phones_router, dependencies=[Depends(require_phone_access)])
+api_router.include_router(linkedin_router, dependencies=[Depends(require_email_access)])
 api_router.include_router(email_accounts_router)
-api_router.include_router(gmail_inbox_router)
+api_router.include_router(gmail_inbox_router, dependencies=[Depends(require_email_access)])
 api_router.include_router(campaigns_router)

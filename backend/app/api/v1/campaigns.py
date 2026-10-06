@@ -9,20 +9,22 @@ and reported, never silently re-mailed).
 from __future__ import annotations
 
 import logging
+import smtplib
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 
-from app.auth.dependencies import get_current_user
+from app.auth.vertical_access import require_email_access
 from app.auth.models import User
 from app.campaigns import spamcheck
 from app.campaigns.scheduler import ensure_access_token, parse_ts
 from app.campaigns.store import get_campaign_store
 from app.campaigns.templates import render, sample_context
 from app.campaigns.tracking import PIXEL_GIF, parse_token
-from app.email_accounts import google
+from app.email_accounts import google, smtp
 from app.email_accounts.store import get_email_store
+from app.email.bounce_learning import BounceStore
 from app.schemas.campaigns import (
     CampaignCreateIn,
     CampaignCreateOut,
@@ -43,6 +45,18 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/campaigns", tags=["Campaigns"])
 
 
+def _blocked_addresses(emails: list[str]) -> set[str]:
+    store = BounceStore()
+    try:
+        campaign_store = get_campaign_store()
+        invalid = campaign_store.invalid_checked_emails(emails)
+        bounced = {str(email).lower() for email in emails
+                   if store.lookup(str(email)) == "bounced"}
+        return invalid | bounced
+    finally:
+        store.close()
+
+
 def _validate_start_at(start_at: str) -> str:
     dt = parse_ts(start_at)
     if dt is None:
@@ -52,7 +66,7 @@ def _validate_start_at(start_at: str) -> str:
 
 @router.post("", response_model=CampaignCreateOut)
 def create_campaign(
-    body: CampaignCreateIn, user: User = Depends(get_current_user)
+    body: CampaignCreateIn, user: User = Depends(require_email_access)
 ) -> dict:
     """Create a scheduled campaign. Leads that were already emailed (any
     earlier campaign of this user) are excluded and the response says how
@@ -88,12 +102,13 @@ def create_campaign(
 
     store = get_campaign_store()
     already = store.already_sent_emails(user.id, body.emails)
-    emails = [e for e in body.emails if e not in already]
+    bounced = _blocked_addresses(body.emails)
+    excluded = {str(e).lower() for e in already} | bounced
+    emails = [e for e in body.emails if str(e).lower() not in excluded]
     if not emails:
         raise HTTPException(
             status_code=422,
-            detail=f"all {len(already)} leads were already emailed by an "
-                   f"earlier campaign — nothing to send",
+            detail="No sendable leads remain: recipients were already emailed or invalid",
         )
     campaign = store.create(
         user.id, account_id=body.account_id, name=body.name.strip(),
@@ -108,14 +123,14 @@ def create_campaign(
     campaign["account_emails"] = [owned[a]["email"] for a in wanted]
     logger.info("POST /campaigns -> %s (%d leads, %d excluded as already-sent, "
                 "%d accounts, ai_personalize=%s)",
-                campaign["name"], len(emails), len(already), len(wanted),
+                campaign["name"], len(emails), len(excluded), len(wanted),
                 body.ai_personalize)
-    return {"campaign": campaign, "excluded": len(already)}
+    return {"campaign": campaign, "excluded": len(excluded)}
 
 
 @router.post("/test-send", response_model=CampaignTestSendOut)
 def campaign_test_send(
-    body: CampaignTestSendIn, user: User = Depends(get_current_user)
+    body: CampaignTestSendIn, user: User = Depends(require_email_access)
 ) -> dict:
     """Send the DRAFT pitch to your own address — the spam check. The drafted
     subject/body render with a sample lead, then go out immediately via the
@@ -135,30 +150,48 @@ def campaign_test_send(
                    f"reconnect it first",
         )
     creds = email_store.get_credentials(body.account_id, user.id)
-    if creds is None or (not creds["access_token"]
-                         and not creds["refresh_token"]):
+    if creds is None or (creds.get("provider") == "smtp" and not creds.get("smtp_password")) or (
+        creds.get("provider") != "smtp" and not creds["access_token"]
+        and not creds["refresh_token"]
+    ):
         # Undecryptable tokens (key rotated) — honest reset, not a fake send.
         raise HTTPException(status_code=409,
-                            detail="account tokens unreadable — reconnect Gmail")
+                            detail="account credentials unreadable — reconnect the account")
 
     ctx = sample_context()
     subject = render(body.subject, ctx)
     email_body = render(body.body, ctx)
 
-    access_token = ensure_access_token(
-        email_store, account_id=body.account_id, user_id=user.id,
-        creds=creds, now=datetime.now(timezone.utc))
-    if not access_token:
-        email_store.mark_status(body.account_id, user.id, "revoked")
-        raise HTTPException(status_code=409,
-                            detail="token refresh failed — reconnect the account")
+    access_token = ""
+    if creds.get("provider") != "smtp":
+        access_token = ensure_access_token(
+            email_store, account_id=body.account_id, user_id=user.id,
+            creds=creds, now=datetime.now(timezone.utc))
+        if not access_token:
+            email_store.mark_status(body.account_id, user.id, "revoked")
+            raise HTTPException(status_code=409,
+                                detail="token refresh failed — reconnect the account")
 
     try:
-        google.send_gmail(
-            access_token, to=body.to_email, subject=subject, body=email_body,
-            from_email=creds["email"],
-        )
+        if creds.get("provider") == "smtp":
+            smtp.send_smtp(
+                host=creds["smtp_host"], port=creds["smtp_port"],
+                security=creds["smtp_security"], username=creds["smtp_username"],
+                password=creds["smtp_password"], from_email=creds["email"],
+                to=str(body.to_email), subject=subject, body=email_body,
+            )
+        else:
+            google.send_gmail(
+                access_token, to=body.to_email, subject=subject, body=email_body,
+                from_email=creds["email"],
+            )
+    except smtplib.SMTPAuthenticationError as exc:
+        email_store.mark_status(body.account_id, user.id, "revoked")
+        raise HTTPException(status_code=409, detail="SMTP login failed; reconnect this account") from exc
     except Exception as exc:  # noqa: BLE001 — Gmail's error shape varies
+        if creds.get("provider") == "smtp":
+            logger.warning("Campaign SMTP test send failed for account %d", body.account_id)
+            raise HTTPException(status_code=502, detail="SMTP test send failed") from exc
         logger.warning("Campaign test send via %s failed: %s",
                        creds["email"], exc)
         email_store.mark_status(body.account_id, user.id, "revoked")
@@ -183,7 +216,7 @@ def campaign_test_send(
 
 @router.post("/spam-check", response_model=SpamCheckOut)
 def spam_check(body: SpamCheckIn,
-               user: User = Depends(get_current_user)) -> dict:
+               user: User = Depends(require_email_access)) -> dict:
     """How spammy does this pitch look? The AI reads the rendered email as
     a deliverability expert (score, plain-words summary, findings with
     fixes) and the rules engine always runs underneath — a blended
@@ -194,7 +227,7 @@ def spam_check(body: SpamCheckIn,
 
 @router.post("/spam-improve", response_model=SpamImproveOut)
 def spam_improve(body: SpamImproveIn,
-                 user: User = Depends(get_current_user)) -> dict:
+                 user: User = Depends(require_email_access)) -> dict:
     """The one-click fix: the pitch rewritten without its spam triggers
     (AI best-effort, deterministic rules as the guaranteed fallback).
     Nothing is scheduled or sent — the result goes back to the user's
@@ -203,7 +236,7 @@ def spam_improve(body: SpamImproveIn,
 
 
 @router.get("", response_model=CampaignsOut)
-def list_campaigns(user: User = Depends(get_current_user)) -> dict:
+def list_campaigns(user: User = Depends(require_email_access)) -> dict:
     by_id = {a["id"]: a["email"]
              for a in get_email_store().list_for_user(user.id)}
     out = []
@@ -252,7 +285,7 @@ def _campaign_detail(store, campaign_id: int, user: User,
 
 @router.get("/{campaign_id}", response_model=CampaignDetailOut)
 def get_campaign(campaign_id: int,
-                 user: User = Depends(get_current_user)) -> dict:
+                 user: User = Depends(require_email_access)) -> dict:
     by_id = {a["id"]: a["email"]
              for a in get_email_store().list_for_user(user.id)}
     c = _campaign_detail(get_campaign_store(), campaign_id, user, by_id)
@@ -264,19 +297,57 @@ def get_campaign(campaign_id: int,
 @router.put("/{campaign_id}", response_model=CampaignDetailOut)
 def update_campaign(
     campaign_id: int, body: CampaignUpdateIn,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_email_access),
 ) -> dict:
-    """Edit the pitch (name/subject/body) of a campaign that already
-    started. Every send that has NOT gone out yet uses the new text;
-    already-sent rows keep the subject they were actually sent with."""
+    """Change future campaign sends while preserving already-sent history."""
     store = get_campaign_store()
-    if store.get(campaign_id, user.id) is None:
+    current = store.get(campaign_id, user.id)
+    if current is None:
         raise HTTPException(status_code=404, detail="no such campaign")
+    if current["status"] == "completed":
+        raise HTTPException(status_code=409, detail="completed campaign cannot be edited")
+    effective_min = body.delay_min_s if body.delay_min_s is not None else current["delay_min_s"]
+    effective_max = body.delay_max_s if body.delay_max_s is not None else current["delay_max_s"]
+    if effective_min > effective_max:
+        raise HTTPException(status_code=422, detail="delay_min_s must be <= delay_max_s")
+    new_start = _validate_start_at(body.start_at) if body.start_at is not None else None
+
+    primary = body.account_id if body.account_id is not None else current["account_id"]
+    extras = (body.account_ids if body.account_ids is not None else
+              [aid for aid in current["account_ids"] if aid != primary])
+    wanted = list(dict.fromkeys([primary, *(aid for aid in extras if aid != primary)]))
+    if len(wanted) > 5:
+        raise HTTPException(status_code=422, detail="at most 5 sending accounts per campaign")
+    if body.account_id is not None or body.account_ids is not None:
+        owned = {a["id"]: a for a in get_email_store().list_for_user(
+            user.id)}
+        for aid in wanted:
+            account = owned.get(aid)
+            if account is None:
+                raise HTTPException(status_code=404, detail="no such connected account")
+            if account["status"] != "connected" and aid not in current["account_ids"]:
+                raise HTTPException(status_code=409,
+                                    detail=f"account {account['email']} must be reconnected")
+    safe_emails = None
+    if body.emails is not None:
+        bounced = _blocked_addresses(body.emails)
+        safe_emails = [email for email in body.emails
+                       if str(email).lower() not in bounced]
+        if body.emails and not safe_emails:
+            raise HTTPException(status_code=422, detail="All selected recipients are invalid")
     if not store.update_campaign(
             campaign_id, user.id, name=body.name.strip(),
-            subject=body.subject, body=body.body):
-        raise HTTPException(status_code=404, detail="no such campaign")
-    logger.info("campaign %d pitch edited by %s", campaign_id, user.username)
+            subject=body.subject, body=body.body,
+            account_id=primary if body.account_id is not None or body.account_ids is not None else None,
+            account_ids=wanted[1:] if body.account_id is not None or body.account_ids is not None else None,
+            emails=safe_emails, start_at=new_start,
+            daily_limit=body.daily_limit, delay_min_s=body.delay_min_s,
+            delay_max_s=body.delay_max_s,
+            followups=[fu.model_dump() for fu in body.followups]
+            if body.followups is not None else None,
+            ai_personalize=body.ai_personalize):
+        raise HTTPException(status_code=409, detail="campaign is no longer editable")
+    logger.info("campaign %d settings edited by %s", campaign_id, user.username)
     by_id = {a["id"]: a["email"]
              for a in get_email_store().list_for_user(user.id)}
     c = _campaign_detail(store, campaign_id, user, by_id)
@@ -287,7 +358,7 @@ def update_campaign(
 
 @router.post("/{campaign_id}/pause")
 def pause_campaign(campaign_id: int,
-                   user: User = Depends(get_current_user)) -> dict:
+                   user: User = Depends(require_email_access)) -> dict:
     store = get_campaign_store()
     c = store.get(campaign_id, user.id)
     if c is None:
@@ -302,7 +373,7 @@ def pause_campaign(campaign_id: int,
 
 @router.post("/{campaign_id}/resume")
 def resume_campaign(campaign_id: int,
-                    user: User = Depends(get_current_user)) -> dict:
+                    user: User = Depends(require_email_access)) -> dict:
     store = get_campaign_store()
     c = store.get(campaign_id, user.id)
     if c is None:
@@ -324,7 +395,7 @@ def resume_campaign(campaign_id: int,
 
 @router.delete("/{campaign_id}")
 def delete_campaign(campaign_id: int,
-                    user: User = Depends(get_current_user)) -> dict:
+                    user: User = Depends(require_email_access)) -> dict:
     store = get_campaign_store()
     if not store.delete(campaign_id, user.id):
         raise HTTPException(status_code=404, detail="no such campaign")

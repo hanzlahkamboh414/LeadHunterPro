@@ -28,8 +28,8 @@ class CampaignCreateIn(BaseModel):
     user's timezone by the client."""
     start_at: str = Field(min_length=10, max_length=40)
     daily_limit: int = Field(default=30, ge=1, le=200)
-    delay_min_s: int = Field(default=180, ge=30, le=3600)
-    delay_max_s: int = Field(default=420, ge=60, le=7200)
+    delay_min_s: int = Field(default=180, ge=20, le=3600)
+    delay_max_s: int = Field(default=420, ge=20, le=7200)
     followups: list[FollowupIn] = Field(default_factory=list, max_length=3)
     """Optional follow-up emails (max 3). Each fires after_days days past
     the previous send, and is cancelled the moment the lead replies."""
@@ -163,13 +163,19 @@ class SpamImproveOut(BaseModel):
 
 
 class CampaignUpdateIn(BaseModel):
-    """Edit the pitch of an existing campaign — name, subject, body.
-    Applies to sends that have not gone out yet; already-sent rows keep
-    their own record. The follow-up ladder is not editable (its rungs
-    may already be queued per lead)."""
+    """Edit unsent campaign settings; omitted fields keep their old value."""
     name: str = Field(min_length=1, max_length=120)
     subject: str = Field(min_length=1, max_length=500)
     body: str = Field(min_length=1, max_length=20000)
+    account_id: int | None = None
+    account_ids: list[int] | None = Field(default=None, max_length=4)
+    emails: list[str] | None = Field(default=None, max_length=500)
+    start_at: str | None = Field(default=None, min_length=10, max_length=40)
+    daily_limit: int | None = Field(default=None, ge=1, le=200)
+    delay_min_s: int | None = Field(default=None, ge=20, le=3600)
+    delay_max_s: int | None = Field(default=None, ge=20, le=7200)
+    followups: list[FollowupIn] | None = Field(default=None, max_length=3)
+    ai_personalize: bool | None = None
 
 
 class CampaignsOut(BaseModel):

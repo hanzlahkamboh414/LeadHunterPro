@@ -312,7 +312,7 @@ def list_inbox_senders(access_token: str, *, after_unix: int,
         r.raise_for_status()
         hdrs = {h["name"].lower(): h["value"]
                 for h in r.json().get("payload", {}).get("headers", [])}
-        out.append({"from": hdrs.get("from", ""),
+        out.append({"id": mid, "from": hdrs.get("from", ""),
                     "subject": hdrs.get("subject", ""),
                     "snippet": r.json().get("snippet", "")})
     return out

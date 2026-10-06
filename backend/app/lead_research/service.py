@@ -912,8 +912,8 @@ class LeadResearchStore:
         kept: list[str] = []
         for t in tags or []:
             t = (t or "").strip()
-            if t and t not in seen:
-                seen.add(t)
+            if t and t.casefold() not in seen:
+                seen.add(t.casefold())
                 kept.append(t)
         return f, json.dumps(kept)
 
@@ -1279,7 +1279,7 @@ class LeadResearchStore:
             conds.append("d.folder = ?")
             args.append(folder)
         if tag:
-            conds.append("EXISTS (SELECT 1 FROM json_each(d.tags) AS jt WHERE jt.value = ?)")
+            conds.append("EXISTS (SELECT 1 FROM json_each(d.tags) AS jt WHERE jt.value = ? COLLATE NOCASE)")
             args.append(tag)
         if date:
             conds.append("date(d.created_at) = ?")
@@ -1409,10 +1409,10 @@ class LeadResearchStore:
             conds += f" AND (d.user_id = ? OR d.user_id = '' OR {shared})" if include_legacy else f" AND (d.user_id = ? OR {shared})"
             args = [user_id, user_id]
         rows = conn.execute(
-            "SELECT jt.value AS tag, COUNT(*) AS cnt "
+            "SELECT MIN(jt.value) AS tag, COUNT(DISTINCT d.email_hash) AS cnt "
             "FROM dossiers d, json_each(d.tags) AS jt "
             f"WHERE {conds} "
-            "GROUP BY jt.value ORDER BY cnt DESC, tag COLLATE NOCASE ASC",
+            "GROUP BY jt.value COLLATE NOCASE ORDER BY cnt DESC, tag COLLATE NOCASE ASC",
             args,
         ).fetchall()
         conn.close()
@@ -1437,7 +1437,8 @@ class LeadResearchStore:
             "SELECT DISTINCT user_id, folder FROM dossiers WHERE folder <> ''"
         )
 
-    def create_folder(self, name: str, user_id: str = "") -> bool:
+    def create_folder(self, name: str, user_id: str = "",
+                      include_legacy: bool = False) -> bool:
         """Create a persisted (possibly empty) folder; True when newly created.
 
         The Phase B.2 contract: a folder exists FIRST (``"Monday data"``), is
@@ -1452,13 +1453,50 @@ class LeadResearchStore:
         if not name:
             return False
         conn = self._conn()
-        cur = conn.execute(
-            "INSERT OR IGNORE INTO folders(user_id, name) VALUES (?, ?)",
-            (user_id, name),
-        )
-        conn.commit()
-        conn.close()
-        return cur.rowcount == 1
+        try:
+            # The admin's Companies view includes their own AND legacy rows.
+            # A second row with the same visible name would become a duplicate
+            # chip. Serialize the check and insert across concurrent requests.
+            conn.execute("BEGIN IMMEDIATE")
+            owners = [user_id] + ([""] if include_legacy and user_id else [])
+            marks = ",".join("?" for _ in owners)
+            exists = conn.execute(
+                f"SELECT 1 FROM folders WHERE user_id IN ({marks}) "
+                "AND name = ? COLLATE NOCASE LIMIT 1",
+                [*owners, name],
+            ).fetchone()
+            if exists:
+                conn.rollback()
+                return False
+            conn.execute(
+                "INSERT INTO folders(user_id, name) VALUES (?, ?)",
+                (user_id, name),
+            )
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+
+    def canonical_folder_name(self, name: str, user_id: str = "",
+                              include_legacy: bool = False) -> str:
+        """Match an existing visible folder without counting the whole catalog."""
+        name = (name or "").strip()
+        if not name:
+            return ""
+        owners = [user_id] + ([""] if include_legacy and user_id else [])
+        marks = ",".join("?" for _ in owners)
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                f"SELECT name FROM folders WHERE user_id IN ({marks}) "
+                "AND name = ? COLLATE NOCASE "
+                "ORDER BY CASE WHEN name = ? THEN 0 ELSE 1 END, created_at DESC "
+                "LIMIT 1",
+                [*owners, name, name],
+            ).fetchone()
+            return row[0] if row else name
+        finally:
+            conn.close()
 
     def list_folders(self, user_id: str = "", is_admin: bool = False,
                      include_legacy: bool = False) -> list[dict[str, Any]]:
@@ -1495,9 +1533,14 @@ class LeadResearchStore:
         ).fetchall()
         conn.commit()  # backfill may have inserted rows
         conn.close()
+        # The admin's own view joins two owner scopes (own + legacy), whose
+        # composite DB keys can carry the same display name. One chip per name.
+        unique_rows = list(dict.fromkeys(r[0] for r in rows))
+        counts = {r[0]: r[2] for r in rows}
+        created = {r[0]: (r[1] or "")[:19] for r in rows}
         return [
-            {"name": r[0], "created_at": (r[1] or "")[:19], "count": r[2]}
-            for r in rows
+            {"name": name, "created_at": created[name], "count": counts[name]}
+            for name in unique_rows
         ]
 
     def folder_catalog(self, user_id: str = "", is_admin: bool = False,
@@ -1558,7 +1601,9 @@ class LeadResearchStore:
         by_folder = {r[0]: r[1] for r in count_rows}
         total = sum(by_folder.values())
         unfiled = by_folder.get("", 0)
-        listed = {name for name, _ in rows}
+        unique_rows = list(dict.fromkeys(name for name, _ in rows))
+        created_by_name = {name: (created or "")[:19] for name, created in rows}
+        listed = set(unique_rows)
         # Honesty union: a folder name on a VISIBLE dossier (own OR shared)
         # must appear with its count even when this user owns no catalog row
         # for it — a shared lead filed by another account still needs its
@@ -1571,9 +1616,9 @@ class LeadResearchStore:
         ]
         return {
             "folders": [
-                {"name": name, "created_at": (created or "")[:19],
+                {"name": name, "created_at": created_by_name[name],
                  "count": by_folder.get(name, 0)}
-                for name, created in rows
+                for name in unique_rows
             ] + extra,
             "unfiled": unfiled,
             "total": total,
@@ -1645,8 +1690,8 @@ class LeadResearchStore:
         for eh, m in self.all_meta(
             user_id=user_id, is_admin=is_admin, include_legacy=include_legacy
         ).items():
-            if old in m.tags:
-                tags = [(new if t == old else t) for t in m.tags]
+            if any(t.casefold() == old.casefold() for t in m.tags):
+                tags = [(new if t.casefold() == old.casefold() else t) for t in m.tags]
                 self.set_meta_direct(eh, m.folder, tags)
                 affected += 1
         return affected
@@ -1704,8 +1749,8 @@ class LeadResearchStore:
         for eh, m in self.all_meta(
             user_id=user_id, is_admin=is_admin, include_legacy=include_legacy
         ).items():
-            if value in m.tags:
-                tags = [t for t in m.tags if t != value]
+            if any(t.casefold() == value.casefold() for t in m.tags):
+                tags = [t for t in m.tags if t.casefold() != value.casefold()]
                 self.set_meta_direct(eh, m.folder, tags)
                 affected += 1
         return affected

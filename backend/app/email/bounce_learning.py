@@ -70,16 +70,26 @@ class BounceStore:
                 outcome    TEXT NOT NULL CHECK (outcome IN
                             ('bounced', 'delivered')),
                 evidence   TEXT NOT NULL DEFAULT '',
+                hard_bounce INTEGER NOT NULL DEFAULT 0,
+                cleaned_at TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT
                             (datetime('now'))
             )
             """
         )
+        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(email_outcomes)")}
+        if "hard_bounce" not in columns:
+            self._conn.execute(
+                "ALTER TABLE email_outcomes ADD COLUMN hard_bounce INTEGER NOT NULL DEFAULT 0")
+        if "cleaned_at" not in columns:
+            self._conn.execute(
+                "ALTER TABLE email_outcomes ADD COLUMN cleaned_at TEXT NOT NULL DEFAULT ''")
         self._conn.commit()
 
     # -- write ---------------------------------------------------------------
 
-    def record(self, email: str, outcome: str, evidence: str = "") -> bool:
+    def record(self, email: str, outcome: str, evidence: str = "",
+               *, hard_bounce: bool = False) -> bool:
         """Record one real outcome for *email*; False on a bad outcome word.
 
         Upserts: the latest fact replaces the earlier one, keeping the
@@ -96,15 +106,19 @@ class BounceStore:
             self._conn.execute(
                 """
                 INSERT INTO email_outcomes
-                    (email_hash, email, domain, outcome, evidence)
-                VALUES (?, ?, ?, ?, ?)
+                    (email_hash, email, domain, outcome, evidence, hard_bounce)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(email_hash) DO UPDATE SET
                     outcome = excluded.outcome,
                     evidence = excluded.evidence,
+                    hard_bounce = excluded.hard_bounce,
+                    cleaned_at = CASE WHEN excluded.hard_bounce = 1 THEN ''
+                                      ELSE email_outcomes.cleaned_at END,
                     created_at = excluded.created_at
                 """,
                 (_email_hash(addr), addr, domain, outcome,
-                 (evidence or "")[:300]),
+                 (evidence or "")[:300],
+                 1 if outcome == "bounced" and hard_bounce else 0),
             )
             self._conn.commit()
         return True
@@ -120,6 +134,24 @@ class BounceStore:
                 (_email_hash(addr),),
             ).fetchone()
         return row["outcome"] if row else None
+
+    def pending_hard_bounces(self) -> list[str]:
+        """Confirmed invalid mailboxes awaiting cross-store cleanup."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT email FROM email_outcomes WHERE outcome = 'bounced' "
+                "AND hard_bounce = 1 AND cleaned_at = ''"
+            ).fetchall()
+        return [row["email"] for row in rows]
+
+    def mark_cleaned(self, email: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE email_outcomes SET cleaned_at = datetime('now') "
+                "WHERE email_hash = ? AND outcome = 'bounced' AND hard_bounce = 1",
+                (_email_hash(email),),
+            )
+            self._conn.commit()
 
     def counts(self) -> dict[str, int]:
         """Total rows per outcome (for logs/admin reports)."""

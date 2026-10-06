@@ -217,8 +217,21 @@ export default function Leads() {
   // (never the whole store). q is answered server-side now, so the queryKey
   // carries it and the old client-side filter memo is gone.
   const PAGE = 100;
+  const [campaignView, setCampaignView] = useState<"all" | "sent" | "unsent" | "available">("all");
+  const [campaignFocus, setCampaignFocus] = useState(0);
+  const usageFilter = {
+    recommendation: rec || undefined,
+    bound: bound === "" ? undefined : bound === "true",
+    min_score: minScore === "" ? undefined : Number(minScore),
+    source: src || undefined,
+    folder: importId ? "*" : folder || undefined,
+    tag: tag || undefined,
+    date: date || undefined,
+    crm_status: stage || undefined,
+    q: q || undefined,
+  };
   const pageQ = useInfiniteQuery({
-    queryKey: ["leads", rec, bound, minScore, src, folder, tag, date, stage, q, importId],
+    queryKey: ["leads", rec, bound, minScore, src, folder, tag, date, stage, q, importId, campaignView, campaignFocus],
     queryFn: ({ pageParam = 0 }) =>
       api.pageLeads({
         recommendation: rec || undefined,
@@ -231,6 +244,8 @@ export default function Leads() {
         date: date || undefined,
         crm_status: stage || undefined,
         q: q || undefined,
+        campaign_status: campaignView === "all" ? undefined : campaignView,
+        campaign_id: campaignFocus || undefined,
         limit: PAGE,
         offset: pageParam,
       }),
@@ -245,25 +260,19 @@ export default function Leads() {
     () => pageQ.data?.pages.flatMap((p) => p.rows) ?? [],
     [pageQ.data],
   );
-  const campaignStatusQ = useQuery({
-    queryKey: ["campaign-recipient-status"],
-    queryFn: () => api.campaignRecipientStatus(),
+  const campaignUsageQ = useQuery({
+    queryKey: ["leads-campaign-usage", rec, bound, minScore, src, folder, tag, date, stage, q, importId],
+    queryFn: () => api.campaignUsage(usageFilter),
     staleTime: 15_000,
   });
-  const [campaignView, setCampaignView] = useState<"all" | "available" | "used">("all");
+  const campaignDetails = campaignUsageQ.data?.details ?? {};
   const queuedEmails = useMemo(
-    () => new Set(campaignStatusQ.data?.queued ?? []), [campaignStatusQ.data],
+    () => new Set(Object.entries(campaignDetails).filter(([, item]) => item.status === "unsent").map(([email]) => email)), [campaignUsageQ.data],
   );
   const emailedEmails = useMemo(
-    () => new Set(campaignStatusQ.data?.emailed ?? []), [campaignStatusQ.data],
+    () => new Set(Object.entries(campaignDetails).filter(([, item]) => item.status === "sent").map(([email]) => email)), [campaignUsageQ.data],
   );
-  const visibleLeads = useMemo(() => leads.filter((lead) => {
-    const used = queuedEmails.has(lead.email.toLowerCase()) || emailedEmails.has(lead.email.toLowerCase());
-    return campaignView === "all" || (campaignView === "used" ? used : !used);
-  }), [leads, queuedEmails, emailedEmails, campaignView]);
-  const availableLoaded = leads.filter(
-    (lead) => !queuedEmails.has(lead.email.toLowerCase()) && !emailedEmails.has(lead.email.toLowerCase()),
-  ).length;
+  const visibleLeads = leads;
   // Honest total for the CURRENT filters (from X-Total-Count), so "Show more"
   // knows when it's done and the header can be accurate even on page 1.
   const totalLeads = pageQ.data?.pages[0]?.total ?? 0;
@@ -786,24 +795,47 @@ export default function Leads() {
         </div>
       </div>
       </section>
-      <div className="mt-4 flex flex-wrap items-center gap-2" aria-label="Campaign email status filter">
+      <section className="mt-4 rounded-xl border border-white/10 bg-white/[0.025] p-3 sm:p-4" aria-label="Campaign email status">
+        <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
+          <h2 className="text-sm font-semibold text-white">Email campaign status</h2>
+          <span role="status" className="text-xs text-slate-300">{campaignUsageQ.data ? `${campaignUsageQ.data.total.toLocaleString()} emails in this view` : "Loading full counts…"}</span>
+        </div>
+      <div className="flex flex-wrap items-center gap-2" aria-label="Campaign email status filter">
         {([
-          ["all", "All emails"],
-          ["available", `Available for campaigns (${availableLoaded} loaded)`],
-          ["used", `Already in campaigns (${leads.length - availableLoaded} loaded)`],
+          ["all", "All emails", campaignUsageQ.data?.total],
+          ["sent", "Sent", campaignUsageQ.data?.sent],
+          ["unsent", "In campaign · not sent", campaignUsageQ.data?.unsent],
+          ["available", "Not in any campaign", campaignUsageQ.data?.available],
         ] as const).map(([value, label]) => (
           <button
             key={value}
             type="button"
-            onClick={() => { setCampaignView(value); setSelected(new Set()); setBulkNotice(""); }}
-            disabled={value !== "all" && !campaignStatusQ.data}
+            onClick={() => { setCampaignView(value); setCampaignFocus(0); setSelected(new Set()); setBulkNotice(""); }}
+            disabled={value !== "all" && !campaignUsageQ.data}
             aria-pressed={campaignView === value}
-            className={`min-h-11 rounded-lg border px-3 py-2 text-[12.5px] font-medium disabled:opacity-50 ${campaignView === value ? "border-teal-400/40 bg-teal-500/15 text-teal-100" : "border-white/10 text-slate-300 hover:bg-white/[0.06]"}`}
-          >{label}</button>
+            className={`min-h-11 rounded-lg border px-3 py-2 text-[12.5px] font-medium disabled:opacity-50 ${campaignView === value && !campaignFocus ? "border-teal-400/40 bg-teal-500/15 text-teal-100" : "border-white/10 text-slate-200 hover:bg-white/[0.06]"}`}
+          >{label} {campaignUsageQ.data && <strong className="ml-1 tabular-nums">{(campaignUsageQ.data[value === "all" ? "total" : value] ?? 0).toLocaleString()}</strong>}</button>
         ))}
-        {campaignStatusQ.isLoading && <span className="text-xs text-slate-400">Checking campaign status…</span>}
-        {campaignStatusQ.isError && <span role="alert" className="text-xs text-rose-300">Campaign status unavailable. <button type="button" className="underline" onClick={() => void campaignStatusQ.refetch()}>Retry</button></span>}
+        {campaignUsageQ.isError && <span role="alert" className="text-xs text-rose-300">Campaign counts unavailable. <button type="button" className="underline" onClick={() => void campaignUsageQ.refetch()}>Retry</button></span>}
       </div>
+      {campaignUsageQ.data && campaignUsageQ.data.campaigns.length > 0 && (
+        <div className="mt-3 border-t border-white/10 pt-3">
+          <p className="mb-2 text-xs font-medium text-slate-300">By campaign · choose a count to see those emails</p>
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+            {campaignUsageQ.data.campaigns.map((item) => (
+              <div key={item.id} className="flex min-w-0 items-center justify-between gap-2 rounded-lg border border-white/10 bg-white/[0.035] px-3 py-2">
+                <span className="min-w-0 truncate text-xs font-medium text-slate-100" title={item.name}>{item.name}</span>
+                <div className="flex shrink-0 gap-1">
+                  <button type="button" disabled={!item.unsent} onClick={() => { setCampaignView("unsent"); setCampaignFocus(item.id); setSelected(new Set()); }} className="min-h-10 rounded-md border border-sky-400/25 px-2 text-xs text-sky-200 disabled:opacity-40" aria-label={`${item.unsent} unsent emails in ${item.name}`} title="In campaign, not sent">{item.unsent} waiting</button>
+                  <button type="button" disabled={!item.sent} onClick={() => { setCampaignView("sent"); setCampaignFocus(item.id); setSelected(new Set()); }} className="min-h-10 rounded-md border border-emerald-400/25 px-2 text-xs text-emerald-200 disabled:opacity-40" aria-label={`${item.sent} sent emails in ${item.name}`} title="Sent from campaign">{item.sent} sent</button>
+                </div>
+              </div>
+            ))}
+          </div>
+          {campaignFocus > 0 && <button type="button" onClick={() => setCampaignFocus(0)} className="mt-2 min-h-10 text-xs font-medium text-teal-200 underline">Clear campaign filter</button>}
+        </div>
+      )}
+      </section>
       <p className="mt-1 text-xs text-slate-400">Select emails across loaded pages, then set one folder. Use Show more to load the next page; selection stays saved.</p>
           {junkNote && (
             <p className="mt-3 text-[12.5px] text-emerald-300 bg-emerald-500/10 rounded-lg px-3 py-2">
@@ -1133,7 +1165,7 @@ export default function Leads() {
                         <span className="truncate" title={l.company || l.email}>{l.company || "—"}</span>
                       </div>
                       <div className="truncate text-[12px] text-slate-400">{l.email}</div>
-                      {emailedEmails.has(l.email.toLowerCase()) ? <span className="mt-1 inline-flex rounded-md border border-amber-400/30 bg-amber-500/10 px-1.5 py-0.5 text-[10.5px] text-amber-200">Already emailed</span> : queuedEmails.has(l.email.toLowerCase()) ? <span className="mt-1 inline-flex rounded-md border border-sky-400/30 bg-sky-500/10 px-1.5 py-0.5 text-[10.5px] text-sky-200">In campaign queue</span> : null}
+                      {emailedEmails.has(l.email.toLowerCase()) ? <span className="mt-1 inline-flex max-w-full truncate rounded-md border border-emerald-400/30 bg-emerald-500/10 px-1.5 py-0.5 text-[10.5px] text-emerald-200" title={campaignDetails[l.email.toLowerCase()]?.campaign_name}>Sent · {campaignDetails[l.email.toLowerCase()]?.campaign_name}</span> : queuedEmails.has(l.email.toLowerCase()) ? <span className="mt-1 inline-flex max-w-full truncate rounded-md border border-sky-400/30 bg-sky-500/10 px-1.5 py-0.5 text-[10.5px] text-sky-200" title={campaignDetails[l.email.toLowerCase()]?.campaign_name}>Not sent · {campaignDetails[l.email.toLowerCase()]?.campaign_name}</span> : null}
                       {l.source && (
                         <span className="mt-1 inline-flex max-w-full items-center truncate rounded-md border border-indigo-500/20 bg-indigo-500/10 px-1.5 py-0.5 text-[10.5px] text-indigo-300">
                           🔍 {l.source}

@@ -1215,6 +1215,8 @@ class LeadResearchStore:
                       user_id: str | None = None, is_admin: bool = False,
                       include_legacy: bool = False,
                       crm_status: str | None = None,
+                      include_emails: set[str] | None = None,
+                      exclude_emails: set[str] | None = None,
                       ) -> tuple[str, list[Any]]:
         """Shared WHERE clause for the user-facing lead views.
 
@@ -1284,11 +1286,13 @@ class LeadResearchStore:
         if date:
             conds.append("date(d.created_at) = ?")
             args.append(date)
-        if source_emails:
+        if source_emails is not None:
             ems = [e for e in dict.fromkeys(source_emails) if e]
             if ems:
                 conds.append(f"d.email IN ({','.join('?' for _ in ems)})")
                 args.extend(ems)
+            else:
+                conds.append("0 = 1")
         if q and q.strip():
             lit = (q or "").replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             like = f"%{lit}%"
@@ -1300,6 +1304,15 @@ class LeadResearchStore:
                 "OR json_extract(d.dossier_json, '$.person.role') LIKE ? ESCAPE '\\')"
             )
             args.extend([like] * 6)
+        if include_emails is not None:
+            if include_emails:
+                conds.append("lower(d.email) IN (SELECT value FROM json_each(?))")
+                args.append(json.dumps(sorted(include_emails)))
+            else:
+                conds.append("0 = 1")
+        if exclude_emails:
+            conds.append("lower(d.email) NOT IN (SELECT value FROM json_each(?))")
+            args.append(json.dumps(sorted(exclude_emails)))
         return " AND ".join(conds), args
 
     #: The columns :meth:`query_leads` / :meth:`all_matching` read.
@@ -1352,6 +1365,16 @@ class LeadResearchStore:
         ).fetchall()
         conn.close()
         return [self._row_to_lead(r) for r in rows], total
+
+    def matching_emails(self, **filters) -> set[str]:
+        """Email identities for all rows in a Companies view, without loading dossiers."""
+        where, args = self._filter_where(**filters)
+        conn = self._conn()
+        rows = conn.execute(
+            f"SELECT lower(d.email) FROM dossiers d WHERE {where}", args,
+        ).fetchall()
+        conn.close()
+        return {row[0] for row in rows}
 
     def all_matching(self, **filters) -> list[dict[str, Any]]:
         """Every dossier matching the user-view filters (no pagination) — the

@@ -696,6 +696,51 @@ def test_list_leads_paginates_and_reports_total(tmp_path, monkeypatch):
     assert r.headers["X-Total-Count"] == "4"
 
 
+def test_companies_campaign_usage_counts_full_view_and_filters(tmp_path, monkeypatch):
+    """The status tabs count all matching leads and ignore pending follow-ups."""
+    import sqlite3
+    from app.campaigns.store import CampaignStore
+
+    client = _setup(tmp_path, monkeypatch)
+    lead_store = leads_module._store
+    for email in ("sent@x.com", "waiting@x.com", "free@x.com"):
+        lead_store.save(_dossier(email, "x.com"))
+    with sqlite3.connect(lead_store._db_path) as conn:
+        user_id = conn.execute("SELECT user_id FROM dossiers LIMIT 1").fetchone()[0]
+    campaigns = CampaignStore(db_path=str(tmp_path / "campaign-usage.db"))
+    monkeypatch.setattr(leads_module, "get_campaign_store", lambda: campaigns)
+    campaign = campaigns.create(
+        user_id, account_id=1, name="October outreach", subject="Hello",
+        body="Hello", emails=["sent@x.com", "waiting@x.com"],
+        start_at="2030-01-01T00:00:00+00:00",
+    )
+    with sqlite3.connect(campaigns._db_path) as conn:
+        conn.execute("UPDATE campaign_sends SET state='sent', sent_at='2030-01-01' "
+                     "WHERE email='sent@x.com' AND step=0")
+        conn.execute("INSERT INTO campaign_recipient_history "
+                     "(user_id,email,campaign_id,account_id,sent_at) "
+                     "VALUES (?,?,?,?,?)",
+                     (user_id, "sent@x.com", campaign["id"], 1, "2030-01-01"))
+        conn.execute("INSERT INTO campaign_sends (campaign_id,email,step,state) "
+                     "VALUES (?,?,1,'pending')", (campaign["id"], "sent@x.com"))
+    usage = client.get("/api/v1/leads/campaign-usage").json()
+    assert {key: usage[key] for key in ("total", "sent", "unsent", "available")} == {
+        "total": 3, "sent": 1, "unsent": 1, "available": 1,
+    }
+    assert usage["campaigns"] == [{
+        "id": campaign["id"], "name": "October outreach", "sent": 1, "unsent": 1,
+    }]
+    for status, email in (("sent", "sent@x.com"), ("unsent", "waiting@x.com"),
+                          ("available", "free@x.com")):
+        result = client.get("/api/v1/leads", params={"campaign_status": status, "limit": 1})
+        assert result.status_code == 200
+        assert result.headers["X-Total-Count"] == "1"
+        assert [row["email"] for row in result.json()] == [email]
+    focused = client.get("/api/v1/leads", params={
+        "campaign_status": "unsent", "campaign_id": campaign["id"],
+    }).json()
+    assert [row["email"] for row in focused] == ["waiting@x.com"]
+
 def test_list_leads_q_search(tmp_path, monkeypatch):
     """?q= is a literal, case-insensitive substring over email/domain/company/
     person/role — server-side, so paging a search never re-downloads."""

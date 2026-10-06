@@ -149,6 +149,8 @@ function leadsParams(filter: LeadsFilter): string {
   if (filter.date) q.set("date", filter.date);
   if (filter.crm_status) q.set("crm_status", filter.crm_status);
   if (filter.q) q.set("q", filter.q);
+  if (filter.campaign_status) q.set("campaign_status", filter.campaign_status);
+  if (filter.campaign_id) q.set("campaign_id", String(filter.campaign_id));
   if (filter.limit !== undefined) q.set("limit", String(filter.limit));
   if (filter.offset !== undefined) q.set("offset", String(filter.offset));
   return q.toString();
@@ -198,6 +200,8 @@ export interface LeadsFilter {
   crm_status?: string;
   /** Identity text search (company / email / person / role) — matched server-side. */
   q?: string;
+  campaign_status?: "sent" | "unsent" | "available";
+  campaign_id?: number;
   limit?: number;
   offset?: number;
 }
@@ -205,6 +209,15 @@ export interface LeadsFilter {
 export interface OrganizeInput {
   folder: string;
   tags: string[];
+}
+
+export interface LeadCampaignUsage {
+  total: number;
+  sent: number;
+  unsent: number;
+  available: number;
+  campaigns: { id: number; name: string; sent: number; unsent: number }[];
+  details: Record<string, { status: "sent" | "unsent"; campaign_id: number; campaign_name: string; send_state: string }>;
 }
 
 export interface BulkOrganizeResult {
@@ -745,6 +758,11 @@ export const api = {
     const total = raw !== null && raw !== "" && !Number.isNaN(Number(raw))
       ? Number(raw) : rows.length;
     return { rows, total };
+  },
+
+  campaignUsage(filter: LeadsFilter = {}): Promise<LeadCampaignUsage> {
+    const qs = leadsParams({ ...filter, campaign_status: undefined, campaign_id: undefined, limit: undefined, offset: undefined });
+    return request<LeadCampaignUsage>(`/leads/campaign-usage${qs ? `?${qs}` : ""}`);
   },
 
   /** Global tag counts for the user views (hidden + skip excluded) — one SQL

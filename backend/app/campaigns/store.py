@@ -820,6 +820,44 @@ class CampaignStore:
         conn.close()
         return {"queued": sorted(queued - emailed), "emailed": sorted(emailed)}
 
+    def recipient_usage(self, user_id: str) -> dict[str, dict[str, Any]]:
+        """First-email campaign assignment per recipient; a sent email wins.
+
+        Follow-up rows are deliberately ignored: they must never turn an
+        already emailed lead back into an unsent lead. Sent history survives
+        removal of a campaign or its send rows.
+        """
+        conn = self._conn()
+        rows = conn.execute(
+            "SELECT lower(s.email), s.state, c.id, c.name "
+            "FROM campaign_sends s JOIN campaigns c ON c.id=s.campaign_id "
+            "WHERE c.user_id=? AND s.step=0 AND s.state IN ('sent','pending','failed') "
+            "ORDER BY c.id", (user_id,),
+        ).fetchall()
+        history = conn.execute(
+            "SELECT lower(h.email), h.campaign_id, c.name "
+            "FROM campaign_recipient_history h "
+            "LEFT JOIN campaigns c ON c.id=h.campaign_id AND c.user_id=h.user_id "
+            "WHERE h.user_id=? ORDER BY h.sent_at ASC", (user_id,),
+        ).fetchall()
+        conn.close()
+        usage: dict[str, dict[str, Any]] = {}
+        for email, state, campaign_id, name in rows:
+            status = "sent" if state == "sent" else "unsent"
+            current = usage.get(email)
+            if current is None or (status == "sent" and current["status"] != "sent"):
+                usage[email] = {
+                    "status": status, "campaign_id": campaign_id,
+                    "campaign_name": name, "send_state": state,
+                }
+        for email, campaign_id, name in history:
+            usage[email] = {
+                "status": "sent", "campaign_id": campaign_id,
+                "campaign_name": name or f"Campaign #{campaign_id}",
+                "send_state": "sent",
+            }
+        return usage
+
     def activity_for_user(self, user_id: str, limit: int = 100,
                           offset: int = 0) -> list[dict[str, Any]]:
         """Sent emails across campaigns, with sender and detected reply metadata."""

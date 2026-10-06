@@ -30,6 +30,7 @@ from app.auth.activity import get_activity
 from app.auth.dependencies import get_current_user
 from app.auth.models import User
 from app.core.config import settings
+from app.campaigns.store import get_campaign_store
 from app.lead_research.models import CRM_STATUSES
 from app.lead_research.service import LeadResearchStore, _email_hash
 from app.leads.export import export_csv
@@ -372,6 +373,8 @@ def list_leads(
     date: str | None = Query(default=None, description="only leads extracted on this date (YYYY-MM-DD)"),
     crm_status: str | None = Query(default=None, description="only leads at this CRM stage (new/researched/qualified/contacted/opened/replied/interested/meeting/won/lost)"),
     q: str | None = Query(default=None, description="identity text search (company/email/person/role)"),
+    campaign_status: str | None = Query(default=None, pattern="^(sent|unsent|available)$"),
+    campaign_id: int = Query(default=0, ge=0),
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
     response: Response = None,
@@ -425,6 +428,17 @@ def list_leads(
     source_emails = (
         {e for e, s in source_by_email.items() if s == source} if source else None
     )
+    include_emails = exclude_emails = None
+    if campaign_status or campaign_id:
+        usage = get_campaign_store().recipient_usage(user.id)
+        if campaign_status == "available":
+            exclude_emails = set(usage)
+        else:
+            include_emails = {
+                email for email, item in usage.items()
+                if (campaign_status is None or item["status"] == campaign_status)
+                and (not campaign_id or item["campaign_id"] == campaign_id)
+            }
     page, total = _store.query_leads(
         **scope,
         recommendation=recommendation,
@@ -436,6 +450,8 @@ def list_leads(
         source_emails=source_emails,
         q=q,
         crm_status=crm_status,
+        include_emails=include_emails,
+        exclude_emails=exclude_emails,
         global_scope=(date is not None or tag is not None),
         limit=limit,
         offset=offset,
@@ -470,6 +486,57 @@ def list_leads(
         ))
     response.headers["X-Total-Count"] = str(total)
     return out
+
+
+@router.get("/campaign-usage", dependencies=[Depends(require_api_key)])
+def campaign_usage_for_leads(
+    recommendation: str | None = None,
+    bound: bool | None = None,
+    min_score: float | None = Query(default=None, ge=0, le=10),
+    source: str | None = None,
+    folder: str | None = None,
+    tag: str | None = None,
+    date: str | None = None,
+    crm_status: str | None = None,
+    q: str | None = None,
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Full-view campaign counts and each lead's first-email assignment."""
+    source_emails = None
+    if source:
+        source_by_email = _job_source_by_email(
+            user_id=user.id, is_admin=False,
+            include_legacy=_can_admin_data(user),
+        )
+        source_emails = {e for e, label in source_by_email.items() if label == source}
+    emails = _store.matching_emails(
+        **_view_scope(user), recommendation=recommendation, bound=bound,
+        min_score=min_score, source_emails=source_emails,
+        folder=folder, tag=tag, date=date, q=q, crm_status=crm_status,
+        global_scope=(date is not None or tag is not None),
+    )
+    usage = get_campaign_store().recipient_usage(user.id)
+    counts = {"sent": 0, "unsent": 0, "available": 0}
+    campaigns: dict[int, dict[str, Any]] = {}
+    details: dict[str, dict[str, Any]] = {}
+    for email in emails:
+        item = usage.get(email)
+        if item is None:
+            counts["available"] += 1
+            continue
+        status = item["status"]
+        counts[status] += 1
+        details[email] = item
+        cid = item["campaign_id"]
+        group = campaigns.setdefault(cid, {
+            "id": cid, "name": item["campaign_name"], "sent": 0, "unsent": 0,
+        })
+        group[status] += 1
+    return {
+        "total": len(emails), **counts,
+        "campaigns": sorted(campaigns.values(), key=lambda item: item["name"].casefold()),
+        "details": details,
+    }
 
 
 @router.get("/export.csv", dependencies=[Depends(require_api_key)])

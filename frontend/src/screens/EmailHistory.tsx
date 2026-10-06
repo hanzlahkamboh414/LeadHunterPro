@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { ChevronLeft, ChevronRight, Search, X } from "lucide-react";
 import { ApiError, api } from "../api/client";
 import { PageHeader } from "../components/PageHeader";
-import type { CampaignHistoryRow } from "../types";
+import type { Campaign, CampaignHistoryRow } from "../types";
 
 type View = "sent" | "replied" | "bounced" | "followup";
 const VIEWS: { key: View; label: string; detail: string }[] = [
@@ -25,6 +25,11 @@ function formatDate(value: string): string {
   })} PKT`;
 }
 
+function usesAccount(campaign: Campaign, accountId: number): boolean {
+  return accountId === 0 || campaign.account_id === accountId ||
+    (campaign.account_ids ?? []).includes(accountId);
+}
+
 export default function EmailHistory() {
   const [view, setView] = useState<View>("sent");
   const [fromDate, setFromDate] = useState("");
@@ -37,6 +42,7 @@ export default function EmailHistory() {
   const [selected, setSelected] = useState<CampaignHistoryRow | null>(null);
   const accounts = useQuery({ queryKey: ["email-accounts"], queryFn: () => api.emailAccounts() });
   const campaigns = useQuery({ queryKey: ["campaigns"], queryFn: () => api.campaigns() });
+  const availableCampaigns = (campaigns.data ?? []).filter((campaign) => usesAccount(campaign, accountId));
   const history = useQuery({
     queryKey: ["campaign-history", view, fromDate, toDate, accountId, campaignId, email, page],
     queryFn: () => api.exploreCampaignActivity({
@@ -72,15 +78,21 @@ export default function EmailHistory() {
           <input type="date" value={toDate} min={fromDate || undefined} onChange={(e) => { setToDate(e.target.value); setPage(0); }} className={INPUT} />
         </label>
         <label className="text-xs text-slate-300">Gmail account
-          <select value={accountId} onChange={(e) => { setAccountId(Number(e.target.value)); setPage(0); }} className={INPUT}>
+          <select value={accountId} onChange={(e) => {
+            const nextAccountId = Number(e.target.value);
+            setAccountId(nextAccountId);
+            setCampaignId((current) => current && !campaigns.data?.some((campaign) =>
+              campaign.id === current && usesAccount(campaign, nextAccountId)) ? 0 : current);
+            setPage(0);
+          }} className={INPUT}>
             <option value={0}>All accounts</option>
             {(accounts.data ?? []).map((a) => <option key={a.id} value={a.id}>{a.email}</option>)}
           </select>
         </label>
         <label className="text-xs text-slate-300">Campaign
           <select value={campaignId} onChange={(e) => { setCampaignId(Number(e.target.value)); setPage(0); }} className={INPUT}>
-            <option value={0}>All campaigns</option>
-            {(campaigns.data ?? []).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            <option value={0}>{accountId ? "All campaigns for this account" : "All campaigns"}</option>
+            {availableCampaigns.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
           </select>
         </label>
       </div>

@@ -23,7 +23,6 @@ import type {
   CampaignSend,
   CampaignUpdateInput,
   EmailAccount,
-  LeadSummary,
   SpamFinding,
 } from "../types";
 import type { FollowupInput } from "../types";
@@ -90,6 +89,31 @@ function defaultStart(): string {
   d.setHours(9, 0, 0, 0);
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function localDateTime(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function DelayFields({ min, max, setMin, setMax }: {
+  min: number; max: number; setMin: (n: number) => void; setMax: (n: number) => void;
+}) {
+  return <div className="mt-3">
+    <p className="text-[12px] text-slate-400">Delay between emails (seconds)</p>
+    <div className="mt-1 grid grid-cols-2 gap-3">
+      <label className="text-[11.5px] text-slate-500">Minimum
+        <input type="number" min={20} max={3600} className={`${INPUT} mt-1`} value={min} onChange={(e) => setMin(Number(e.target.value))} />
+      </label>
+      <label className="text-[11.5px] text-slate-500">Maximum
+        <input type="number" min={20} max={7200} className={`${INPUT} mt-1`} value={max} onChange={(e) => setMax(Number(e.target.value))} />
+      </label>
+    </div>
+    <p className="mt-1.5 text-[11.5px] text-slate-500">Minimum 20 seconds after the previous email finishes sending. Set both fields equal for a fixed gap.</p>
+    {(min < 20 || max < min || min > 3600 || max > 7200) && <p className="mt-1 text-[11.5px] text-rose-400">Use at least 20 seconds, with maximum no shorter than minimum.</p>}
+  </div>;
 }
 
 export default function Campaigns() {
@@ -161,15 +185,15 @@ export default function Campaigns() {
         </div>
       )}
 
-      <div className="mt-5 flex items-center justify-between">
-        <p className="text-[13px] text-slate-500">
+      <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <p className="min-w-0 text-[13px] text-slate-500">
           Sends go out with a random 3–7 minute gap and a daily cap per Gmail
           account — add more sending accounts to scale volume safely. Every
           send lands on the lead's CRM timeline.
         </p>
         <button
           onClick={() => setBuilding(true)}
-          className="ml-4 shrink-0 flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-[13px] font-semibold text-white hover:bg-indigo-500"
+          className="flex min-h-10 w-full shrink-0 items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-[13px] font-semibold text-white hover:bg-indigo-500 sm:ml-4 sm:w-auto"
         >
           <Plus className="w-4 h-4" />
           New campaign
@@ -239,6 +263,7 @@ function CampaignCard({
   actionsPending: boolean;
 }) {
   const [showSends, setShowSends] = useState(false);
+  const [sendView, setSendView] = useState<"sent" | "remaining" | "replied" | "bounced">("sent");
   const [editing, setEditing] = useState(false);
   const queryClient = useQueryClient();
 
@@ -249,10 +274,33 @@ function CampaignCard({
   const detail = useQuery({
     queryKey: ["campaign", c.id],
     queryFn: () => api.getCampaign(c.id),
-    enabled: showSends,
+    enabled: showSends || editing,
     refetchInterval: 15000,
   });
   const sends: CampaignSend[] = detail.data?.sends || [];
+  const bounceQuery = useQuery({
+    queryKey: ["campaign-bounces", c.id],
+    queryFn: () => api.campaignBounces(c.id),
+    enabled: showSends,
+    refetchInterval: 15000,
+  });
+  const bounced = bounceQuery.data || [];
+  const bounceEmails = new Set(bounced.map((b) => b.email.toLowerCase()));
+  const byRecipient = new Map<string, CampaignSend[]>();
+  for (const send of sends) {
+    const key = send.email.toLowerCase();
+    byRecipient.set(key, [...(byRecipient.get(key) || []), send]);
+  }
+  const recipientRows = { sent: [] as CampaignSend[], remaining: [] as CampaignSend[], replied: [] as CampaignSend[] };
+  for (const [email, rows] of byRecipient) {
+    if (bounceEmails.has(email)) continue;
+    const first = rows.find((row) => row.step === 0) || rows[0];
+    const reply = rows.find((row) => !!row.replied_at);
+    if (reply) recipientRows.replied.push(reply);
+    else if (rows.some((row) => row.state === "sent")) recipientRows.sent.push(first);
+    else if (first.state === "pending" || first.state === "failed") recipientRows.remaining.push(first);
+  }
+  const visibleSends = sendView === "bounced" ? [] : recipientRows[sendView];
 
   const edit = useMutation({
     mutationFn: (input: CampaignUpdateInput) => api.updateCampaign(c.id, input),
@@ -264,13 +312,13 @@ function CampaignCard({
   });
 
   return (
-    <div className="ui-panel rounded-xl border border-white/5 bg-white/[0.02] p-5">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2.5">
-            <h2 className="text-[15px] font-semibold text-white truncate">{c.name}</h2>
+    <div className="ui-panel rounded-xl border border-white/5 bg-white/[0.02] p-4 sm:p-5">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0 flex-1">
+          <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-2.5 sm:flex sm:flex-wrap sm:items-center">
+            <h2 className="min-w-0 truncate text-[15px] font-semibold text-white">{c.name}</h2>
             <span
-              className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold ${STATUS_STYLES[c.status] || STATUS_STYLES.completed}`}
+              className={`max-w-[140px] break-words rounded-full px-2 py-0.5 text-center text-[11px] font-semibold sm:max-w-full ${STATUS_STYLES[c.status] || STATUS_STYLES.completed}`}
             >
               {c.status === "paused" && c.paused_reason
                 ? PAUSE_REASONS[c.paused_reason] || "Paused"
@@ -281,25 +329,25 @@ function CampaignCard({
             from {c.account_email || `account #${c.account_id}`}
             {(c.account_emails?.length || 0) > 1 &&
               ` +${c.account_emails.length - 1} more`}
-            {c.ai_personalize && " · AI opening lines"}
+            {c.ai_compose ? " · AI writes each email" : c.ai_personalize ? " · AI opening lines" : ""}
             {" · starts "}
             {fmtLocal(c.start_at)}
           </p>
         </div>
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="grid w-full grid-cols-2 gap-2 sm:flex sm:w-auto sm:shrink-0 sm:flex-wrap sm:justify-end">
           <button
             onClick={() => {
               setShowSends((v) => !v);
               setEditing(false);
             }}
-            className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[12.5px] hover:bg-white/[0.04] ${
+            className={`flex min-h-10 min-w-0 items-center justify-center gap-1.5 rounded-lg border px-3 py-1.5 text-center text-[12.5px] hover:bg-white/[0.04] ${
               showSends
                 ? "border-indigo-500/30 text-indigo-300"
                 : "border-white/5 text-slate-300"
             }`}
           >
             <Eye className="w-3.5 h-3.5" />
-            Sends
+            Recipients
           </button>
           {c.status !== "completed" && (
             <button
@@ -307,21 +355,21 @@ function CampaignCard({
                 setEditing((v) => !v);
                 setShowSends(false);
               }}
-              className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[12.5px] hover:bg-white/[0.04] ${
+              className={`flex min-h-10 min-w-0 items-center justify-center gap-1.5 rounded-lg border px-3 py-1.5 text-center text-[12.5px] hover:bg-white/[0.04] ${
                 editing
                   ? "border-indigo-500/30 text-indigo-300"
                   : "border-white/5 text-slate-300"
               }`}
             >
-              <Pencil className="w-3.5 h-3.5" />
-              Edit pitch
+              <Pencil className="w-3.5 h-3.5 shrink-0" />
+              Edit campaign
             </button>
           )}
           {(c.status === "running" || c.status === "scheduled") && (
             <button
               onClick={onPause}
               disabled={actionsPending}
-              className="flex items-center gap-1.5 rounded-lg border border-white/5 px-3 py-1.5 text-[12.5px] text-slate-300 hover:bg-white/[0.04]"
+              className="flex min-h-10 items-center justify-center gap-1.5 rounded-lg border border-white/5 px-3 py-1.5 text-[12.5px] text-slate-300 hover:bg-white/[0.04]"
             >
               <Pause className="w-3.5 h-3.5" />
               Pause
@@ -331,7 +379,7 @@ function CampaignCard({
             <button
               onClick={onResume}
               disabled={actionsPending}
-              className="flex items-center gap-1.5 rounded-lg border border-white/5 px-3 py-1.5 text-[12.5px] text-emerald-300 hover:bg-emerald-500/10"
+              className="flex min-h-10 items-center justify-center gap-1.5 rounded-lg border border-white/5 px-3 py-1.5 text-[12.5px] text-emerald-300 hover:bg-emerald-500/10"
             >
               <Play className="w-3.5 h-3.5" />
               Resume
@@ -340,15 +388,17 @@ function CampaignCard({
           <button
             onClick={onRemove}
             disabled={actionsPending}
-            className="flex items-center gap-1.5 rounded-lg border border-white/5 px-3 py-1.5 text-[12.5px] text-rose-400 hover:bg-rose-500/10"
+            aria-label={`Delete campaign ${c.name}`}
+            className="flex min-h-10 items-center justify-center gap-1.5 rounded-lg border border-white/5 px-3 py-1.5 text-[12.5px] text-rose-400 hover:bg-rose-500/10"
           >
             <Trash2 className="w-3.5 h-3.5" />
+            <span className="sm:hidden">Delete</span>
           </button>
         </div>
       </div>
 
       <div className="mt-4">
-        <div className="flex items-center justify-between text-[12px] text-slate-500">
+        <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-[12px] text-slate-500">
           <span>
             {c.sent} sent · {c.pending} pending
             {c.replied > 0 && ` · ${c.replied} replied`}
@@ -365,7 +415,7 @@ function CampaignCard({
         </div>
       </div>
 
-      {editing && <EditPitchForm c={c} onSave={(input) => edit.mutate(input)} saving={edit.isPending} />}
+      {editing && (detail.isLoading ? <p className="mt-4 text-slate-500">Loading campaign…</p> : detail.isError || !detail.data ? <p className="mt-4 text-rose-400">Could not load campaign settings.</p> : <EditCampaignForm key={c.id} c={detail.data} onSave={(input) => edit.mutate(input)} saving={edit.isPending} error={edit.error instanceof ApiError ? edit.error.message : edit.isError ? "Could not save campaign" : ""} />)}
 
       {showSends && (
         <div className="mt-4">
@@ -374,7 +424,20 @@ function CampaignCard({
           ) : detail.isError ? (
             <p className="text-[12.5px] text-rose-400">Could not load sends.</p>
           ) : (
-            <div className="overflow-x-auto rounded-lg border border-white/5">
+            <>
+            <div className="mb-3 grid grid-cols-2 gap-2 sm:grid-cols-4" role="tablist" aria-label={`Recipients in ${c.name}`}>
+              {(["sent", "remaining", "replied", "bounced"] as const).map((view) => (
+                <button key={view} role="tab" aria-selected={sendView === view} onClick={() => setSendView(view)} className={`min-h-11 rounded-lg border px-3 text-left text-xs font-semibold capitalize ${sendView === view ? "border-indigo-400 bg-indigo-500/10 text-indigo-200" : "border-white/10 text-slate-300"}`}>
+                  {view} <span className="ml-1 opacity-70">{view === "bounced" ? bounced.length : recipientRows[view].length}</span>
+                </button>
+              ))}
+            </div>
+            {sendView === "bounced" ? <div className="overflow-x-auto rounded-lg border border-white/10">
+              {bounceQuery.isError && <p className="p-3 text-xs text-rose-300">Could not load bounced addresses.</p>}
+              {bounceQuery.isLoading && <p className="p-3 text-xs text-slate-400">Loading bounces…</p>}
+              {!bounceQuery.isLoading && !bounceQuery.isError && bounced.length === 0 && <p className="p-3 text-xs text-slate-400">No recorded bounces for this campaign.</p>}
+              {bounced.map((b) => <div key={b.email} className="grid gap-1 border-b border-white/5 p-3 text-xs last:border-0 sm:grid-cols-[minmax(0,1fr)_auto_auto] sm:gap-4"><span className="break-all text-slate-200">{b.email}</span><span className="text-slate-400">{fmtLocal(b.bounced_at)}</span><span className="text-rose-300">{b.reason || "Hard bounce"}</span></div>)}
+            </div> : <div className="overflow-x-auto rounded-lg border border-white/5">
               <table className="w-full text-[12px]">
                 <thead>
                   <tr className="text-left text-slate-500 border-b border-white/5">
@@ -389,7 +452,7 @@ function CampaignCard({
                   </tr>
                 </thead>
                 <tbody>
-                  {sends.map((s) => {
+                  {visibleSends.map((s) => {
                     const st = sendStatus(s);
                     return (
                       <tr key={s.id} className="border-b border-white/5 last:border-0">
@@ -437,16 +500,18 @@ function CampaignCard({
                       </tr>
                     );
                   })}
-                  {sends.length === 0 && (
+                  {visibleSends.length === 0 && (
                     <tr>
                       <td colSpan={8} className="px-3 py-3 text-slate-500">
-                        No sends queued yet.
+                        No {sendView} recipients in this campaign.
                       </td>
                     </tr>
                   )}
                 </tbody>
               </table>
             </div>
+            }
+            </>
           )}
           <p className="mt-2 text-[11.5px] text-slate-500">
             "Opened" comes from the tracking image in the email — a signal, not
@@ -460,31 +525,85 @@ function CampaignCard({
 }
 
 // ---------------------------------------------------------------------------
-// Edit the pitch of a started campaign (applies to not-yet-sent emails)
+// Edit every setting that affects future sends, including active campaigns.
 // ---------------------------------------------------------------------------
 
-function EditPitchForm({
+function EditCampaignForm({
   c,
   onSave,
   saving,
+  error,
 }: {
-  c: Campaign;
+  c: Campaign & { sends: CampaignSend[]; followups: FollowupInput[] };
   onSave: (input: CampaignUpdateInput) => void;
   saving: boolean;
+  error: string;
 }) {
   const [name, setName] = useState(c.name);
   const [subject, setSubject] = useState(c.subject);
   const [body, setBody] = useState(c.body);
-
+  const [accountId, setAccountId] = useState(c.account_id);
+  const [extraIds, setExtraIds] = useState(c.account_ids.filter((id) => id !== c.account_id));
+  const [aiPersonalize, setAiPersonalize] = useState(c.ai_personalize);
+  const [aiCompose, setAiCompose] = useState(c.ai_compose || false);
+  const [aiSignature, setAiSignature] = useState(c.ai_signature || "");
+  const [startAt, setStartAt] = useState(localDateTime(c.start_at));
+  const [dailyLimit, setDailyLimit] = useState(c.daily_limit);
+  const [delayMin, setDelayMin] = useState(c.delay_min_s);
+  const [delayMax, setDelayMax] = useState(c.delay_max_s);
+  const [followups, setFollowups] = useState<Array<FollowupInput & { on: boolean }>>(
+    [0, 1, 2].map((index) => ({
+      on: !!c.followups[index],
+      after_days: c.followups[index]?.after_days ?? [3, 7, 14][index],
+      subject: c.followups[index]?.subject ?? "",
+      body: c.followups[index]?.body ?? "",
+    })),
+  );
+  const [replaceAudience, setReplaceAudience] = useState(false);
+  const [folder, setFolder] = useState("");
+  const [recommendation, setRecommendation] = useState("contact_now");
+  const [testEmail, setTestEmail] = useState("");
+  const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null);
+  const accounts = useQuery({ queryKey: ["email-accounts"], queryFn: () => api.emailAccounts() });
+  const folders = useQuery({ queryKey: ["folders"], queryFn: () => api.listFolders() });
+  const pool = useQuery({
+    queryKey: ["campaign-pool", folder, recommendation],
+    queryFn: () => api.listLeads({ folder: folder || undefined, recommendation: recommendation || undefined, limit: 500 }),
+    enabled: replaceAudience,
+  });
+  const updateFollowup = (index: number, changes: Partial<FollowupInput & { on: boolean }>) =>
+    setFollowups((rows) => rows.map((row, i) => i === index ? { ...row, ...changes } : row));
+  const testSend = useMutation({
+    mutationFn: () => api.campaignTestSend({ account_id: accountId, to_email: testEmail.trim(), subject, body }),
+    onSuccess: (r) => setTestResult({ ok: true, text: `Sent to ${r.to} — check your inbox and spam folder.` }),
+    onError: (e) => setTestResult({ ok: false, text: e instanceof ApiError ? e.message : "Test send failed" }),
+  });
+  const activeFollowups = followups.filter((row, index) => row.on && (index === 0 || followups.slice(0, index).every((previous) => previous.on)));
+  const validFollowups = activeFollowups.every((row) => row.after_days >= 1 && row.after_days <= 30 && row.subject.trim() && row.body.trim());
   const canSave =
-    name.trim() !== "" && subject.trim() !== "" && body.trim() !== "" && !saving;
+    name.trim() !== "" && subject.trim() !== "" && body.trim() !== "" &&
+    (!aiCompose || aiSignature.trim() !== "") &&
+    !!accountId && !!startAt && !Number.isNaN(new Date(startAt).getTime()) &&
+    dailyLimit >= 1 && dailyLimit <= 200 && delayMin >= 20 && delayMin <= 3600 &&
+    delayMax >= delayMin && delayMax <= 7200 && validFollowups &&
+    (!replaceAudience || (!!pool.data?.length && !pool.isFetching)) && !saving;
+  const save = () => onSave({
+    name: name.trim(), subject, body, account_id: accountId,
+    account_ids: extraIds.filter((id) => id !== accountId),
+    start_at: new Date(startAt).toISOString(), daily_limit: dailyLimit,
+    delay_min_s: delayMin, delay_max_s: delayMax,
+    ai_personalize: aiPersonalize,
+    ai_compose: aiCompose,
+    ai_signature: aiSignature,
+    followups: activeFollowups.map(({ after_days, subject: s, body: b }) => ({ after_days, subject: s, body: b })),
+    ...(replaceAudience ? { emails: (pool.data || []).map((lead) => lead.email) } : {}),
+  });
 
   return (
     <div className="mt-4 rounded-lg border border-indigo-500/20 bg-white/[0.02] p-3.5">
-      <p className="text-[12px] font-semibold text-slate-300">Edit pitch</p>
+      <p className="text-[12px] font-semibold text-slate-300">Edit campaign</p>
       <p className="mt-1 text-[11.5px] text-slate-500">
-        Applies to emails that have not gone out yet. Emails already sent keep
-        their own record. The follow-up ladder stays as it is.
+        Changes apply to emails still waiting to send, including a running campaign. Already sent emails keep their history.
       </p>
       <div className="mt-2.5 space-y-2">
         <input
@@ -493,19 +612,26 @@ function EditPitchForm({
           onChange={(e) => setName(e.target.value)}
           placeholder="Campaign name"
         />
+        <label className="block text-xs text-slate-400">{aiCompose ? "Campaign goal / subject direction" : "Subject"}</label>
         <input
           className={INPUT}
           value={subject}
           onChange={(e) => setSubject(e.target.value)}
-          placeholder="Subject"
+          placeholder={aiCompose ? "e.g. Introduce our estimating service" : "Subject"}
         />
+        <label className="block text-xs text-slate-400">{aiCompose ? "Your offer and instructions for AI" : "Email script"}</label>
         <textarea
           className={`${INPUT} h-32 resize-y`}
           value={body}
           onChange={(e) => setBody(e.target.value)}
-          placeholder="Email script"
+          placeholder={aiCompose ? "What do you offer? Include only claims AI may make about your business." : "Email script"}
         />
-        <div className="mt-2.5">
+        {aiCompose ? <label className="block text-xs text-slate-400">Text after Best regards,
+          <textarea className={`${INPUT} mt-1 h-20 resize-y`} maxLength={2000} value={aiSignature} onChange={(e) => setAiSignature(e.target.value)} placeholder="Your name, company and contact details" />
+        </label> : <><div className="flex flex-wrap gap-1.5">{TEMPLATE_VARS.map((v) => <code key={v} className="rounded bg-white/[0.05] px-1.5 py-0.5 text-[11px] text-slate-400">{v}</code>)}</div>
+        <label className="flex items-center gap-2 text-[12.5px] text-slate-300"><input type="checkbox" checked={aiPersonalize} onChange={(e) => setAiPersonalize(e.target.checked)} /> AI opening line from verified lead facts</label></>}
+        <label className="flex items-center gap-2 text-[12.5px] text-slate-300"><input type="checkbox" checked={aiCompose} onChange={(e) => setAiCompose(e.target.checked)} /> AI writes each email from verified research</label>
+        {!aiCompose && <div className="mt-2.5">
           <SpamPanel
             subject={subject}
             body={body}
@@ -514,14 +640,39 @@ function EditPitchForm({
               setBody(b);
             }}
           />
+        </div>}
+        {!aiCompose && <div className="rounded-lg border border-white/5 p-3">
+          <p className="text-[12px] font-semibold text-slate-300">Inbox spam check (optional)</p>
+          <div className="mt-2 flex flex-col gap-2 sm:flex-row"><input type="email" className={INPUT} value={testEmail} onChange={(e) => setTestEmail(e.target.value)} placeholder="you@example.com" /><button className="min-h-10 w-full shrink-0 rounded-lg border border-white/10 px-4 text-[12.5px] text-slate-200 disabled:opacity-50 sm:w-auto" disabled={testSend.isPending || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(testEmail.trim()) || !subject.trim() || !body.trim()} onClick={() => testSend.mutate()}>{testSend.isPending ? "Sending…" : "Send test"}</button></div>
+          {testResult && <p className={`mt-2 text-[12px] ${testResult.ok ? "text-emerald-400" : "text-rose-400"}`}>{testResult.text}</p>}
+        </div>}
+        <div className="rounded-lg border border-white/5 p-3">
+          <p className="text-[12px] font-semibold text-slate-300">Sending accounts</p>
+          <select className={`${INPUT} mt-2`} value={accountId} onChange={(e) => { const id = Number(e.target.value); setAccountId(id); setExtraIds((prev) => prev.filter((x) => x !== id)); }}>
+            {(accounts.data || []).filter((a) => a.status === "connected" || a.id === accountId).map((a) => <option key={a.id} value={a.id}>{a.email}{a.status !== "connected" ? " (disconnected)" : ""}</option>)}
+          </select>
+          <div className="mt-2 space-y-1">{(accounts.data || []).filter((a) => a.id !== accountId && (a.status === "connected" || extraIds.includes(a.id))).map((a) => <label key={a.id} className="flex gap-2 text-[12px] text-slate-300"><input type="checkbox" checked={extraIds.includes(a.id)} onChange={(e) => setExtraIds((prev) => e.target.checked ? (prev.length >= 4 ? prev : [...prev, a.id]) : prev.filter((id) => id !== a.id))} /> Also send from {a.email}{a.status !== "connected" ? " (disconnected)" : ""}</label>)}</div>
         </div>
+        <div className="rounded-lg border border-white/5 p-3">
+          <p className="text-[12px] font-semibold text-slate-300">Follow-ups (optional)</p>
+          <p className="mt-1 text-[11.5px] text-slate-500">{aiCompose ? "Enter a goal and brief for each follow-up. AI writes it for every lead. Replies stop the ladder." : "Each follows the previous email after the chosen number of days. Replies stop the ladder."}</p>
+          <div className="mt-2 space-y-2">{followups.map((row, index) => (index === 0 || followups[index - 1].on) && <FollowupEditor key={index} label={`Follow-up ${index + 1}`} on={row.on} setOn={(v) => updateFollowup(index, { on: v })} days={row.after_days} setDays={(v) => updateFollowup(index, { after_days: v })} subject={row.subject} setSubject={(v) => updateFollowup(index, { subject: v })} body={row.body} setBody={(v) => updateFollowup(index, { body: v })} input={INPUT} />)}</div>
+        </div>
+        <div className="rounded-lg border border-white/5 p-3">
+          <label className="flex gap-2 text-[12.5px] text-slate-300"><input type="checkbox" checked={replaceAudience} onChange={(e) => setReplaceAudience(e.target.checked)} /> Replace unsent lead selection</label>
+          <p className="mt-1 text-[11.5px] text-slate-500">Leave unchecked to keep the current queue. Sent emails remain in history.</p>
+          {replaceAudience && <><div className="mt-2 grid grid-cols-2 gap-2"><select className={INPUT} value={folder} onChange={(e) => setFolder(e.target.value)}><option value="">All leads</option>{(folders.data?.folders || []).map((f) => <option key={f.name} value={f.name}>{f.name} ({f.count})</option>)}</select><select className={INPUT} value={recommendation} onChange={(e) => setRecommendation(e.target.value)}><option value="">Any recommendation</option><option value="contact_now">Contact now</option><option value="nurture">Nurture</option></select></div><p className="mt-2 text-[12px] text-slate-400">{pool.isFetching ? "Counting leads…" : `${pool.data?.length || 0} leads selected (first 500 max)`}</p></>}
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3"><label className="text-[12px] text-slate-400">Start (your local time)<input type="datetime-local" className={`${INPUT} mt-1`} value={startAt} onChange={(e) => setStartAt(e.target.value)} /></label><label className="text-[12px] text-slate-400">Daily limit (per Gmail account)<input type="number" min={1} max={200} className={`${INPUT} mt-1`} value={dailyLimit} onChange={(e) => setDailyLimit(Number(e.target.value))} /></label></div>
+        <DelayFields min={delayMin} max={delayMax} setMin={setDelayMin} setMax={setDelayMax} />
+        {error && <p className="text-[12px] text-rose-400">{error}</p>}
         <div className="flex justify-end gap-2">
           <button
-            onClick={() => onSave({ name: name.trim(), subject, body })}
+            onClick={save}
             disabled={!canSave}
-            className="rounded-lg bg-indigo-600 px-4 py-2 text-[12.5px] font-semibold text-white hover:bg-indigo-500 disabled:opacity-50"
+            className="min-h-10 w-full rounded-lg bg-indigo-600 px-4 py-2 text-[12.5px] font-semibold text-white hover:bg-indigo-500 disabled:opacity-50 sm:w-auto"
           >
-            {saving ? "Saving…" : "Save pitch"}
+            {saving ? "Saving…" : "Save campaign"}
           </button>
         </div>
       </div>
@@ -838,18 +989,24 @@ function CampaignBuilder({
   onDone: (ok: boolean, text: string) => void;
   onCancel: () => void;
 }) {
+  const [step, setStep] = useState(1);
   const [name, setName] = useState("");
   const [accountId, setAccountId] = useState<number | null>(null);
   // Extra sending accounts beyond the primary (Phase E5): the scheduler
   // spreads sends across all of them, so daily volume scales with N.
   const [extraIds, setExtraIds] = useState<number[]>([]);
   const [aiPersonalize, setAiPersonalize] = useState(false);
+  const [aiCompose, setAiCompose] = useState(true);
+  const [aiSignature, setAiSignature] = useState("");
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
-  const [folder, setFolder] = useState("");
+  const [folder, setFolder] = useState("*");
+  const [quantity, setQuantity] = useState(50);
   const [recommendation, setRecommendation] = useState("contact_now");
   const [startAt, setStartAt] = useState(defaultStart());
   const [dailyLimit, setDailyLimit] = useState(30);
+  const [delayMin, setDelayMin] = useState(180);
+  const [delayMax, setDelayMax] = useState(420);
   // Follow-up ladder (Phase E4): two optional rungs, day 3 and day 7 by
   // default. Each is cancelled the moment the lead replies.
   const [fu1On, setFu1On] = useState(false);
@@ -860,6 +1017,10 @@ function CampaignBuilder({
   const [fu2Days, setFu2Days] = useState(7);
   const [fu2Subject, setFu2Subject] = useState("");
   const [fu2Body, setFu2Body] = useState("");
+  const [fu3On, setFu3On] = useState(false);
+  const [fu3Days, setFu3Days] = useState(14);
+  const [fu3Subject, setFu3Subject] = useState("");
+  const [fu3Body, setFu3Body] = useState("");
   // Spam check: send the current draft to your own inbox before scheduling.
   const [testEmail, setTestEmail] = useState("");
   const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null);
@@ -872,19 +1033,13 @@ function CampaignBuilder({
     (a) => a.status === "connected",
   );
 
-  // The lead pool for the current folder/recommendation pick (capped at 500 —
-  // a campaign is a focused run, not a blast).
+  // Server excludes both queued and sent recipients before previewing.
   const pool = useQuery({
-    queryKey: ["campaign-pool", folder, recommendation],
-    queryFn: () =>
-      api.listLeads({
-        folder: folder || undefined,
-        recommendation: recommendation || undefined,
-        limit: 500,
-      }),
-    enabled: connected.length > 0,
+    queryKey: ["campaign-available", folder, recommendation, quantity],
+    queryFn: () => api.campaignAvailableLeads({ count: quantity, folder, recommendation }),
+    enabled: connected.length > 0 && quantity >= 1 && quantity <= 500,
   });
-  const poolLeads: LeadSummary[] = pool.data || [];
+  const poolEmails = pool.data?.emails || [];
 
   const create = useMutation({
     mutationFn: () => {
@@ -895,23 +1050,32 @@ function CampaignBuilder({
       if (fu2On && fu2Subject.trim() && fu2Body.trim()) {
         followups.push({ after_days: fu2Days, subject: fu2Subject, body: fu2Body });
       }
+      if (fu1On && fu2On && fu3On && fu3Subject.trim() && fu3Body.trim()) {
+        followups.push({ after_days: fu3Days, subject: fu3Subject, body: fu3Body });
+      }
       return api.createCampaign({
         name: name.trim(),
         account_id: accountId!,
         account_ids: extraIds.filter((id) => id !== accountId),
         subject,
         body,
-        emails: poolLeads.map((l) => l.email),
+        audience_count: quantity,
+        audience_folder: folder,
+        audience_recommendation: recommendation,
         start_at: new Date(startAt).toISOString(),
         daily_limit: dailyLimit,
+        delay_min_s: delayMin,
+        delay_max_s: delayMax,
         followups,
         ai_personalize: aiPersonalize,
+        ai_compose: aiCompose,
+        ai_signature: aiSignature,
       });
     },
     onSuccess: (r) => {
       const skipped =
         r.excluded > 0 ? ` (${r.excluded} lead(s) skipped — already emailed)` : "";
-      onDone(true, `Campaign "${r.campaign.name}" scheduled for ${fmtLocal(r.campaign.start_at)}${skipped}.`);
+      onDone(true, `Campaign "${r.campaign.name}" scheduled with ${r.campaign.pending} emails for ${fmtLocal(r.campaign.start_at)}${skipped}.`);
     },
     onError: (e) =>
       setError(e instanceof ApiError ? e.message : "Could not create campaign"),
@@ -938,15 +1102,34 @@ function CampaignBuilder({
   });
 
   const canCreate =
-    name.trim() && accountId && subject.trim() && body.trim() && poolLeads.length > 0 && startAt;
+    name.trim() && accountId && subject.trim() && body.trim() &&
+    (!aiCompose || aiSignature.trim()) && poolEmails.length === quantity && !pool.isFetching && startAt &&
+    delayMin >= 20 && delayMin <= 3600 && delayMax >= delayMin && delayMax <= 7200 &&
+    dailyLimit >= 1 && dailyLimit <= 200 &&
+    (!fu1On || (fu1Subject.trim() && fu1Body.trim() && fu1Days >= 1 && fu1Days <= 30)) &&
+    (!fu2On || (fu2Subject.trim() && fu2Body.trim() && fu2Days >= 1 && fu2Days <= 30)) &&
+    (!fu3On || (fu3Subject.trim() && fu3Body.trim() && fu3Days >= 1 && fu3Days <= 30));
 
   const emailOk = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(testEmail.trim());
   const canTest = !!accountId && subject.trim() !== "" && body.trim() !== "" && emailOk;
+  const followupsValid =
+    (!fu1On || (fu1Subject.trim() && fu1Body.trim() && fu1Days >= 1 && fu1Days <= 30)) &&
+    (!fu2On || (fu2Subject.trim() && fu2Body.trim() && fu2Days >= 1 && fu2Days <= 30)) &&
+    (!fu3On || (fu3Subject.trim() && fu3Body.trim() && fu3Days >= 1 && fu3Days <= 30));
+  const audienceValid = quantity >= 1 && quantity <= 500 && Number.isInteger(quantity) &&
+    poolEmails.length === quantity && !pool.isFetching && !!startAt &&
+    delayMin >= 20 && delayMin <= 3600 && delayMax >= delayMin && delayMax <= 7200 &&
+    dailyLimit >= 1 && dailyLimit <= 200;
+  const canContinue = step === 1 ? !!name.trim()
+    : step === 3 ? !!(subject.trim() && body.trim() && (!aiCompose || aiSignature.trim()))
+    : step === 4 ? !!followupsValid
+    : step === 5 ? !!audienceValid : true;
+  const steps = ["Name", "Mode", "Message", "Follow-ups", "Audience & timing", "Sending accounts"];
 
   const input = INPUT;
 
   return (
-    <div className="mt-5 rounded-xl border border-indigo-500/20 bg-white/[0.02] p-5">
+    <div className="mt-5 rounded-xl border border-indigo-500/20 bg-white/[0.02] p-4 sm:p-5">
       <div className="flex items-center justify-between">
         <h2 className="text-[15px] font-semibold text-white">New campaign</h2>
         <button onClick={onCancel} className="text-slate-400 hover:text-slate-200">
@@ -961,7 +1144,16 @@ function CampaignBuilder({
         </div>
       ) : (
         <>
+          <div className="mt-4 grid grid-cols-3 gap-2 sm:grid-cols-6" aria-label="Campaign setup steps">
+            {steps.map((label, index) => <button key={label} type="button" onClick={() => { setStep(index + 1); setError(""); }}
+              aria-current={step === index + 1 ? "step" : undefined}
+              className={`min-h-11 rounded-lg border px-2 py-1.5 text-center text-[11px] font-medium ${step === index + 1 ? "border-indigo-400 bg-indigo-500/15 text-white" : "border-white/10 text-slate-400 hover:bg-white/5"}`}>
+              <span className="block text-[10px] opacity-70">Step {index + 1}</span>{label}
+            </button>)}
+          </div>
+          <p className="mt-3 text-[12px] text-slate-400">Step {step} of 6 · You can revisit any step; your previous answers stay saved in this draft.</p>
           <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {step === 1 && (
             <div>
               <label className="text-[12px] text-slate-400">Campaign name</label>
               <input
@@ -971,6 +1163,8 @@ function CampaignBuilder({
                 placeholder="Q3 GC outreach"
               />
             </div>
+            )}
+            {step === 6 && (
             <div>
               <label className="text-[12px] text-slate-400">From (primary Gmail account)</label>
               <select
@@ -1023,27 +1217,42 @@ function CampaignBuilder({
                 </div>
               )}
             </div>
+            )}
           </div>
 
+          {step === 2 && <div className="mt-3 grid gap-3 sm:grid-cols-2">
+            <button type="button" aria-pressed={aiCompose} onClick={() => setAiCompose(true)}
+              className={`min-h-24 rounded-lg border p-4 text-left ${aiCompose ? "border-indigo-400 bg-indigo-500/15" : "border-white/10 hover:bg-white/5"}`}>
+              <strong className="block text-sm text-white">AI writes each email</strong>
+              <span className="mt-1 block text-xs text-slate-300">One researched message per lead. Your sign-off stays fixed.</span>
+            </button>
+            <button type="button" aria-pressed={!aiCompose} onClick={() => setAiCompose(false)}
+              className={`min-h-24 rounded-lg border p-4 text-left ${!aiCompose ? "border-indigo-400 bg-indigo-500/15" : "border-white/10 hover:bg-white/5"}`}>
+              <strong className="block text-sm text-white">Use my email script</strong>
+              <span className="mt-1 block text-xs text-slate-300">Write the subject and message yourself with optional lead variables.</span>
+            </button>
+          </div>}
+
+          {step === 3 && <>
           <div className="mt-3">
-            <label className="text-[12px] text-slate-400">Subject</label>
+            <label className="text-[12px] text-slate-400">{aiCompose ? "Campaign goal / subject direction" : "Subject"}</label>
             <input
               className={`${input} mt-1`}
               value={subject}
               onChange={(e) => setSubject(e.target.value)}
-              placeholder="Estimating for {{company_name}}"
+              placeholder={aiCompose ? "e.g. Introduce our estimating service" : "Estimating for {{company_name}}"}
             />
           </div>
 
           <div className="mt-3">
-            <label className="text-[12px] text-slate-400">Email script</label>
+            <label className="text-[12px] text-slate-400">{aiCompose ? "Your offer and instructions for AI" : "Email script"}</label>
             <textarea
               className={`${input} mt-1 h-32 resize-y`}
               value={body}
               onChange={(e) => setBody(e.target.value)}
-              placeholder={"Hi {{first_name}},\n\nSaw {{company_name}} in {{location}}…"}
+              placeholder={aiCompose ? "Describe your service, facts about your business and the reply you want." : "Hi {{first_name}},\n\nSaw {{company_name}} in {{location}}…"}
             />
-            <div className="mt-1.5 flex flex-wrap gap-1.5">
+            {!aiCompose && <><div className="mt-1.5 flex flex-wrap gap-1.5">
               {TEMPLATE_VARS.map((v) => (
                 <code
                   key={v}
@@ -1077,10 +1286,15 @@ function CampaignBuilder({
                 </span>
               </span>
             </label>
+            </>}
+            {aiCompose && <label className="mt-3 block text-[12px] text-slate-300">Text after Best regards,
+              <textarea className={`${input} mt-1 h-24 resize-y`} maxLength={2000} value={aiSignature} onChange={(e) => setAiSignature(e.target.value)} placeholder={"Your name\nCompany\nContact details"} />
+              <span className="mt-1 block text-[11.5px] text-slate-500">This exact text is added to every AI-written email in this campaign.</span>
+            </label>}
           </div>
 
           {/* Spam risk — live score + the mistakes + the one-click fix. */}
-          <div className="mt-3">
+          {!aiCompose && <div className="mt-3">
             <SpamPanel
               subject={subject}
               body={body}
@@ -1089,56 +1303,18 @@ function CampaignBuilder({
                 setBody(b);
               }}
             />
-          </div>
+          </div>}
 
-          {/* Spam check — send the draft to your own inbox before scheduling. */}
-          <div className="mt-3 rounded-lg border border-white/5 bg-white/[0.02] p-3.5">
-            <p className="text-[12px] font-semibold text-slate-300">
-              Inbox spam check (optional)
-            </p>
-            <p className="mt-1 text-[11.5px] text-slate-500">
-              Send this draft to your own email and see where it lands —
-              variables fill with a sample lead so you see the real email.
-              Nothing is created or counted.
-            </p>
-            <div className="mt-2.5 flex gap-2">
-              <input
-                type="email"
-                className={input}
-                value={testEmail}
-                onChange={(e) => {
-                  setTestEmail(e.target.value);
-                  setTestResult(null);
-                }}
-                placeholder="you@example.com"
-              />
-              <button
-                onClick={() => testSend.mutate()}
-                disabled={!canTest || testSend.isPending}
-                className="shrink-0 rounded-lg border border-white/10 px-4 text-[12.5px] font-semibold text-slate-200 hover:bg-white/[0.06] disabled:opacity-50"
-              >
-                {testSend.isPending ? "Sending…" : "Send test"}
-              </button>
-            </div>
-            {testResult && (
-              <p
-                className={`mt-2 text-[12px] ${
-                  testResult.ok ? "text-emerald-400" : "text-rose-400"
-                }`}
-              >
-                {testResult.text}
-              </p>
-            )}
-          </div>
+          </>}
 
           {/* Follow-up ladder (Phase E4) — stops automatically on a reply. */}
+          {step === 4 && (
           <div className="mt-4 rounded-lg border border-white/5 bg-white/[0.02] p-3.5">
             <p className="text-[12px] font-semibold text-slate-300">
               Follow-ups (optional)
             </p>
             <p className="mt-1 text-[11.5px] text-slate-500">
-              Each fires N days after the previous email. The ladder stops the
-              moment a lead replies (their CRM stage moves to “replied”).
+              {aiCompose ? "For each follow-up, enter its goal and brief. AI writes that email for every lead. Replies stop the ladder." : "Each fires after the chosen number of days. Replies stop the ladder."}
             </p>
             <div className="mt-3 space-y-3">
               <FollowupEditor
@@ -1159,27 +1335,41 @@ function CampaignBuilder({
                   input={input}
                 />
               )}
+              {fu1On && fu2On && (
+                <FollowupEditor
+                  label="Follow-up 3" on={fu3On} setOn={setFu3On}
+                  days={fu3Days} setDays={setFu3Days}
+                  subject={fu3Subject} setSubject={setFu3Subject}
+                  body={fu3Body} setBody={setFu3Body} input={input}
+                />
+              )}
             </div>
           </div>
+          )}
 
+          {step === 5 && <>
           <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
-              <label className="text-[12px] text-slate-400">Leads: folder</label>
+              <label className="text-[12px] text-slate-400">Choose leads from</label>
               <select
                 className={`${input} mt-1`}
                 value={folder}
                 onChange={(e) => setFolder(e.target.value)}
               >
-                <option value="">All leads (unfiled + folders)</option>
+                <option value="*">All unused leads</option>
                 {(folders.data?.folders || []).map((f) => (
                   <option key={f.name} value={f.name}>
-                    {f.name} ({f.count})
+                    Folder: {f.name} ({f.count} total)
                   </option>
                 ))}
               </select>
             </div>
             <div>
-              <label className="text-[12px] text-slate-400">Recommendation</label>
+              <label className="text-[12px] text-slate-400">How many emails?</label>
+              <input type="number" min={1} max={500} step={1} className={`${input} mt-1`} value={quantity} onChange={(e) => setQuantity(Number(e.target.value))} />
+            </div>
+            <div>
+              <label className="text-[12px] text-slate-400">Lead quality</label>
               <select
                 className={`${input} mt-1`}
                 value={recommendation}
@@ -1193,17 +1383,20 @@ function CampaignBuilder({
           </div>
 
           <div className="mt-2 rounded-lg bg-white/[0.03] border border-white/5 px-3.5 py-2.5 text-[12.5px] text-slate-400">
-            {pool.isLoading ? (
-              "Counting leads…"
+            {quantity < 1 || quantity > 500 || !Number.isInteger(quantity) ? (
+              "Choose a whole number from 1 to 500."
+            ) : pool.isFetching ? (
+              "Checking unused leads…"
+            ) : pool.isError ? (
+              "Could not check unused leads. Try again."
             ) : (
               <>
-                <span className="text-slate-200 font-semibold">{poolLeads.length}</span>{" "}
-                lead(s) will be queued (first 500 max)
-                {poolLeads.length > 0 && (
+                <span className="text-slate-200 font-semibold">{poolEmails.length} of {quantity}</span>{" "}
+                unused leads ready to reserve for this campaign.
+                {poolEmails.length < quantity && <span className="block text-amber-300">Choose fewer emails or another folder/filter.</span>}
+                {poolEmails.length > 0 && (
                   <span className="text-slate-500">
-                    {" "}
-                    — e.g. {poolLeads.slice(0, 3).map((l) => l.email).join(", ")}
-                    {poolLeads.length > 3 && "…"}
+                    {" "}Example: {poolEmails.slice(0, 3).join(", ")}{poolEmails.length > 3 && "…"}
                   </span>
                 )}
               </>
@@ -1230,11 +1423,62 @@ function CampaignBuilder({
                 value={dailyLimit}
                 onChange={(e) => setDailyLimit(Number(e.target.value) || 30)}
               />
-              <p className="mt-1.5 text-[11.5px] text-slate-500">
-                Random 3–7 min gap between emails (fixed, account-safe).
-              </p>
             </div>
           </div>
+          <DelayFields min={delayMin} max={delayMax} setMin={setDelayMin} setMax={setDelayMax} />
+          </>}
+
+          {step === 6 && <div className="mt-4 rounded-lg border border-white/10 bg-white/[0.03] p-4 text-xs text-slate-300">
+            <h3 className="text-sm font-semibold text-white">Review before scheduling</h3>
+            <p className="mt-2">Campaign: <strong className="text-white">{name || "—"}</strong></p>
+            <p className="mt-1">Mode: {aiCompose ? "AI writes each email" : "Your email script"}</p>
+            <p className="mt-1">Recipients: {quantity} from {folder === "*" ? "all unused leads" : folder}</p>
+            <p className="mt-1">Start: {startAt ? startAt.replace("T", " ") : "—"} · {dailyLimit} per account daily</p>
+            <p className="mt-1">Follow-ups: {[fu1On, fu2On, fu3On].filter(Boolean).length}</p>
+            {!audienceValid && <p className="mt-2 text-amber-300">Review Audience & timing: enough unused leads and valid sending limits are required.</p>}
+          </div>}
+
+          {step === 6 && <>
+          {/* Spam check — send the draft to your own inbox before scheduling. */}
+          {!aiCompose && <div className="mt-3 rounded-lg border border-white/5 bg-white/[0.02] p-3.5">
+            <p className="text-[12px] font-semibold text-slate-300">
+              Inbox spam check (optional)
+            </p>
+            <p className="mt-1 text-[11.5px] text-slate-500">
+              Send this draft to your own email and see where it lands —
+              variables fill with a sample lead so you see the real email.
+              Nothing is created or counted.
+            </p>
+            <div className="mt-2.5 flex flex-col gap-2 sm:flex-row">
+              <input
+                type="email"
+                className={input}
+                value={testEmail}
+                onChange={(e) => {
+                  setTestEmail(e.target.value);
+                  setTestResult(null);
+                }}
+                placeholder="you@example.com"
+              />
+              <button
+                onClick={() => testSend.mutate()}
+                disabled={!canTest || testSend.isPending}
+                className="min-h-10 w-full shrink-0 rounded-lg border border-white/10 px-4 text-[12.5px] font-semibold text-slate-200 hover:bg-white/[0.06] disabled:opacity-50 sm:w-auto"
+              >
+                {testSend.isPending ? "Sending…" : "Send test"}
+              </button>
+            </div>
+            {testResult && (
+              <p
+                className={`mt-2 text-[12px] ${
+                  testResult.ok ? "text-emerald-400" : "text-rose-400"
+                }`}
+              >
+                {testResult.text}
+              </p>
+            )}
+          </div>}
+          </>}
 
           {error && (
             <p className="mt-3 rounded-lg border border-rose-500/25 bg-rose-500/10 px-3.5 py-2.5 text-[12.5px] text-rose-300">
@@ -1242,20 +1486,26 @@ function CampaignBuilder({
             </p>
           )}
 
-          <div className="mt-4 flex justify-end gap-2">
+          <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:justify-end">
             <button
               onClick={onCancel}
-              className="rounded-lg border border-white/5 px-4 py-2 text-[13px] text-slate-400 hover:bg-white/[0.04]"
+              className="min-h-10 w-full rounded-lg border border-white/5 px-4 py-2 text-[13px] text-slate-400 hover:bg-white/[0.04] sm:w-auto"
             >
               Cancel
             </button>
+            {step > 1 && <button type="button" onClick={() => { setStep((value) => value - 1); setError(""); }}
+              className="min-h-10 w-full rounded-lg border border-white/10 px-4 py-2 text-[13px] text-slate-200 hover:bg-white/5 sm:w-auto">Back</button>}
+            {step < 6 && <button type="button" onClick={() => { setStep((value) => value + 1); setError(""); }} disabled={!canContinue}
+              className="min-h-10 w-full rounded-lg bg-indigo-600 px-4 py-2 text-[13px] font-semibold text-white hover:bg-indigo-500 disabled:opacity-50 sm:w-auto">Continue</button>}
+            {step === 6 && (
             <button
               onClick={() => create.mutate()}
               disabled={!canCreate || create.isPending}
-              className="rounded-lg bg-indigo-600 px-4 py-2 text-[13px] font-semibold text-white hover:bg-indigo-500 disabled:opacity-50"
+              className="min-h-10 w-full rounded-lg bg-indigo-600 px-4 py-2 text-[13px] font-semibold text-white hover:bg-indigo-500 disabled:opacity-50 sm:w-auto"
             >
               {create.isPending ? "Scheduling…" : "Schedule campaign"}
             </button>
+            )}
           </div>
         </>
       )}

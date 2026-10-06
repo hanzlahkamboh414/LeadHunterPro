@@ -23,9 +23,13 @@ import type {
   CrmInput,
   CrmState,
   Campaign,
+  CampaignActivityRow,
+  CampaignHistoryPage,
+  CampaignRecipientTimeline,
   CampaignCreateInput,
   CampaignFollowup,
   CampaignSend,
+  CampaignReplyContent,
   CampaignUpdateInput,
   SpamCheckResult,
   SpamImproveResult,
@@ -54,6 +58,8 @@ import type {
   WrongPhoneArchiveRow,
   SignupCategory,
 } from "../types";
+
+export interface CampaignBounce { email: string; account_id: number; bounced_at: string; reason: string; }
 
 const BASE = import.meta.env?.VITE_API_BASE || "/api/v1";
 
@@ -855,8 +861,35 @@ export const api = {
     return request<{ campaigns: Campaign[] }>("/campaigns").then((r) => r.campaigns);
   },
 
-  getCampaign(id: number): Promise<Campaign & { sends: CampaignSend[] }> {
+  getCampaign(id: number): Promise<Campaign & { sends: CampaignSend[]; followups: CampaignFollowup[] }> {
     return request(`/campaigns/${id}`);
+  },
+  campaignBounces(id: number): Promise<CampaignBounce[]> { return request(`/campaigns/${id}/bounces`); },
+  campaignAvailableLeads(input: { count: number; folder: string; recommendation: string }): Promise<{ emails: string[]; count: number; requested: number }> {
+    const params = new URLSearchParams({
+      count: String(input.count), folder: input.folder, recommendation: input.recommendation,
+    });
+    return request(`/campaigns/available-leads?${params.toString()}`);
+  },
+  campaignActivity(offset = 0, limit = 100): Promise<{ rows: CampaignActivityRow[] }> {
+    return request(`/campaigns/activity?offset=${offset}&limit=${limit}`);
+  },
+  exploreCampaignActivity(input: {
+    view: "sent" | "replied" | "bounced" | "followup";
+    from_date?: string; to_date?: string; account_id?: number;
+    campaign_id?: number; email?: string; offset?: number; limit?: number;
+  }): Promise<CampaignHistoryPage> {
+    const params = new URLSearchParams();
+    Object.entries(input).forEach(([key, value]) => {
+      if (value !== undefined && value !== "" && value !== 0) params.set(key, String(value));
+    });
+    return request(`/campaigns/activity/explore?${params.toString()}`);
+  },
+  campaignRecipientTimeline(sendId: number): Promise<CampaignRecipientTimeline> {
+    return request(`/campaigns/activity/${sendId}/timeline`);
+  },
+  campaignReplyContent(sendId: number): Promise<CampaignReplyContent> {
+    return request(`/campaigns/activity/${sendId}/reply`);
   },
 
   /** Create a scheduled campaign. Leads already emailed by an earlier

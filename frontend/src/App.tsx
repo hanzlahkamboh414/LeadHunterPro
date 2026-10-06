@@ -6,6 +6,7 @@ import Execute from "./screens/Execute";
 import Leads from "./screens/Leads";
 import Contacts from "./screens/Contacts";
 import Campaigns from "./screens/Campaigns";
+import EmailHistory from "./screens/EmailHistory";
 import EmailInbox from "./screens/EmailInbox";
 import LeadDetail from "./screens/LeadDetail";
 import History from "./screens/History";
@@ -64,6 +65,7 @@ export default function App() {
                 <Route path="/leads" element={<Leads />} />
                 <Route path="/contacts" element={<Contacts />} />
                 <Route path="/campaigns" element={<Campaigns />} />
+                <Route path="/email-history" element={<EmailHistory />} />
                 {/* Phase E7: the connected Gmail's mail inside the app. */}
                 <Route path="/email" element={<EmailInbox />} />
                 <Route path="/leads/:email" element={<LeadDetail />} />
@@ -123,6 +125,7 @@ export default function App() {
             {emailsVisible && <Route path="/leads" element={<Leads />} />}
             {emailsVisible && <Route path="/contacts" element={<Contacts />} />}
             {emailsVisible && <Route path="/campaigns" element={<Campaigns />} />}
+            {emailsVisible && <Route path="/email-history" element={<EmailHistory />} />}
             {/* Phase E7: the connected Gmail's mail inside the app. */}
             {emailsVisible && <Route path="/email" element={<EmailInbox />} />}
             {emailsVisible && <Route path="/leads/:email" element={<LeadDetail />} />}

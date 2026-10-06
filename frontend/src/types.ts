@@ -298,6 +298,10 @@ export interface Campaign {
   delay_max_s: number;
   /** AI opening line on first emails, from verified evidence only (E5). */
   ai_personalize: boolean;
+  /** AI writes each subject and body from the verified lead dossier. */
+  ai_compose: boolean;
+  /** Fixed text appended after "Best regards," for this campaign. */
+  ai_signature: string;
   created_at: string;
   updated_at: string;
   pending: number;
@@ -343,11 +347,71 @@ export interface CampaignSend {
   replied_at: string;
 }
 
-/** PUT /campaigns/{id} body — edit the pitch of a started campaign. */
+/** PUT /campaigns/{id} body — edit future campaign sends. */
 export interface CampaignUpdateInput {
   name: string;
   subject: string;
   body: string;
+  account_id?: number;
+  account_ids?: number[];
+  emails?: string[];
+  start_at?: string;
+  daily_limit?: number;
+  delay_min_s?: number;
+  delay_max_s?: number;
+  followups?: FollowupInput[];
+  ai_personalize?: boolean;
+  ai_compose?: boolean;
+  ai_signature?: string;
+}
+
+export interface CampaignActivityRow {
+  send_id: number;
+  campaign_id: number;
+  campaign_name: string;
+  email: string;
+  step: number;
+  sent_at: string;
+  subject: string;
+  account_id: number;
+  account_email: string;
+  replied_at: string;
+  reply_subject: string;
+}
+
+export interface CampaignHistoryRow extends CampaignActivityRow {
+  event_at: string;
+  reason: string;
+}
+
+export interface CampaignHistoryPage {
+  rows: CampaignHistoryRow[];
+  total: number;
+  first_date: string;
+  by_date: { date: string; count: number }[];
+  by_account: { account_id: number; account_email: string; count: number }[];
+}
+
+export interface CampaignRecipientTimeline {
+  campaign_id: number;
+  campaign_name: string;
+  email: string;
+  sends: {
+    send_id: number; step: number; state: string; subject: string;
+    sent_at: string; not_before: string; error: string;
+    account_id: number; account_email: string;
+  }[];
+  reply: { received_at: string; subject: string } | null;
+  bounce: { bounced_at: string; reason: string } | null;
+}
+
+export interface CampaignReplyContent {
+  email: string;
+  subject: string;
+  date: string;
+  text: string;
+  account_email: string;
+  found: boolean;
 }
 
 /** One risky thing the spam analyzer found, in plain words. */
@@ -398,7 +462,10 @@ export interface CampaignCreateInput {
   account_ids?: number[];
   subject: string;
   body: string;
-  emails: string[];
+  emails?: string[];
+  audience_count?: number;
+  audience_folder?: string;
+  audience_recommendation?: string;
   /** ISO datetime with offset — the 9:00 AM start, in the user's timezone. */
   start_at: string;
   daily_limit?: number;
@@ -408,6 +475,8 @@ export interface CampaignCreateInput {
   followups?: FollowupInput[];
   /** Prepend an AI opening line (verified evidence only) to first emails. */
   ai_personalize?: boolean;
+  ai_compose?: boolean;
+  ai_signature?: string;
 }
 
 /** A connected sending account (Phase E2) — Gmail via Google OAuth. This is

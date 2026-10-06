@@ -13,6 +13,7 @@ import {
   Phone,
   Briefcase,
   Mail,
+  MailCheck,
   Menu,
   X,
   ArrowUpRight,
@@ -33,6 +34,7 @@ const NAV = [
   { to: "/leads", label: "Companies", icon: Building2, end: false, adminOnly: false },
   { to: "/contacts", label: "Contacts", icon: Users, end: false, adminOnly: false },
   { to: "/campaigns", label: "Campaigns", icon: Send, end: false, adminOnly: false },
+  { to: "/email-history", label: "Email History", icon: MailCheck, end: false, adminOnly: false },
   // Phase E7: the connected Gmail's mail inside the app — real backend (the
   // /gmail API), so it belongs in the nav (CLAUDE.md §1 satisfied).
   { to: "/email", label: "Email", icon: Mail, end: false, adminOnly: false },

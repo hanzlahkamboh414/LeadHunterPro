@@ -39,7 +39,16 @@ export default function Dashboard() {
     // folder="*" = every place (inbox + all folders): foldering a lead is a
     // MOVE out of the default Companies inbox, but the Dashboard overview must
     // still count the whole researched universe.
-    queryFn: () => api.pageLeads({ folder: "*", limit: 1000 }),
+    queryFn: async () => {
+      const first = await api.pageLeads({ folder: "*", limit: 1000, offset: 0 });
+      const rows = [...first.rows];
+      while (rows.length < first.total) {
+        const page = await api.pageLeads({ folder: "*", limit: 1000, offset: rows.length });
+        if (page.rows.length === 0) break;
+        rows.push(...page.rows);
+      }
+      return { rows, total: first.total };
+    },
   });
   const jobsQ = useQuery({
     queryKey: ["dash-jobs"],

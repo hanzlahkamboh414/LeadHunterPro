@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
-from app.lead_research.person_research_ai import PersonResearcherAI, _parse_ai_json
+from app.lead_research.person_research_ai import (
+    PersonResearcherAI, _name_from_email_search, _parse_ai_json,
+)
 from app.person_research.models import AttributionVerdict, PersonCandidate, ResearchEvidence, ResearchResult
 from tests.lead_research.conftest import make_fake_ai, make_fake_fetch, make_fake_search
 
@@ -43,6 +45,41 @@ def _good_ai_person_response():
             {"claim": "Listed on team page", "source_url": "https://acme.com/team", "source_type": "website", "confidence": "verified"},
         ],
     }
+
+
+def test_indexed_email_name_pair_survives_ai_rate_limit():
+    """A sourced full name is usable without guessing from `nsmith`."""
+    source = "https://county.example.org/project/contacts.pdf"
+    results = [{
+        "url": source,
+        "title": "Project contact sheet",
+        "snippet": "Kevin McCarry kmccarry@lydig.com Nick Smith "
+                   "nsmith@lydig.com project engineer",
+    }]
+    calls = []
+    researcher = PersonResearcherAI(
+        search=lambda q: results if q == '"nsmith@lydig.com"' else [],
+        ai_ask=lambda p: calls.append(p),
+        fetch_page=make_fake_fetch(),
+    )
+    person = researcher.research("nsmith@lydig.com", "lydig.com", company_name="Lydig")
+    assert person.name == "Nick Smith"
+    assert person.bound is True
+    assert person.evidence[0].source_url == source
+    assert calls == []
+
+
+def test_indexed_name_lookup_rejects_guess_and_ambiguity():
+    assert _name_from_email_search("nsmith@lydig.com", [{
+        "url": "https://lydig.example/people/nick-smith",
+        "title": "Nick Smith | Lydig",
+        "snippet": "Project manager",
+    }]) is None
+    assert _name_from_email_search("nsmith@lydig.com", [{
+        "url": "https://county.example.org/contacts.pdf",
+        "title": "Contacts",
+        "snippet": "Nick Smith nsmith@lydig.com and Ned Smith nsmith@lydig.com",
+    }]) is None
 
 
 # ---------------------------------------------------------------------------

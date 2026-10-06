@@ -178,6 +178,56 @@ def _format_search_results(results: list[dict[str, str]], max_results: int = 8) 
     return "\n".join(lines)
 
 
+def _name_from_email_search(email: str, results: list[dict[str, str]]) -> PersonFindings | None:
+    """Use an indexed page only when it explicitly pairs this inbox with a name.
+
+    A local part such as ``nsmith`` is a clue, never a full name. Require the
+    exact address and a matching full name in the *same* result, and decline
+    ambiguous results rather than picking one of several matching people.
+    This path still works when the research LLM is rate limited.
+    """
+    from app.person_research.models import LocalPartMatchLevel
+    from app.person_research.scoring import LocalPartMatcher
+
+    address = (email or "").strip().lower()
+    if "@" not in address:
+        return None
+    local = address.split("@", 1)[0]
+    matcher = LocalPartMatcher()
+    matches: dict[str, str] = {}
+    # Tight name grammar prevents random uppercase words on an indexed page
+    # from becoming a recipient. Local-part matching is the second guard.
+    names = re.compile(r"(?=(\b[A-Z][a-z]{1,24}\s+[A-Z][a-z]{1,30}\b))")
+    for result in results:
+        url = (result.get("url") or "").strip()
+        snippet = (result.get("snippet") or "")
+        title = (result.get("title") or "")
+        if not url or address not in (title + " " + snippet).lower():
+            continue
+        for candidate in names.findall(title + " " + snippet):
+            if matcher.level(local, candidate) in {
+                LocalPartMatchLevel.exact,
+                LocalPartMatchLevel.first_last,
+                LocalPartMatchLevel.initial_last,
+            }:
+                matches.setdefault(candidate.casefold(), url)
+    if len(matches) != 1:
+        return None
+    name_key, url = next(iter(matches.items()))
+    name = " ".join(part.capitalize() for part in name_key.split())
+    return PersonFindings(
+        name=name,
+        bound=True,
+        evidence=[AIEvidence(
+            claim=f"{name} uses the email {email}",
+            source_url=url,
+            source_type="indexed_document",
+            confidence="verified",
+            source_note="Name and exact email appear together in indexed result",
+        )],
+    )
+
+
 def _format_company_facts(facts: list[Any], max_facts: int = 15) -> str:
     """Format verified company facts for prompt injection.
 
@@ -381,6 +431,10 @@ class PersonResearcherAI:
             search_fn, email, refined_domain, company_name,
             query_planner=query_planner,
         )
+
+        indexed_person = _name_from_email_search(email, search_results)
+        if indexed_person is not None:
+            return indexed_person
 
         fetch_fn = self._get_fetch_page()
         site_content = self._gather_site(fetch_fn, refined_domain)

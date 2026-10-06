@@ -689,6 +689,8 @@ export interface AdminLaneStatus {
   next_switch_at: string;
   one_time_done: boolean;
   harvester_enabled: boolean;
+  control_mode?: "off" | "on" | "schedule";
+  worker_online?: boolean;
   interval_s: number;
   notes: string[];
 }
@@ -725,11 +727,14 @@ export interface AdminUser {
   username: string;
   email: string;
   is_admin: boolean;
+  admin_permissions?: string[];
   created_at: string;
   /** Display name (topbar); empty -> UI falls back to username. */
   name: string;
   phone_daily_limit: number;
   phone_daily_used: number;
+  import_daily_limit?: number | null;
+  import_daily_used?: number;
 }
 
 export interface AdminUsers {

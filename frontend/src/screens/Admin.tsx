@@ -61,38 +61,51 @@ const TABS: { id: Tab; label: string; icon: typeof ShieldCheck }[] = [
 
 export default function Admin({ initialTab = "overview" }: { initialTab?: Tab }) {
   const qc = useQueryClient();
+  const { user: activeUser } = useAuth();
+  const isPrimaryAdmin = activeUser?.username === "admin4269" && activeUser.is_admin;
+  const allowedTabs = TABS.filter(({ id }) => isPrimaryAdmin || activeUser?.admin_permissions.includes(id));
   const [tab, setTab] = useState<Tab>(initialTab);
+  useEffect(() => {
+    if (allowedTabs.length && !allowedTabs.some(({ id }) => id === tab)) setTab(allowedTabs[0].id);
+  }, [activeUser?.admin_permissions, isPrimaryAdmin, tab]);
 
   const dashboard = useQuery({
     queryKey: ["admin-dashboard"],
     queryFn: () => api.adminDashboard(),
+    enabled: allowedTabs.some(({ id }) => id === "overview"),
     refetchInterval: 10_000,
   });
   const keys = useQuery({
     queryKey: ["admin-keys"],
     queryFn: () => api.adminKeys(),
+    enabled: allowedTabs.some(({ id }) => id === "keys"),
     refetchInterval: 30_000,
   });
   const deleted = useQuery({
     queryKey: ["admin-deleted"],
     queryFn: () => api.adminDeleted(),
+    enabled: allowedTabs.some(({ id }) => id === "audit"),
   });
   const pendingCache = useQuery({
     queryKey: ["admin-pending-cache"],
     queryFn: () => api.adminPendingCache(),
+    enabled: allowedTabs.some(({ id }) => id === "caches"),
   });
   const searchCache = useQuery({
     queryKey: ["admin-search-cache"],
     queryFn: () => api.adminSearchCache(),
+    enabled: allowedTabs.some(({ id }) => id === "caches"),
   });
   const visibility = useQuery({
     queryKey: ["admin-visibility"],
     queryFn: () => api.adminVisibility(),
+    enabled: allowedTabs.some(({ id }) => id === "data"),
     refetchInterval: 10_000,
   });
   const users = useQuery({
     queryKey: ["admin-users"],
     queryFn: () => api.adminUsers(),
+    enabled: allowedTabs.some(({ id }) => id === "users" || id === "data"),
   });
 
   const invalidateVisibility = () => {
@@ -133,13 +146,12 @@ export default function Admin({ initialTab = "overview" }: { initialTab?: Tab })
   const allUsers = users.data?.users ?? [];
 
   const refreshAll = () => {
-    dashboard.refetch();
-    keys.refetch();
-    deleted.refetch();
-    pendingCache.refetch();
-    searchCache.refetch();
-    visibility.refetch();
-    users.refetch();
+    if (allowedTabs.some(({ id }) => id === "overview")) dashboard.refetch();
+    if (allowedTabs.some(({ id }) => id === "keys")) keys.refetch();
+    if (allowedTabs.some(({ id }) => id === "audit")) deleted.refetch();
+    if (allowedTabs.some(({ id }) => id === "caches")) { pendingCache.refetch(); searchCache.refetch(); }
+    if (allowedTabs.some(({ id }) => id === "data")) visibility.refetch();
+    if (allowedTabs.some(({ id }) => id === "users" || id === "data")) users.refetch();
     qc.invalidateQueries({ queryKey: ["admin-activity"] });
   };
 
@@ -166,7 +178,7 @@ export default function Admin({ initialTab = "overview" }: { initialTab?: Tab })
 
       {/* Tab bar */}
       <div className="mt-5 flex flex-wrap gap-1.5 border-b border-white/5 pb-0">
-        {TABS.map(({ id, label, icon: Icon }) => (
+        {allowedTabs.map(({ id, label, icon: Icon }) => (
           <button
             key={id}
             onClick={() => setTab(id)}
@@ -180,11 +192,12 @@ export default function Admin({ initialTab = "overview" }: { initialTab?: Tab })
           </button>
         ))}
       </div>
+      {allowedTabs.length === 0 && <p className="mt-6 text-sm text-slate-400">Loading admin access…</p>}
 
       {/* -------------------------------------------------------------- */}
       {/* OVERVIEW */}
       {/* -------------------------------------------------------------- */}
-      {tab === "overview" && (
+      {tab === "overview" && allowedTabs.some(({ id }) => id === tab) && (
         <>
           {dashboard.isLoading && (
             <div className="flex items-center justify-center gap-2 py-16 text-sm text-slate-500">
@@ -266,14 +279,14 @@ export default function Admin({ initialTab = "overview" }: { initialTab?: Tab })
       {/* -------------------------------------------------------------- */}
       {/* USERS & ACTIVITY */}
       {/* -------------------------------------------------------------- */}
-      {tab === "users" && (
+      {tab === "users" && allowedTabs.some(({ id }) => id === tab) && (
         <UsersTab users={allUsers} usersLoading={users.isLoading} usersError={users.error as Error | null} />
       )}
 
       {/* -------------------------------------------------------------- */}
       {/* DATA CONTROL */}
       {/* -------------------------------------------------------------- */}
-      {tab === "data" && (
+      {tab === "data" && allowedTabs.some(({ id }) => id === tab) && (
         <>
           <section className={`${cardClass} mt-6`}>
             <div className="flex items-center gap-2">
@@ -424,12 +437,12 @@ export default function Admin({ initialTab = "overview" }: { initialTab?: Tab })
       {/* -------------------------------------------------------------- */}
       {/* AI LANES                                                       */}
       {/* -------------------------------------------------------------- */}
-      {tab === "lanes" && <LaneSchedulePanel />}
+      {tab === "lanes" && allowedTabs.some(({ id }) => id === tab) && <LaneSchedulePanel />}
 
       {/* -------------------------------------------------------------- */}
       {/* API KEYS                                                       */}
       {/* -------------------------------------------------------------- */}
-      {tab === "keys" && (
+      {tab === "keys" && allowedTabs.some(({ id }) => id === tab) && (
         <section className={`${cardClass} mt-6`}>
           <div className="flex items-center gap-2">
             <KeyRound className="h-4 w-4 text-amber-300" />
@@ -498,7 +511,7 @@ export default function Admin({ initialTab = "overview" }: { initialTab?: Tab })
       {/* -------------------------------------------------------------- */}
       {/* CACHES */}
       {/* -------------------------------------------------------------- */}
-      {tab === "caches" && (
+      {tab === "caches" && allowedTabs.some(({ id }) => id === tab) && (
         <>
           <section className={`${cardClass} mt-6`}>
             <h2 className="text-[16px] font-semibold text-white">Discovery cache — pending leads</h2>
@@ -607,7 +620,7 @@ export default function Admin({ initialTab = "overview" }: { initialTab?: Tab })
       {/* -------------------------------------------------------------- */}
       {/* AUDIT LOG — the user delete-feed + the admin's answers */}
       {/* -------------------------------------------------------------- */}
-      {tab === "audit" && (
+      {tab === "audit" && allowedTabs.some(({ id }) => id === tab) && (
         <AuditTab
           rows={deleted.data?.deleted ?? []}
           total={deleted.data?.total ?? 0}
@@ -760,6 +773,7 @@ function UsersTab({
   const qc = useQueryClient();
   const { user: activeUser, tenants: ownTenants } = useAuth();
   const isPlatformAdmin = Boolean(activeUser?.is_platform_admin);
+  const isPrimaryAdmin = activeUser?.username === "admin4269" && activeUser.is_admin;
   const [expanded, setExpanded] = useState<string | null>(null);
   const [activityFilter, setActivityFilter] = useState<string>("");
   const [tenantName, setTenantName] = useState("");
@@ -767,8 +781,8 @@ function UsersTab({
   const [selectedPhoneUserId, setSelectedPhoneUserId] = useState("");
   const [phoneLimitDraft, setPhoneLimitDraft] = useState("");
   const [phoneLimitSaved, setPhoneLimitSaved] = useState("");
-  const selectedPhoneUser = users.find((u) => u.id === selectedPhoneUserId && !u.is_admin)
-    ?? users.find((u) => !u.is_admin);
+  const selectedPhoneUser = users.find((u) => u.id === selectedPhoneUserId && u.username !== "admin4269" && u.username !== "shared")
+    ?? users.find((u) => u.username !== "admin4269" && u.username !== "shared");
   const validPhoneLimit = /^\d+$/.test(phoneLimitDraft) && Number(phoneLimitDraft) <= 5000;
   useEffect(() => {
     if (selectedPhoneUser) setPhoneLimitDraft(String(selectedPhoneUser.phone_daily_limit));
@@ -817,6 +831,16 @@ function UsersTab({
         users.find((u) => u.id === result.user_id)?.username ?? "user"
       }.`);
     },
+  });
+  const setImportLimit = useMutation({
+    mutationFn: ({ userId, limit }: { userId: string; limit: number }) =>
+      api.adminSetImportLimit(userId, limit),
+    onSuccess: invalidateUsers,
+  });
+  const setPermissions = useMutation({
+    mutationFn: ({ userId, permissions }: { userId: string; permissions: string[] }) =>
+      api.adminSetUserPermissions(userId, permissions),
+    onSuccess: invalidateUsers,
   });
 
   // Login-auth ON/OFF — the open-site switch. OFF means: no login page,
@@ -1163,7 +1187,7 @@ function UsersTab({
                 onChange={(event) => { setSelectedPhoneUserId(event.target.value); setPhoneLimitSaved(""); }}
                 className="min-h-11 rounded-lg border border-white/10 bg-[#151923] px-3 text-[13px] text-slate-100"
               >
-                {users.filter((u) => !u.is_admin).map((u) => (
+                {users.filter((u) => u.username !== "admin4269" && u.username !== "shared").map((u) => (
                   <option key={u.id} value={u.id}>{u.name || u.username} ({u.username})</option>
                 ))}
               </select>
@@ -1228,7 +1252,7 @@ function UsersTab({
         </div>
         <p className="mt-1 text-[12px] text-slate-500">
           Click a row to see that user's data (folders, dates, activity). Reset password or
-          delete accounts here — a deleted account's data stays on the server (admin-visible only).
+          delete accounts here. The main admin can also grant individual admin controls and set research limits.
         </p>
 
         {usersError && (
@@ -1277,6 +1301,11 @@ function UsersTab({
                   deletePending={deleteUser.isPending}
                   onSetPhoneLimit={(limit) => setPhoneLimit.mutate({ userId: u.id, limit })}
                   phoneLimitPending={setPhoneLimit.isPending}
+                  isPrimaryAdmin={Boolean(isPrimaryAdmin)}
+                  onSetImportLimit={(limit) => setImportLimit.mutate({ userId: u.id, limit })}
+                  importLimitPending={setImportLimit.isPending}
+                  onSetPermissions={(permissions) => setPermissions.mutate({ userId: u.id, permissions })}
+                  permissionsPending={setPermissions.isPending}
                 />
               ))}
               {users.length === 0 && !usersLoading && (
@@ -1290,6 +1319,8 @@ function UsersTab({
             Password reset for “{resetPassword.data.username}”.
           </p>
         )}
+        {setPermissions.isError && <p role="alert" className="mt-3 text-[12px] text-rose-300">{(setPermissions.error as Error).message}</p>}
+        {setImportLimit.isError && <p role="alert" className="mt-3 text-[12px] text-rose-300">{(setImportLimit.error as Error).message}</p>}
       </section>
 
       {/* Activity log */}
@@ -1452,6 +1483,11 @@ function UserRow({
   deletePending,
   onSetPhoneLimit,
   phoneLimitPending,
+  isPrimaryAdmin,
+  onSetImportLimit,
+  importLimitPending,
+  onSetPermissions,
+  permissionsPending,
 }: {
   user: AdminUser;
   expanded: boolean;
@@ -1464,9 +1500,18 @@ function UserRow({
   deletePending: boolean;
   onSetPhoneLimit: (limit: number) => void;
   phoneLimitPending: boolean;
+  isPrimaryAdmin: boolean;
+  onSetImportLimit: (limit: number) => void;
+  importLimitPending: boolean;
+  onSetPermissions: (permissions: string[]) => void;
+  permissionsPending: boolean;
 }) {
   const [phoneLimit, setPhoneLimit] = useState(user.phone_daily_limit);
+  const [importLimit, setImportLimit] = useState(user.import_daily_limit ?? 100);
+  const [permissions, setPermissions] = useState<string[]>(user.admin_permissions ?? []);
   useEffect(() => { setPhoneLimit(user.phone_daily_limit); }, [user.phone_daily_limit]);
+  useEffect(() => { setImportLimit(user.import_daily_limit ?? 100); }, [user.import_daily_limit]);
+  useEffect(() => { setPermissions(user.admin_permissions ?? []); }, [user.admin_permissions]);
   return (
     <>
       <tr className={`border-t border-white/5 ${expanded ? "bg-white/[0.02]" : "hover:bg-white/[0.02]"}`}>
@@ -1512,7 +1557,7 @@ function UserRow({
       {expanded && (
         <tr className="border-t border-white/5 bg-black/20">
           <td colSpan={5} className="px-4 py-3">
-            {!user.is_admin && <div className="flex flex-wrap items-center gap-2 mb-3 text-[12px] text-slate-300">
+            {user.username !== "admin4269" && user.username !== "shared" && <div className="flex flex-wrap items-center gap-2 mb-3 text-[12px] text-slate-300">
               <label htmlFor={`phone-limit-${user.id}`}>Phone numbers per day (UTC)</label>
               <input id={`phone-limit-${user.id}`} type="number" min={0} max={5000}
                 value={phoneLimit} onChange={(e) => setPhoneLimit(Number(e.target.value))}
@@ -1521,6 +1566,33 @@ function UserRow({
                 onClick={() => onSetPhoneLimit(phoneLimit)}
                 className="rounded-md bg-indigo-500/20 px-2.5 py-1 text-indigo-200 disabled:opacity-50">Save limit</button>
               <span className="text-slate-500">{user.phone_daily_used} used today</span>
+            </div>}
+            {isPrimaryAdmin && user.username !== "admin4269" && user.username !== "shared" && <div className="mb-4 rounded-lg border border-white/10 bg-white/[0.03] p-3">
+              <p className="mb-2 text-[13px] font-medium text-slate-200">Admin access</p>
+              <div className="flex flex-wrap gap-x-4 gap-y-2">
+                {TABS.map(({ id, label }) => <label key={id} className="inline-flex items-center gap-1.5 text-[12px] text-slate-300">
+                  <input type="checkbox" checked={permissions.includes(id)} onChange={() => setPermissions((current) => current.includes(id) ? current.filter((value) => value !== id) : [...current, id])} className="accent-teal-500" />
+                  {label}
+                </label>)}
+              </div>
+              <div className="mt-3 flex flex-wrap items-center gap-3">
+                <button type="button" disabled={permissionsPending || JSON.stringify([...permissions].sort()) === JSON.stringify([...(user.admin_permissions ?? [])].sort())}
+                  onClick={() => onSetPermissions(permissions)}
+                  className="rounded-md bg-teal-700 px-3 py-1.5 text-[12px] font-semibold text-white hover:bg-teal-600 disabled:opacity-50">
+                  {permissionsPending ? "Saving…" : "Save admin access"}
+                </button>
+                <span className="text-[11px] text-slate-400">Uncheck every control to remove admin access.</span>
+              </div>
+            </div>}
+            {isPrimaryAdmin && user.username !== "admin4269" && user.username !== "shared" && <div className="mb-3 flex flex-wrap items-center gap-2 text-[12px] text-slate-300">
+              <label htmlFor={`import-limit-${user.id}`}>Manual research per day</label>
+              <input id={`import-limit-${user.id}`} type="number" min={0} max={1000000} value={importLimit}
+                onChange={(event) => setImportLimit(Number(event.target.value))}
+                className="w-28 rounded-md border border-white/10 bg-white/[0.04] px-2 py-1 text-white" />
+              <button type="button" disabled={importLimitPending || !Number.isInteger(importLimit) || importLimit < 0 || importLimit > 1000000 || importLimit === user.import_daily_limit}
+                onClick={() => onSetImportLimit(importLimit)}
+                className="rounded-md bg-indigo-500/20 px-2.5 py-1 text-indigo-200 disabled:opacity-50">Save research limit</button>
+              <span className="text-slate-400">{user.import_daily_used ?? 0} used today</span>
             </div>}
             {summaryLoading && (
               <div className="flex items-center gap-2 text-[13px] text-slate-500">
@@ -1720,6 +1792,13 @@ function LaneSchedulePanel() {
       qc.invalidateQueries({ queryKey: ["admin-activity"] });
     },
   });
+  const control = useMutation({
+    mutationFn: (mode: "off" | "on" | "schedule") => api.adminSetHarvesterControl(mode),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["admin-lane"] });
+      qc.invalidateQueries({ queryKey: ["admin-activity"] });
+    },
+  });
 
   // Local draft — seeded from the server the first time it answers, then
   // owned by the operator. NOT re-seeded on every 10s poll, or a half-typed
@@ -1774,6 +1853,23 @@ function LaneSchedulePanel() {
 
       {seeded && d && (
         <>
+          <div className="mt-4 rounded-lg border border-white/10 bg-white/[0.03] p-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-[13px] font-medium text-slate-200">Harvester control</p>
+                <p className="text-[11.5px] text-slate-400">Worker {seeded.worker_online ? "online" : "offline"} · Current setting: {seeded.control_mode ?? "unknown"}</p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {(["off", "on", "schedule"] as const).map((mode) => <button key={mode} type="button"
+                  disabled={control.isPending || seeded.control_mode === mode}
+                  onClick={() => control.mutate(mode)}
+                  className="rounded-md border border-white/10 px-3 py-1.5 text-[12px] text-slate-200 hover:bg-white/[0.08] disabled:opacity-50">
+                  {mode === "off" ? "Stop" : mode === "on" ? "Run" : "Use schedule"}
+                </button>)}
+              </div>
+            </div>
+            {control.isError && <p role="alert" className="mt-2 text-[12px] text-rose-300">{(control.error as Error).message}</p>}
+          </div>
           {/* Live status */}
           <div className="mt-4 grid grid-cols-1 gap-2 rounded-lg border border-white/5 bg-black/20 p-3 text-[12.5px] sm:grid-cols-2 lg:grid-cols-4">
             <span className="text-slate-500">

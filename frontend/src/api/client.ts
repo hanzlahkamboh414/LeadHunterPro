@@ -288,7 +288,7 @@ export const api = {
     });
   },
 
-  getMe(): Promise<{ user_id: string; username: string; email: string; is_admin: boolean }> {
+  getMe(): Promise<{ user_id: string; username: string; name?: string; email: string; is_admin: boolean; admin_permissions?: string[] }> {
     return request("/auth/me");
   },
 
@@ -353,6 +353,13 @@ export const api = {
    *  and (for an "auto" cycle) what the worker is doing right now. */
   adminLaneStatus(): Promise<AdminLaneStatus> {
     return request<AdminLaneStatus>("/admin/harvester/lane");
+  },
+  adminSetHarvesterControl(mode: "off" | "on" | "schedule"): Promise<AdminLaneStatus> {
+    return request<AdminLaneStatus>("/admin/harvester/control", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode }),
+    });
   },
 
   /** Admin — save the AI-lane schedule. Applies on the next harvester pass
@@ -757,6 +764,20 @@ export const api = {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(input),
+    });
+  },
+  adminSetImportLimit(userId: string, dailyLimit: number): Promise<{ user_id: string; daily_limit: number }> {
+    return request(`/admin/users/${encodeURIComponent(userId)}/import-limit`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ daily_limit: dailyLimit }),
+    });
+  },
+  adminSetUserPermissions(userId: string, permissions: string[]): Promise<AdminUsers["users"][number]> {
+    return request(`/admin/users/${encodeURIComponent(userId)}/permissions`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ permissions }),
     });
   },
   phoneRecordSavedEvent(savedId: number, action: "dialed" | "copied"): Promise<{ id: number }> {

@@ -18,6 +18,7 @@ interface AuthUser {
   username: string;
   name: string;
   is_admin: boolean;
+  admin_permissions: string[];
   is_platform_admin: boolean;
   /** Which verticals the account uses (P3): "emails" | "phones" | "both".
    *  Tokens minted before P3 carry no claim — they default to "both", the
@@ -122,6 +123,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           username: (payload.username as string) || "",
           name: (payload.name as string) || "",
           is_admin: Boolean(payload.is_admin),
+          admin_permissions: [],
           is_platform_admin: Boolean(payload.is_platform_admin),
           category: (payload.category as AuthUser["category"]) || "both",
         });
@@ -137,6 +139,23 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setUser(null);
     }
     setLoading(false);
+  }, [token]);
+
+  // Permissions are read from the server so a grant or revocation takes effect
+  // without waiting for the existing JWT to expire.
+  useEffect(() => {
+    if (!token) return;
+    let cancelled = false;
+    api.getMe().then((me) => {
+      if (cancelled) return;
+      setUser((current) => current && current.id === me.user_id ? {
+        ...current,
+        name: me.name ?? current.name,
+        is_admin: me.is_admin,
+        admin_permissions: me.admin_permissions ?? [],
+      } : current);
+    }).catch(() => { /* Keep the token's identity until the next auth check. */ });
+    return () => { cancelled = true; };
   }, [token]);
 
   useEffect(() => {

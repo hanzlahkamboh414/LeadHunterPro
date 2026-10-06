@@ -51,7 +51,9 @@ from app.campaigns.personalize import (
     generate_hook,
 )
 from app.campaigns.compose import compose_email, has_referral_request, split_script_signature
-from app.campaigns.hard_bounce import hard_bounce_target, invalid_recipient_reason
+from app.campaigns.hard_bounce import (hard_bounce_target,
+                                       invalid_recipient_reason,
+                                       policy_block_target)
 from app.campaigns.deliverability_guard import DeliverabilityGuard
 from app.campaigns.pre_send_verifier import CampaignEmailVerifier
 from app.campaigns.store import CampaignStore
@@ -323,19 +325,36 @@ class CampaignScheduler:
                     # Only a confirmed permanently invalid recipient is
                     # eligible for removal. Generic failures, throttles and
                     # quota notices leave the lead and campaigns intact.
-                    if self._bounce_store is not None and _is_dsn_sender(addr):
+                    if _is_dsn_sender(addr):
                         text = " ".join(
                             (msg.get("subject") or "", msg.get("snippet") or "")
                         )
                         bounced = hard_bounce_target(text, set(by_email))
-                        if not bounced and msg.get("id"):
+                        blocked = policy_block_target(text, set(by_email))
+                        if not (bounced or blocked) and msg.get("id"):
                             try:
                                 full = google.get_message(access_token, msg["id"])
                                 text += " " + (full.get("text") or "")
                                 bounced = hard_bounce_target(text, set(by_email))
+                                blocked = policy_block_target(text, set(by_email))
                             except Exception as exc:  # noqa: BLE001 — inbox reads are best-effort
                                 logger.warning("DSN detail read failed: %s", exc)
-                        if bounced and bounced not in human_replies:
+                        if blocked and blocked not in human_replies:
+                            target = by_email[blocked]
+                            reason = "Gmail blocked message as suspicious or by policy"
+                            if self._store.record_policy_rejection(
+                                    target["campaign_id"], blocked,
+                                    account_id=account_id, reason=reason):
+                                stats["bounced"] += 1
+                                self._store.pause_for_account(
+                                    account_id, reason="deliverability")
+                                if self._deliverability_guard is not None:
+                                    self._deliverability_guard.hold_account(
+                                        account_id, reason, now=now)
+                                logger.warning(
+                                    "Gmail policy rejection: account %d, campaign %d, %s",
+                                    account_id, target["campaign_id"], blocked)
+                        elif bounced and bounced not in human_replies and self._bounce_store is not None:
                             target = by_email[bounced]
                             self._store.record_bounce(
                                 target["campaign_id"], bounced,

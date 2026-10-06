@@ -2,7 +2,9 @@
 
 import pytest
 
-from app.campaigns.hard_bounce import hard_bounce_target, invalid_recipient_reason
+from app.campaigns.hard_bounce import (hard_bounce_target,
+                                       invalid_recipient_reason,
+                                       policy_block_target)
 from app.email.bounce_learning import BounceStore
 
 
@@ -30,6 +32,14 @@ def test_policy_or_transient_failure_does_not_delete(notice):
 def test_ambiguous_notice_does_not_delete_anyone():
     notice = "550 5.1.1 bad@example.com user unknown; other@example.com also failed"
     assert hard_bounce_target(notice, {"bad@example.com", "other@example.com"}) is None
+
+
+def test_gmail_policy_block_is_not_an_invalid_recipient():
+    notice = ("Message blocked. Your message to chip@example.com has been "
+              "blocked. The response was: Message rejected.")
+    assert policy_block_target(notice, {"chip@example.com"}) == "chip@example.com"
+    assert hard_bounce_target(notice, {"chip@example.com"}) is None
+    assert policy_block_target(notice, {"other@example.com"}) is None
 
 
 def test_bounce_store_migrates_and_only_queues_confirmed(tmp_path):

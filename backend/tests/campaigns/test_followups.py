@@ -575,6 +575,40 @@ def test_temporary_delivery_notice_keeps_lead_and_queue(tmp_path, monkeypatch):
     assert ctx["leads"].get("bob@dead.com") is not None
 
 
+def test_gmail_policy_rejection_holds_sender_and_cancels_followup(tmp_path, monkeypatch):
+    from app.campaigns.deliverability_guard import DeliverabilityGuard
+
+    ctx = _bounce_setup(tmp_path, monkeypatch,
+                        emails=("chip@example.com", "other@example.com"))
+    guard = DeliverabilityGuard(str(tmp_path / "guard.db"))
+    ctx["sched"]._deliverability_guard = guard
+    campaign_id = ctx["campaign_id"]
+    # An already sent original with a later follow-up queued.
+    ctx["sched"].run_once()
+    ctx["store"].queue_followup(
+        campaign_id, "chip@example.com", step=1,
+        not_before=_iso(NOW + timedelta(days=3)))
+    monkeypatch.setattr(google, "list_inbox_senders", lambda tok, **kw: [{
+        "from": "Mail Delivery Subsystem <mailer-daemon@googlemail.com>",
+        "subject": "Delivery Status Notification (Failure)",
+        "snippet": "Message blocked. Your message to chip@example.com has been "
+                   "blocked. The response was: Message rejected.",
+    }])
+
+    ctx["sched"]._clock.advance(2 * 3600)
+    stats = ctx["sched"].run_once()
+    assert stats["bounced"] == 1
+    assert guard.is_held(ctx["account_id"])
+    assert ctx["store"].get(campaign_id, ctx["user"].id)["status"] == "paused"
+    sends = [s for s in ctx["store"].sends(campaign_id, ctx["user"].id)
+             if s["email"] == "chip@example.com"]
+    assert [s["state"] for s in sends] == ["failed", "skipped"]
+    assert ctx["store"].bounces(campaign_id, ctx["user"].id)[0]["email"] == "chip@example.com"
+    assert ctx["bounce"].lookup("chip@example.com") is None
+    assert ctx["leads"].get("chip@example.com") is not None
+    assert ctx["sched"].run_once()["bounced"] == 0
+
+
 def test_dsn_naming_no_sent_address_records_nothing(tmp_path, monkeypatch):
     """A DSN whose text names none of OUR sent addresses is an honest
     miss — no guessed bounce, nothing written."""

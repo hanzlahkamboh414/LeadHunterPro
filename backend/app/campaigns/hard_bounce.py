@@ -37,3 +37,24 @@ def hard_bounce_target(text: str, sent_addresses: set[str]) -> str | None:
     mentioned = {m.group().lower() for m in _ADDRESS.finditer(html.unescape(text or ""))}
     matched = mentioned.intersection(a.lower() for a in sent_addresses)
     return next(iter(matched)) if len(matched) == 1 else None
+
+
+_POLICY_BLOCK = re.compile(
+    r"\bmessage blocked\b|\bmessage rejected\b|"
+    r"\bappears suspicious and wasn['’]t delivered\b|"
+    r"\b(?:flagged as spam|blocked as spam)\b",
+    re.I,
+)
+
+
+def policy_block_target(text: str, sent_addresses: set[str]) -> str | None:
+    """Match a Gmail policy rejection to exactly one sent address.
+
+    This is a sender/content problem, never proof that the recipient is dead.
+    """
+    message = html.unescape(text or "")
+    if not _POLICY_BLOCK.search(message) or invalid_recipient_reason(message):
+        return None
+    mentioned = {m.group().lower() for m in _ADDRESS.finditer(message)}
+    matched = mentioned.intersection(a.lower() for a in sent_addresses)
+    return next(iter(matched)) if len(matched) == 1 else None

@@ -841,6 +841,49 @@ class CampaignStore:
             "WHERE h.user_id=? ORDER BY h.sent_at ASC", (user_id,),
         ).fetchall()
         conn.close()
+
+    def record_policy_rejection(self, campaign_id: int, email: str, *,
+                                account_id: int, reason: str) -> bool:
+        """Correct a post-acceptance Gmail rejection and cancel follow-ups.
+
+        Preserve recipient history so this rejected attempt cannot be retried
+        through another campaign. The address itself is not invalidated.
+        """
+        addr = email.strip().lower()
+        conn = self._conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT id FROM campaign_sends WHERE campaign_id=? "
+                "AND lower(email)=? AND account_id=? AND state='sent' "
+                "ORDER BY sent_at DESC, id DESC LIMIT 1",
+                (campaign_id, addr, account_id),
+            ).fetchone()
+            if row is None:
+                conn.rollback()
+                return False
+            conn.execute(
+                "UPDATE campaign_sends SET state='failed', error=? WHERE id=?",
+                (reason[:300], row[0]),
+            )
+            conn.execute(
+                "UPDATE campaign_sends SET state='skipped', error=? "
+                "WHERE campaign_id=? AND lower(email)=? AND state='pending'",
+                ("previous message blocked by Gmail", campaign_id, addr),
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO campaign_bounces "
+                "(campaign_id,email,account_id,bounced_at,reason) "
+                "VALUES (?,?,?,?,?)",
+                (campaign_id, addr, account_id, _now(), reason[:300]),
+            )
+            conn.commit()
+            return True
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
         usage: dict[str, dict[str, Any]] = {}
         for email, state, campaign_id, name in rows:
             status = "sent" if state == "sent" else "unsent"
@@ -1468,6 +1511,20 @@ class CampaignStore:
         conn.commit()
         conn.close()
         return cur.rowcount > 0
+
+    def pause_for_account(self, account_id: int, *, reason: str) -> int:
+        """Stop every active or scheduled campaign using a held sender."""
+        conn = self._conn()
+        cur = conn.execute(
+            "UPDATE campaigns SET status='paused', paused_reason=?, "
+            "resume_at='', updated_at=? WHERE status IN ('running','scheduled') "
+            "AND id IN (SELECT campaign_id FROM campaign_accounts "
+            "WHERE account_id=?)",
+            (reason, _now(), account_id),
+        )
+        conn.commit()
+        conn.close()
+        return cur.rowcount
 
     def continue_now(self, campaign_id: int, user_id: str,
                      pakistan_day: str) -> bool:

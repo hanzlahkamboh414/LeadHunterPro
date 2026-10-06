@@ -64,3 +64,14 @@ class DeliverabilityGuard:
                 "SELECT 1 FROM sender_holds WHERE account_id=?",
                 (account_id,),
             ).fetchone() is not None
+
+    def hold_account(self, account_id: int, reason: str, *,
+                     now: datetime | None = None) -> None:
+        """Keep a rejected sender stopped until a person reviews it."""
+        if account_id <= 0:
+            return
+        when = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO sender_holds (account_id,held_at,reason) "
+                "VALUES (?,?,?)", (account_id, when, reason[:300]))

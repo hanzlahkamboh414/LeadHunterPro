@@ -1435,7 +1435,12 @@ function CampaignBuilder({
             <p className="mt-1">Recipients: {quantity} from {folder === "*" ? "all unused leads" : folder}</p>
             <p className="mt-1">Start: {startAt ? startAt.replace("T", " ") : "—"} · {dailyLimit} per account daily</p>
             <p className="mt-1">Follow-ups: {[fu1On, fu2On, fu3On].filter(Boolean).length}</p>
+            {!name.trim() && <p className="mt-2 text-amber-300">Add a campaign name in Step 1.</p>}
+            {(!subject.trim() || !body.trim() || (aiCompose && !aiSignature.trim())) &&
+              <p className="mt-2 text-amber-300">Complete the message{aiCompose ? " and sign-off" : ""} in Step 3.</p>}
+            {!followupsValid && <p className="mt-2 text-amber-300">Complete the enabled follow-ups in Step 4.</p>}
             {!audienceValid && <p className="mt-2 text-amber-300">Review Audience & timing: enough unused leads and valid sending limits are required.</p>}
+            {!accountId && <p className="mt-2 text-amber-300">Choose a sending account above.</p>}
           </div>}
 
           {step === 6 && <>

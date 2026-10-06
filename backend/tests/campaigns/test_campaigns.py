@@ -181,7 +181,7 @@ def test_store_promote_and_resumes(tmp_path):
     past = store.create("u1", account_id=1, name="past", subject="s", body="b",
                         emails=["a@x.com"], start_at=_iso(NOW - timedelta(hours=1)))
     future = store.create("u1", account_id=1, name="fut", subject="s", body="b",
-                          emails=["a@x.com"], start_at=_iso(NOW + timedelta(hours=1)))
+                          emails=["b@x.com"], start_at=_iso(NOW + timedelta(hours=1)))
     assert store.promote_scheduled(_iso(NOW)) == [past["id"]]
     assert store.get(past["id"], "u1")["status"] == "running"
     assert store.get(future["id"], "u1")["status"] == "scheduled"
@@ -222,7 +222,7 @@ def test_store_already_sent_exclusion(tmp_path):
                       emails=["a@x.com", "b@x.com"], start_at=_iso(NOW))
     s = store.next_pending(c1["id"])
     store.mark_sent(s["id"], subject="s", sent_at=_iso(NOW))
-    assert store.already_sent_emails("u1", ["a@x.com", "b@x.com"]) == {"a@x.com"}
+    assert store.already_sent_emails("u1", ["a@x.com", "b@x.com"]) == {"a@x.com", "b@x.com"}
     # Another user's sends never block this user.
     assert store.already_sent_emails("u2", ["a@x.com"]) == set()
 
@@ -493,6 +493,63 @@ def test_api_already_sent_exclusion(tmp_path, monkeypatch):
     assert r.status_code == 422
 
 
+def test_activity_explorer_pages_all_dates_and_filters_by_account(tmp_path, monkeypatch):
+    ctx = _setup(tmp_path, monkeypatch)
+    campaign = _make_campaign(ctx)
+    store = ctx["store"]
+    sends = store.sends(campaign["id"], ctx["user"].id)
+    assert sends is not None
+    first, second = sends
+    older = _iso(NOW - timedelta(days=15))
+    recent = _iso(NOW - timedelta(days=1))
+    store.mark_sent(first["id"], subject="First message", sent_at=older,
+                    account_id=ctx["account_id"], body="Hello from our team")
+    store.mark_sent(second["id"], subject="Second message", sent_at=recent,
+                    account_id=ctx["account_id"])
+    assert store.queue_followup(campaign["id"], first["email"], step=1, not_before=recent)
+    followup = next(row for row in store.sends(campaign["id"], ctx["user"].id) if row["step"] == 1)
+    store.mark_sent(followup["id"], subject="Checking in", sent_at=recent,
+                    account_id=ctx["account_id"])
+    store.mark_replied(campaign["id"], first["email"],
+                       received_at=recent, subject="Re: First message")
+    store.record_bounce(campaign["id"], second["email"],
+                        account_id=ctx["account_id"], reason="DSN")
+
+    sent = store.explore_activity(ctx["user"].id, view="sent", limit=1)
+    assert sent["total"] == 2 and len(sent["rows"]) == 1
+    assert sent["first_date"] == older[:10]
+    assert {row["date"] for row in sent["by_date"]} == {older[:10], recent[:10]}
+    assert sent["by_account"] == [{"account_id": ctx["account_id"], "count": 2}]
+    assert store.explore_activity(ctx["user"].id, view="sent", limit=1, offset=1)["rows"][0]["email"] == first["email"]
+    assert store.explore_activity(ctx["user"].id, view="sent", from_date=older[:10],
+                                  to_date=older[:10])["total"] == 1
+    assert store.explore_activity(ctx["user"].id, view="sent",
+                                  account_id=ctx["account_id"] + 1)["total"] == 0
+    assert store.explore_activity(ctx["user"].id, view="replied")["rows"][0]["email"] == first["email"]
+    assert store.explore_activity(ctx["user"].id, view="followup")["rows"][0]["subject"] == "Checking in"
+    assert store.explore_activity(ctx["user"].id, view="bounced")["rows"][0]["reason"] == "DSN"
+    response = ctx["client"].get("/api/v1/campaigns/activity/explore?view=sent&limit=1")
+    assert response.status_code == 200, response.text
+    assert response.json()["total"] == 2
+    assert response.json()["rows"][0]["account_email"] == "sender@gmail.com"
+    assert ctx["client"].get("/api/v1/campaigns/activity/explore?from_date=invalid").status_code == 422
+    timeline = store.recipient_history(first["id"], ctx["user"].id)
+    assert timeline is not None and timeline["reply"]["subject"] == "Re: First message"
+    assert len(timeline["sends"]) == 2
+    assert timeline["sends"][0]["body"] == "Hello from our team"
+    assert store.recipient_history(first["id"], "another-user") is None
+    assert ctx["client"].get(f"/api/v1/campaigns/activity/{first['id']}/timeline").status_code == 200
+    store.purge_recipient(second["email"])
+    bounce = store.explore_activity(ctx["user"].id, view="bounced")["rows"][0]
+    assert bounce["send_id"] == 0
+    assert store.recipient_history(0, ctx["user"].id,
+                                   campaign_id=campaign["id"], email=second["email"])["bounce"]["reason"] == "DSN"
+    assert store.recipient_history(0, "another-user",
+                                   campaign_id=campaign["id"], email=second["email"]) is None
+    assert ctx["client"].get(
+        f"/api/v1/campaigns/activity/0/timeline?campaign_id={campaign['id']}&email={second['email']}"
+    ).status_code == 200
+
 def test_api_pause_resume_delete(tmp_path, monkeypatch):
     ctx = _setup(tmp_path, monkeypatch)
     ctx["leads"].save(_dossier("jane@acme.com"))
@@ -514,7 +571,7 @@ def test_api_pause_resume_delete(tmp_path, monkeypatch):
     real_past = _iso(datetime.now(timezone.utc) - timedelta(hours=1))
     past = ctx["store"].create(
         ctx["user"].id, account_id=ctx["account_id"], name="past",
-        subject="s", body="b", emails=["bob@build.com"],
+        subject="s", body="b", emails=["charlie@build.com"],
         start_at=real_past,
     )
     ctx["store"].set_status(past["id"], status="running")

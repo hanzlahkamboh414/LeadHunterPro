@@ -400,6 +400,7 @@ export interface CampaignRecipientTimeline {
     send_id: number; step: number; state: string; subject: string;
     sent_at: string; not_before: string; error: string;
     account_id: number; account_email: string;
+    body: string;
   }[];
   reply: { received_at: string; subject: string } | null;
   bounce: { bounced_at: string; reason: string } | null;

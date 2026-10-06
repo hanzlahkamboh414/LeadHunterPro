@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 
+from app.campaigns.personalize import recipient_name, verified_facts
 from app.lead_research.models import LeadDossier
 
 _TOKEN = re.compile(r"\{\{\s*([a-z_]+)\s*\}\}")
@@ -18,7 +19,7 @@ _TOKEN = re.compile(r"\{\{\s*([a-z_]+)\s*\}\}")
 
 def context_for(dossier: LeadDossier) -> dict[str, str]:
     """The template variables for one lead, from verified dossier fields."""
-    person = dossier.person.name or ""
+    person = recipient_name(dossier, verified_facts(dossier))
     first = person.split()[0] if person else ""
     last = " ".join(person.split()[1:]) if person else ""
     return {
@@ -57,3 +58,21 @@ def render(template: str, context: dict[str, str]) -> str:
     def sub(m: re.Match) -> str:
         return context.get(m.group(1), "")
     return _TOKEN.sub(sub, template or "")
+
+
+def render_email_body(template: str, context: dict[str, str]) -> str:
+    """Render a body, replacing an empty 'Hi,' with a real greeting."""
+    body = render(template, context)
+    if not re.match(r"^\s*hi\s*,", body, flags=re.I):
+        return body
+    first = (context.get("first_name") or "").strip()
+    company = (context.get("company_name") or "").strip()
+    if first:
+        greeting = f"Hi {first},"
+    elif company:
+        short = re.sub(r"\s+(?:inc\.?|llc|ltd\.?|corp\.?|corporation)\s*$",
+                       "", company, flags=re.I).rstrip(" .")
+        greeting = f"Hello {short or company} team,"
+    else:
+        greeting = "Hello,"
+    return re.sub(r"^\s*hi\s*,", greeting, body, count=1, flags=re.I)

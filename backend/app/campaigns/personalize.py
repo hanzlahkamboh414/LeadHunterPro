@@ -129,11 +129,31 @@ def clean_hook(text: str) -> str:
     return hook
 
 
+def recipient_name(dossier: LeadDossier, facts: list[str] | None = None) -> str:
+    """An explicit name, or one verified as belonging to this email inbox."""
+    known = (dossier.person.name or "").strip()
+    if known:
+        return known
+    email = (dossier.email or "").strip()
+    if not email:
+        return ""
+    pattern = re.compile(
+        r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})\s+"
+        r"(?:holds|has|uses)\s+(?:the\s+)?email\s+" + re.escape(email) + r"\b",
+        flags=re.I,
+    )
+    for fact in facts if facts is not None else verified_facts(dossier):
+        match = pattern.search(fact)
+        if match:
+            return match.group(1).strip()
+    return ""
+
+
 def greeting_for(dossier: LeadDossier) -> str:
     """The opening greeting: the person's first name, else their full name,
     else the company name (a role-based inbox still reads naturally). Empty
     string = the dossier names nobody and nothing."""
-    person = (dossier.person.name or "").strip()
+    person = recipient_name(dossier)
     first = person.split()[0] if person else ""
     name = first or person or (dossier.company.name or "").strip()
     return f"Hi {name}," if name else ""

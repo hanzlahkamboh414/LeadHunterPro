@@ -37,6 +37,7 @@ branch is testable without sleeping.
 from __future__ import annotations
 
 import logging
+import os
 import random
 import threading
 import smtplib
@@ -49,10 +50,12 @@ from app.campaigns.personalize import (
     default_ask,
     generate_hook,
 )
+from app.campaigns.compose import compose_email, has_referral_request
 from app.campaigns.hard_bounce import hard_bounce_target, invalid_recipient_reason
+from app.campaigns.deliverability_guard import DeliverabilityGuard
 from app.campaigns.pre_send_verifier import CampaignEmailVerifier
 from app.campaigns.store import CampaignStore
-from app.campaigns.templates import context_for, render
+from app.campaigns.templates import context_for, render, render_email_body
 from app.campaigns.tracking import pixel_url
 from app.email_accounts import google, smtp
 from app.email_accounts.store import EmailAccountStore
@@ -61,6 +64,7 @@ from app.lead_research.service import LeadResearchStore, PendingLeadsStore
 
 logger = logging.getLogger(__name__)
 
+PAKISTAN_TZ = timezone(timedelta(hours=5))
 CHECK_INTERVAL_S = 20          # scheduler pass cadence
 RATE_LIMIT_COOLDOWN_S = 3600   # a 429 backs off for an hour
 MAX_ATTEMPTS = 3               # per-lead retries before 'failed'
@@ -148,6 +152,8 @@ class CampaignScheduler:
         ai_ask: Ask | None = None,
         bounce_store: Any | None = None,
         verifier: CampaignEmailVerifier | None = None,
+        deliverability_guard: DeliverabilityGuard | None = None,
+        sending_pause_file: str = "",
     ) -> None:
         self._store = store
         self._email_store = email_store
@@ -162,6 +168,8 @@ class CampaignScheduler:
         # email ground truth (None = the loop is off; sends unaffected).
         self._bounce_store = bounce_store
         self._verifier = verifier
+        self._deliverability_guard = deliverability_guard
+        self._sending_pause_file = sending_pause_file
         # Per-account 429 cooldowns (E5): account_id -> send-again-not-before.
         # In-memory on purpose — a cooldown is transient, and a restart at
         # worst re-earns one 429 from Google.
@@ -205,6 +213,15 @@ class CampaignScheduler:
         stats = {"promoted": 0, "resumed_rate_limited": 0,
                  "resumed_account": 0, "sent": 0, "paused": 0,
                  "replied": 0, "skipped": 0, "bounced": 0}
+
+        if self._sending_pause_file and os.path.exists(self._sending_pause_file):
+            self._check_replies(now, stats)
+            self._cleanup_hard_bounces()
+            for c in self._store.running_campaigns():
+                self._store.set_status(c["id"], status="paused",
+                                       paused_reason="deliverability")
+                stats["paused"] += 1
+            return stats
 
         for cid in self._store.promote_scheduled(_iso(now)):
             stats["promoted"] += 1
@@ -319,6 +336,12 @@ class CampaignScheduler:
                             except Exception as exc:  # noqa: BLE001 — inbox reads are best-effort
                                 logger.warning("DSN detail read failed: %s", exc)
                         if bounced and bounced not in human_replies:
+                            target = by_email[bounced]
+                            self._store.record_bounce(
+                                target["campaign_id"], bounced,
+                                account_id=account_id,
+                                reason=f"DSN from {addr}: {(msg.get('subject') or '')[:120]}",
+                            )
                             if self._bounce_store.record(
                                 bounced, "bounced", hard_bounce=True,
                                 evidence=f"DSN from {addr}: "
@@ -326,6 +349,12 @@ class CampaignScheduler:
                             ):
                                 stats["bounced"] += 1
                                 logger.info("hard bounce confirmed: %s", bounced)
+                                if self._deliverability_guard is not None:
+                                    if self._deliverability_guard.record_hard_bounce(
+                                            account_id, bounced, now=now):
+                                        logger.warning(
+                                            "sender account %d held after repeated hard bounces",
+                                            account_id)
                     continue  # mail from someone we never emailed — not ours
                 subject = (msg.get("subject") or "")[:300]
                 self._store.mark_replied(
@@ -362,7 +391,8 @@ class CampaignScheduler:
     # -- One campaign, at most one send ------------------------------------
 
     def _pick_account(self, c: dict[str, Any],
-                      now: datetime) -> tuple[int | None, str]:
+                      now: datetime, *,
+                      required_account_id: int | None = None) -> tuple[int | None, str]:
         """Choose the sending account for this pass (E5 multi-account).
 
         Returns (account_id, "") on success, else (None, reason):
@@ -376,6 +406,8 @@ class CampaignScheduler:
         wins (load spreading), ties rotating so two fresh accounts
         alternate."""
         accounts = self._store.campaign_accounts(c["id"]) or [c["account_id"]]
+        if required_account_id is not None:
+            accounts = [a for a in accounts if a == required_account_id]
         healthy: list[int] = []
         for a in accounts:
             creds = self._email_store.get_credentials(a, c["user_id"])
@@ -391,7 +423,14 @@ class CampaignScheduler:
         if not healthy:
             return None, "account"
 
-        today = _iso(now)[:10]
+        if self._deliverability_guard is not None:
+            available = [a for a in healthy
+                         if not self._deliverability_guard.is_held(a)]
+            if not available:
+                return None, "deliverability"
+            healthy = available
+
+        today = now.astimezone(PAKISTAN_TZ).date().isoformat()
         cooling = [a for a in healthy
                    if self._cooldowns.get(a, now) > now]
         avail = [a for a in healthy if a not in cooling
@@ -419,9 +458,21 @@ class CampaignScheduler:
 
     def _drain_one(self, c: dict[str, Any], now: datetime,
                    stats: dict[str, int]) -> None:
+        start = parse_ts(c["start_at"])
+        pakistan_now = now.astimezone(PAKISTAN_TZ)
+        if (start is not None
+                and c.get("early_resume_date") != pakistan_now.date().isoformat()
+                and pakistan_now.time() < start.astimezone(PAKISTAN_TZ).time()):
+            return
         account_id, reason = self._pick_account(c, now)
         if account_id is None:
-            if reason == "account":
+            if reason == "deliverability":
+                self._store.set_status(c["id"], status="paused",
+                                       paused_reason="deliverability")
+                stats["paused"] += 1
+                logger.warning("campaign %d paused: sender deliverability hold",
+                               c["id"])
+            elif reason == "account":
                 # Every account gone (disconnected) -> honest pause,
                 # auto-resume when any account reconnects.
                 self._store.set_status(c["id"], status="paused",
@@ -447,8 +498,26 @@ class CampaignScheduler:
             self._store.mark_completed_if_drained(c["id"])
             return
 
+        if send["step"] > 0:
+            original_account = self._store.initial_sender(c["id"], send["email"])
+            if original_account is None:
+                self._store.mark_skipped(send["id"], error="original email was not sent")
+                stats["skipped"] += 1
+                return
+            account_id, reason = self._pick_account(
+                c, now, required_account_id=original_account)
+            if account_id is None:
+                return
+
         if self._bounce_store is not None and self._bounce_store.lookup(send["email"]) == "bounced":
             self._store.mark_skipped(send["id"], error="bounced recipient")
+            self._store.mark_completed_if_drained(c["id"])
+            stats["skipped"] += 1
+            return
+
+        if send["step"] == 0 and self._store.duplicate_owner(
+                c["id"], c["user_id"], send["email"]):
+            self._store.mark_skipped(send["id"], error="already queued or emailed in another campaign")
             self._store.mark_completed_if_drained(c["id"])
             stats["skipped"] += 1
             return
@@ -493,11 +562,43 @@ class CampaignScheduler:
         else:
             subject_tmpl, body_tmpl = c["subject"], c["body"]
         subject = render(subject_tmpl, ctx)
-        body = render(body_tmpl, ctx)
-        # The AI opening line (E5): first email only, from VERIFIED dossier
-        # evidence only, cached per lead, best-effort by design.
-        if send["step"] == 0 and c.get("ai_personalize"):
+        body = render_email_body(body_tmpl, ctx)
+        if c.get("ai_compose"):
+            draft = self._store.get_draft(c["id"], send["email"], send["step"])
+            if draft is None:
+                try:
+                    if self._ai_ask is None:
+                        self._ai_ask = default_ask()
+                    draft = compose_email(
+                        self._ai_ask, dossier, campaign_name=c["name"],
+                        angle=subject_tmpl, brief=body_tmpl,
+                        signature=c.get("ai_signature", ""),
+                        step=send["step"],
+                    )
+                except Exception as exc:  # noqa: BLE001 — never send a broken AI draft
+                    logger.warning("AI email for campaign %d, lead %s failed: %s",
+                                   c["id"], send["email"], exc)
+                    if send["attempts"] + 1 >= MAX_ATTEMPTS:
+                        self._store.mark_failed(send["id"], error="AI draft could not be created")
+                        self._store.mark_completed_if_drained(c["id"])
+                    else:
+                        self._store.bump_attempts(send["id"])
+                    return
+                self._store.set_draft(c["id"], send["email"], send["step"],
+                                      draft["subject"], draft["body"])
+            subject, body = draft["subject"], draft["body"]
+        # Legacy mode keeps its existing user-written script and AI hook.
+        elif send["step"] == 0 and c.get("ai_personalize"):
             body = self._with_hook(c, send, dossier, body)
+
+        # A stored AI draft or a manually saved template may predate the
+        # composition rule. Never let either route send a referral request.
+        if has_referral_request(body):
+            self._store.mark_failed(send["id"], error="email asks recipient for another contact")
+            self._store.mark_completed_if_drained(c["id"])
+            logger.warning("campaign %d: blocked referral request to %s",
+                           c["id"], send["email"])
+            return
 
         creds = self._email_store.get_credentials(account_id, c["user_id"])
         access_token = ""
@@ -540,7 +641,7 @@ class CampaignScheduler:
         # slow network call must never eat into the requested gap).
         sent_at = self._clock()
         self._store.mark_sent(send["id"], subject=subject, sent_at=_iso(sent_at),
-                              account_id=account_id)
+                              account_id=account_id, body=body)
         stats["sent"] += 1
         logger.info("campaign %d sent to %s (step %d, account %d)",
                     c["id"], send["email"], send["step"], account_id)
@@ -632,10 +733,17 @@ class CampaignScheduler:
                 smtp_code, message = refusal
                 reason = message.decode("utf-8", "replace") if isinstance(message, bytes) else str(message)
                 if int(smtp_code) >= 500 and invalid_recipient_reason(reason):
+                    self._store.record_bounce(
+                        c["id"], send["email"], account_id=account_id,
+                        reason=f"SMTP {smtp_code}: {reason[:150]}",
+                    )
                     self._bounce_store.record(
                         send["email"], "bounced", hard_bounce=True,
                         evidence=f"SMTP {smtp_code}: {reason[:150]}",
                     )
+                    if self._deliverability_guard is not None:
+                        self._deliverability_guard.record_hard_bounce(
+                            account_id, send["email"], now=now)
                     self._cleanup_hard_bounces()
                     return
         if isinstance(exc, smtplib.SMTPAuthenticationError):
@@ -719,6 +827,10 @@ def get_scheduler() -> CampaignScheduler:
         _scheduler = CampaignScheduler(
             campaign_store, get_email_store(), lead_store,
             bounce_store=bounce_store,
-            verifier=CampaignEmailVerifier(campaign_store, lead_store),
+            verifier=None,
+            deliverability_guard=None,
+            sending_pause_file=os.path.join(
+                os.path.dirname(campaign_store._db_path),
+                "campaign_sending_paused.flag"),
         )
     return _scheduler

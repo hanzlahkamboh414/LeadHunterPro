@@ -10,17 +10,18 @@ from __future__ import annotations
 
 import logging
 import smtplib
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 
 from app.auth.vertical_access import require_email_access
+from app.auth.dependencies import get_current_user
 from app.auth.models import User
 from app.campaigns import spamcheck
-from app.campaigns.scheduler import ensure_access_token, parse_ts
+from app.campaigns.scheduler import PAKISTAN_TZ, READONLY_SCOPE, ensure_access_token, parse_ts
 from app.campaigns.store import get_campaign_store
-from app.campaigns.templates import render, sample_context
+from app.campaigns.templates import render, render_email_body, sample_context
 from app.campaigns.tracking import PIXEL_GIF, parse_token
 from app.email_accounts import google, smtp
 from app.email_accounts.store import get_email_store
@@ -57,6 +58,44 @@ def _blocked_addresses(emails: list[str]) -> set[str]:
         store.close()
 
 
+def _available_lead_emails(
+    user: User, *, count: int, folder: str = "*",
+    recommendation: str = "contact_now",
+) -> list[str]:
+    """Pick unused, valid leads in discovery order across all folders or one."""
+    from app.api.v1 import leads as leads_api
+    from app.lead_research.scoring import regate_verdict
+
+    if recommendation not in ("", "contact_now", "nurture"):
+        raise HTTPException(422, "Unknown lead quality filter")
+    status = get_campaign_store().recipient_statuses(user.id)
+    used = set(status["queued"]) | set(status["emailed"])
+    picked: list[str] = []
+    offset = 0
+    while len(picked) < count:
+        page, total = leads_api._store.query_leads(
+            **leads_api._view_scope(user), folder=folder or "*",
+            recommendation=recommendation or None,
+            limit=500, offset=offset,
+        )
+        candidates = [item["dossier"].email.strip().lower() for item in page]
+        blocked = _blocked_addresses(candidates)
+        for item in page:
+            email = item["dossier"].email.strip().lower()
+            verdict, _ = regate_verdict(item["dossier"])
+            if verdict == "skip" or (recommendation and verdict != recommendation):
+                continue
+            if email and email not in used and email not in blocked:
+                picked.append(email)
+                used.add(email)
+                if len(picked) == count:
+                    break
+        offset += len(page)
+        if not page or offset >= total:
+            break
+    return picked
+
+
 def _validate_start_at(start_at: str) -> str:
     dt = parse_ts(start_at)
     if dt is None:
@@ -68,9 +107,8 @@ def _validate_start_at(start_at: str) -> str:
 def create_campaign(
     body: CampaignCreateIn, user: User = Depends(require_email_access)
 ) -> dict:
-    """Create a scheduled campaign. Leads that were already emailed (any
-    earlier campaign of this user) are excluded and the response says how
-    many — never silently re-mailed."""
+    """Create a scheduled campaign. Exclude leads already queued or emailed
+    by another campaign of this user, and report the excluded count."""
     email_store = get_email_store()
     owned = {a["id"]: a for a in email_store.list_for_user(user.id)}
     # The primary + every extra account must exist, be the caller's, and
@@ -101,24 +139,42 @@ def create_campaign(
     start_at = _validate_start_at(body.start_at)
 
     store = get_campaign_store()
-    already = store.already_sent_emails(user.id, body.emails)
-    bounced = _blocked_addresses(body.emails)
+    requested = (
+        _available_lead_emails(
+            user, count=body.audience_count,
+            folder=body.audience_folder,
+            recommendation=body.audience_recommendation,
+        ) if body.audience_count is not None else body.emails
+    )
+    if body.audience_count is not None and len(requested) < body.audience_count:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Only {len(requested)} unused leads are available; reduce the quantity.",
+        )
+    already = store.already_sent_emails(user.id, requested)
+    bounced = _blocked_addresses(requested)
     excluded = {str(e).lower() for e in already} | bounced
-    emails = [e for e in body.emails if str(e).lower() not in excluded]
+    emails = [e for e in requested if str(e).lower() not in excluded]
     if not emails:
         raise HTTPException(
             status_code=422,
-            detail="No sendable leads remain: recipients were already emailed or invalid",
+            detail="No sendable leads remain: recipients were already queued, emailed, or invalid",
         )
-    campaign = store.create(
-        user.id, account_id=body.account_id, name=body.name.strip(),
-        subject=body.subject, body=body.body, emails=emails,
-        start_at=start_at, daily_limit=body.daily_limit,
-        delay_min_s=body.delay_min_s, delay_max_s=body.delay_max_s,
-        followups=[fu.model_dump() for fu in body.followups],
-        account_ids=wanted[1:],
-        ai_personalize=body.ai_personalize,
-    )
+    try:
+        campaign = store.create(
+            user.id, account_id=body.account_id, name=body.name.strip(),
+            subject=body.subject, body=body.body, emails=emails,
+            start_at=start_at, daily_limit=body.daily_limit,
+            delay_min_s=body.delay_min_s, delay_max_s=body.delay_max_s,
+            followups=[fu.model_dump() for fu in body.followups],
+            account_ids=wanted[1:],
+            ai_personalize=body.ai_personalize,
+            ai_compose=body.ai_compose,
+            ai_signature=body.ai_signature,
+            recipient_limit=body.audience_count,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     campaign["account_email"] = owned[body.account_id]["email"]
     campaign["account_emails"] = [owned[a]["email"] for a in wanted]
     logger.info("POST /campaigns -> %s (%d leads, %d excluded as already-sent, "
@@ -160,7 +216,7 @@ def campaign_test_send(
 
     ctx = sample_context()
     subject = render(body.subject, ctx)
-    email_body = render(body.body, ctx)
+    email_body = render_email_body(body.body, ctx)
 
     access_token = ""
     if creds.get("provider") != "smtp":
@@ -248,6 +304,142 @@ def list_campaigns(user: User = Depends(require_email_access)) -> dict:
     return {"campaigns": out}
 
 
+@router.get("/recipient-status")
+def recipient_status(user: User = Depends(get_current_user)) -> dict[str, list[str]]:
+    """Let the lead picker distinguish unused, queued, and emailed addresses."""
+    return get_campaign_store().recipient_statuses(user.id)
+
+
+@router.get("/available-leads")
+def available_leads(
+    count: int = Query(50, ge=1, le=500),
+    folder: str = Query("*", max_length=200),
+    recommendation: str = Query("contact_now", max_length=40),
+    user: User = Depends(require_email_access),
+) -> dict:
+    emails = _available_lead_emails(
+        user, count=count, folder=folder, recommendation=recommendation,
+    )
+    return {"emails": emails, "count": len(emails), "requested": count}
+
+
+@router.get("/activity")
+def campaign_activity(
+    limit: int = Query(100, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    user: User = Depends(require_email_access),
+) -> dict:
+    rows = get_campaign_store().activity_for_user(user.id, limit, offset)
+    accounts = {account["id"]: account["email"]
+                for account in get_email_store().list_for_user(user.id)}
+    for row in rows:
+        row["account_email"] = accounts.get(row["account_id"], "")
+    return {"rows": rows}
+
+
+@router.get("/activity/explore")
+def explore_campaign_activity(
+    view: str = Query("sent", pattern="^(sent|replied|bounced|followup)$"),
+    from_date: str = Query("", max_length=10),
+    to_date: str = Query("", max_length=10),
+    account_id: int = Query(0, ge=0),
+    campaign_id: int = Query(0, ge=0),
+    email: str = Query("", max_length=254),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    user: User = Depends(require_email_access),
+) -> dict:
+    for value in (from_date, to_date):
+        if value:
+            try:
+                date.fromisoformat(value)
+            except ValueError as exc:
+                raise HTTPException(422, "Dates must be YYYY-MM-DD") from exc
+    if from_date and to_date and from_date > to_date:
+        raise HTTPException(422, "From date must be before To date")
+    result = get_campaign_store().explore_activity(
+        user.id, view=view, from_date=from_date, to_date=to_date,
+        account_id=account_id, campaign_id=campaign_id, email=email,
+        limit=limit, offset=offset,
+    )
+    accounts = {
+        account["id"]: account["email"]
+        for account in get_email_store().list_for_user(user.id)
+    }
+    for row in result["rows"]:
+        row["account_email"] = accounts.get(row["account_id"], "")
+    for row in result["by_account"]:
+        row["account_email"] = accounts.get(row["account_id"], "")
+    return result
+
+
+@router.get("/activity/{send_id}/timeline")
+def campaign_recipient_timeline(
+    send_id: int,
+    campaign_id: int = Query(0, ge=0),
+    email: str = Query("", max_length=254),
+    user: User = Depends(require_email_access),
+) -> dict:
+    result = get_campaign_store().recipient_history(
+        send_id, user.id, campaign_id=campaign_id, email=email)
+    if result is None:
+        raise HTTPException(404, "No such email record")
+    accounts = {
+        account["id"]: account["email"]
+        for account in get_email_store().list_for_user(user.id)
+    }
+    for row in result["sends"]:
+        row["account_email"] = accounts.get(row["account_id"], "")
+    return result
+
+
+@router.get("/activity/{send_id}/reply")
+def campaign_reply_content(
+    send_id: int,
+    user: User = Depends(require_email_access),
+) -> dict:
+    context = get_campaign_store().reply_context(send_id, user.id)
+    if context is None:
+        raise HTTPException(404, "No detected reply for this send")
+    account_id = context["account_id"]
+    creds = get_email_store().get_credentials(account_id, user.id)
+    if creds is None:
+        raise HTTPException(404, "Sending account is no longer connected")
+    if READONLY_SCOPE not in (creds.get("scopes") or ""):
+        raise HTTPException(409, "Reconnect this Gmail in Settings to read replies")
+    token = ensure_access_token(
+        get_email_store(), account_id=account_id, user_id=user.id,
+        creds=creds, now=datetime.now(timezone.utc),
+    )
+    if not token:
+        raise HTTPException(409, "Reconnect this Gmail in Settings to read replies")
+    sent_at = parse_ts(context["sent_at"]) or datetime.now(timezone.utc)
+    after = int((sent_at - timedelta(hours=1)).timestamp())
+    try:
+        page = google.list_message_ids(
+            token, label="", q=f"from:{context['email']} after:{after}", limit=50,
+        )
+        expected = context["reply_subject"].strip().lower()
+        for message_id in page["ids"]:
+            meta = google.get_message(token, message_id, metadata_only=True)
+            if google.parse_from(meta["headers"].get("from", "")) != context["email"].lower():
+                continue
+            if expected and meta["headers"].get("subject", "").strip().lower() != expected:
+                continue
+            message = google.get_message(token, message_id)
+            return {"email": context["email"],
+                    "subject": message["headers"].get("subject", ""),
+                    "date": message["headers"].get("date", ""),
+                    "text": message.get("text") or message.get("snippet") or "",
+                    "account_email": creds["email"], "found": True}
+    except Exception as exc:
+        logger.warning("Reply lookup failed for send %s: %s", send_id, exc)
+        raise HTTPException(502, "Gmail could not load this reply right now") from exc
+    return {"email": context["email"], "subject": context["reply_subject"],
+            "date": context["replied_at"], "text": "",
+            "account_email": creds["email"], "found": False}
+
+
 @router.get("/track/{token}")
 def track_open(token: str) -> Response:
     """The open-tracking pixel: an invisible 1x1 GIF named by an
@@ -292,6 +484,15 @@ def get_campaign(campaign_id: int,
     if c is None:
         raise HTTPException(status_code=404, detail="no such campaign")
     return c
+
+
+@router.get("/{campaign_id}/bounces")
+def get_campaign_bounces(campaign_id: int,
+                         user: User = Depends(require_email_access)) -> list[dict]:
+    rows = get_campaign_store().bounces(campaign_id, user.id)
+    if rows is None:
+        raise HTTPException(status_code=404, detail="no such campaign")
+    return rows
 
 
 @router.put("/{campaign_id}", response_model=CampaignDetailOut)
@@ -345,7 +546,9 @@ def update_campaign(
             delay_max_s=body.delay_max_s,
             followups=[fu.model_dump() for fu in body.followups]
             if body.followups is not None else None,
-            ai_personalize=body.ai_personalize):
+            ai_personalize=body.ai_personalize,
+            ai_compose=body.ai_compose,
+            ai_signature=body.ai_signature):
         raise HTTPException(status_code=409, detail="campaign is no longer editable")
     logger.info("campaign %d settings edited by %s", campaign_id, user.username)
     by_id = {a["id"]: a["email"]
@@ -391,6 +594,65 @@ def resume_campaign(campaign_id: int,
     store.set_status(campaign_id, status="running")
     logger.info("campaign %d resumed by %s", campaign_id, user.username)
     return {"id": campaign_id, "status": "running"}
+
+
+@router.post("/{campaign_id}/continue-now")
+def continue_campaign_now(campaign_id: int,
+                          user: User = Depends(require_email_access)) -> dict:
+    """Start today's queue early without changing the campaign's daily clock."""
+    store = get_campaign_store()
+    c = store.get(campaign_id, user.id)
+    if c is None:
+        raise HTTPException(status_code=404, detail="no such campaign")
+    if c["status"] == "paused" and c["paused_reason"] != "user":
+        raise HTTPException(status_code=409,
+                            detail="Reconnect the sending account or wait for its cooldown")
+    if c["status"] not in ("scheduled", "running", "paused"):
+        raise HTTPException(status_code=409,
+                            detail="Campaign is complete; there are no emails to continue")
+    now = datetime.now(timezone.utc)
+    if store.next_pending(campaign_id, now.isoformat()) is None:
+        next_at = parse_ts(store.next_pending_at(campaign_id))
+        if next_at is not None:
+            local_due = next_at.astimezone(PAKISTAN_TZ).strftime(
+                "%d %b %Y at %I:%M %p PKT")
+            detail = f"No email is due now. Next follow-up: {local_due}"
+        else:
+            detail = "No pending email is ready to send"
+        raise HTTPException(status_code=409,
+                            detail=detail)
+    today = now.astimezone(PAKISTAN_TZ).date().isoformat()
+    connected = {
+        a["id"] for a in get_email_store().list_for_user(user.id)
+        if a["status"] == "connected"
+    }
+    accounts = [a for a in c["account_ids"] if a in connected]
+    if not accounts:
+        raise HTTPException(status_code=409,
+                            detail="Reconnect a sending account first")
+    if all(store.sent_today_for_account(a, today) >= c["daily_limit"]
+           for a in accounts):
+        start = parse_ts(c["start_at"])
+        start_clock = (start.astimezone(PAKISTAN_TZ).strftime("%I:%M %p")
+                       if start is not None else "the set time")
+        raise HTTPException(status_code=409,
+                            detail=f"Today's daily limit is full. Sending can continue tomorrow after {start_clock} PKT")
+    start = parse_ts(c["start_at"])
+    already_active = (c["status"] == "running" and start is not None
+                      and start <= now and now.astimezone(PAKISTAN_TZ).time()
+                      >= start.astimezone(PAKISTAN_TZ).time())
+    if already_active:
+        return {"id": campaign_id, "status": "running",
+                "early_resume_date": c["early_resume_date"],
+                "message": "Campaign is already active. The next due email follows its configured delay."}
+    if not store.continue_now(campaign_id, user.id, today):
+        raise HTTPException(status_code=409,
+                            detail="Campaign could not be continued")
+    logger.info("campaign %d continued early by %s on %s PKT",
+                campaign_id, user.username, today)
+    return {"id": campaign_id, "status": "running",
+            "early_resume_date": today,
+            "message": "Campaign continued for today. The next due email follows its configured delay."}
 
 
 @router.delete("/{campaign_id}")

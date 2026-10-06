@@ -885,8 +885,9 @@ export const api = {
     });
     return request(`/campaigns/activity/explore?${params.toString()}`);
   },
-  campaignRecipientTimeline(sendId: number): Promise<CampaignRecipientTimeline> {
-    return request(`/campaigns/activity/${sendId}/timeline`);
+  campaignRecipientTimeline(sendId: number, campaignId = 0, email = ""): Promise<CampaignRecipientTimeline> {
+    const params = new URLSearchParams({ campaign_id: String(campaignId), email });
+    return request(`/campaigns/activity/${sendId}/timeline?${params.toString()}`);
   },
   campaignReplyContent(sendId: number): Promise<CampaignReplyContent> {
     return request(`/campaigns/activity/${sendId}/reply`);

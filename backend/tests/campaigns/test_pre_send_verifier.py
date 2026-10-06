@@ -51,7 +51,8 @@ def test_worker_removes_only_definite_invalid_recipients(tmp_path):
     assert leads.get(valid) is not None
     assert [s["email"] for s in store.sends(campaign["id"], "u1")] == [valid]
     assert store.email_check_status(bad) == "invalid"
-    assert worker.status(valid) == "ready"
+    # MX proves a route for the domain, not that this mailbox exists.
+    assert worker.status(valid) == "hold"
 
 
 def test_send_waits_until_worker_verifies(tmp_path, monkeypatch):
@@ -66,6 +67,8 @@ def test_send_waits_until_worker_verifies(tmp_path, monkeypatch):
     assert ctx["sched"].run_once()["sent"] == 0
     assert sent == []
     assert worker.run_once()["ready"] == 1
+    assert ctx["sched"].run_once()["sent"] == 0
+    ctx["store"].save_email_check("123sales@acme.com", "ready", "first-party:reply-confirmed")
     assert ctx["sched"].run_once()["sent"] == 1
     assert len(sent) == 1
 
@@ -93,5 +96,5 @@ def test_held_address_does_not_block_verified_address(tmp_path):
         emails=["hold@slow.test", "ready@acme.com"],
         start_at=_iso(NOW - timedelta(minutes=1)))
     store.save_email_check("hold@slow.test", "hold", "DNS unavailable")
-    store.save_email_check("ready@acme.com", "ready", "MX record found")
+    store.save_email_check("ready@acme.com", "ready", "first-party:reply-confirmed")
     assert store.next_pending(campaign["id"], verified_only=True)["email"] == "ready@acme.com"

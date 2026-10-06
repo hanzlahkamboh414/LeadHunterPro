@@ -88,6 +88,7 @@ class CampaignStore:
                     status TEXT NOT NULL DEFAULT 'scheduled',
                     paused_reason TEXT NOT NULL DEFAULT '',
                     resume_at TEXT NOT NULL DEFAULT '',
+                    early_resume_date TEXT NOT NULL DEFAULT '',
                     start_at TEXT NOT NULL,
                     daily_limit INTEGER NOT NULL DEFAULT 30,
                     delay_min_s INTEGER NOT NULL DEFAULT 180,
@@ -180,6 +181,26 @@ class CampaignStore:
                 )
             """)
             conn.execute("""
+                CREATE TABLE IF NOT EXISTS campaign_drafts (
+                    campaign_id INTEGER NOT NULL,
+                    email TEXT NOT NULL COLLATE NOCASE,
+                    step INTEGER NOT NULL,
+                    subject TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    PRIMARY KEY (campaign_id, email, step)
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS campaign_bounces (
+                    campaign_id INTEGER NOT NULL,
+                    email TEXT NOT NULL COLLATE NOCASE,
+                    account_id INTEGER NOT NULL DEFAULT 0,
+                    bounced_at TEXT NOT NULL,
+                    reason TEXT NOT NULL DEFAULT '',
+                    PRIMARY KEY (campaign_id, email)
+                )
+            """)
+            conn.execute("""
                 CREATE TABLE IF NOT EXISTS campaign_email_checks (
                     email TEXT PRIMARY KEY COLLATE NOCASE,
                     status TEXT NOT NULL CHECK(status IN ('ready', 'hold', 'invalid')),
@@ -187,11 +208,28 @@ class CampaignStore:
                     checked_at TEXT NOT NULL
                 )
             """)
+            conn.execute("""CREATE TABLE IF NOT EXISTS mails_so_validation_usage (
+                day TEXT PRIMARY KEY,
+                requests INTEGER NOT NULL DEFAULT 0
+            )""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS builtin_smtp_probe_usage (
+                day TEXT PRIMARY KEY,
+                requests INTEGER NOT NULL DEFAULT 0
+            )""")
             # E5 additive migrations (plain ALTERs — no rebuild needed).
             cols = [r[1] for r in conn.execute("PRAGMA table_info(campaigns)")]
             if "ai_personalize" not in cols:
                 conn.execute("ALTER TABLE campaigns "
                              "ADD COLUMN ai_personalize INTEGER NOT NULL DEFAULT 0")
+            if "ai_compose" not in cols:
+                conn.execute("ALTER TABLE campaigns "
+                             "ADD COLUMN ai_compose INTEGER NOT NULL DEFAULT 0")
+            if "ai_signature" not in cols:
+                conn.execute("ALTER TABLE campaigns "
+                             "ADD COLUMN ai_signature TEXT NOT NULL DEFAULT ''")
+            if "early_resume_date" not in cols:
+                conn.execute("ALTER TABLE campaigns "
+                             "ADD COLUMN early_resume_date TEXT NOT NULL DEFAULT ''")
             cols = [r[1] for r in conn.execute("PRAGMA table_info(campaign_sends)")]
             if "account_id" not in cols:
                 conn.execute("ALTER TABLE campaign_sends "
@@ -218,6 +256,26 @@ class CampaignStore:
                 "CREATE INDEX IF NOT EXISTS idx_sends_campaign "
                 "ON campaign_sends (campaign_id, state)"
             )
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS campaign_recipient_history (
+                    user_id TEXT NOT NULL,
+                    email TEXT NOT NULL COLLATE NOCASE,
+                    campaign_id INTEGER NOT NULL,
+                    account_id INTEGER NOT NULL,
+                    sent_at TEXT NOT NULL,
+                    PRIMARY KEY (user_id, email)
+                )
+            """)
+            conn.execute(
+                "INSERT OR IGNORE INTO campaign_recipient_history "
+                "(user_id, email, campaign_id, account_id, sent_at) "
+                "SELECT c.user_id, lower(s.email), s.campaign_id, "
+                "CASE WHEN s.account_id > 0 THEN s.account_id ELSE c.account_id END, "
+                "s.sent_at FROM campaign_sends s "
+                "JOIN campaigns c ON c.id = s.campaign_id "
+                "WHERE s.step = 0 AND s.state = 'sent' "
+                "ORDER BY s.sent_at, s.id"
+            )
             conn.commit()
             conn.close()
 
@@ -230,6 +288,9 @@ class CampaignStore:
         followups: list[dict[str, Any]] | None = None,
         account_ids: list[int] | None = None,
         ai_personalize: bool = False,
+        ai_compose: bool = False,
+        ai_signature: str = "",
+        recipient_limit: int | None = None,
     ) -> dict[str, Any]:
         """One campaign + its pending step-0 send queue (insertion order =
         send order) + its follow-up definitions (steps 1..N). Duplicate
@@ -238,22 +299,47 @@ class CampaignStore:
         primary always comes first and duplicates drop."""
         seen: list[str] = []
         for e in emails:
-            if e and e not in seen:
-                seen.append(e)
+            clean = e.strip().lower()
+            if clean and clean not in seen:
+                seen.append(clean)
         accounts = [account_id]
         for a in account_ids or []:
             if a and a not in accounts:
                 accounts.append(int(a))
         now = _now()
         conn = self._conn()
+        conn.execute("BEGIN IMMEDIATE")
+        # Reserve recipients inside the write transaction. The API's preview
+        # check alone can race a second campaign creation.
+        claimed = {row[0] for row in conn.execute(
+            "SELECT DISTINCT lower(s.email) FROM campaign_sends s "
+            "JOIN campaigns c ON c.id = s.campaign_id "
+            "WHERE c.user_id = ? AND s.step = 0", (user_id,),
+        )}
+        claimed.update(row[0] for row in conn.execute(
+            "SELECT email FROM campaign_recipient_history WHERE user_id = ?",
+            (user_id,),
+        ))
+        seen = [e for e in seen if e.lower() not in claimed]
+        if recipient_limit is not None:
+            seen = seen[:recipient_limit]
+            if len(seen) < recipient_limit:
+                conn.rollback()
+                conn.close()
+                raise ValueError("Some leads became unavailable; refresh and try again")
+        if not seen:
+            conn.rollback()
+            conn.close()
+            raise ValueError("all recipients are already queued or emailed")
         cur = conn.execute(
             "INSERT INTO campaigns (user_id, account_id, name, subject, body, "
             "status, start_at, daily_limit, delay_min_s, delay_max_s, "
-            "ai_personalize, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, ?, ?, ?, ?)",
+            "ai_personalize, ai_compose, ai_signature, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (user_id, account_id, name, subject, body, start_at,
              int(daily_limit), int(delay_min_s), int(delay_max_s),
-             1 if ai_personalize else 0, now, now),
+             1 if ai_personalize else 0, 1 if ai_compose else 0,
+             ai_signature.strip(), now, now),
         )
         campaign_id = cur.lastrowid
         conn.executemany(
@@ -281,7 +367,8 @@ class CampaignStore:
     _CAMPAIGN_COLS = ("id, user_id, account_id, name, subject, body, status, "
                       "paused_reason, resume_at, start_at, daily_limit, "
                       "delay_min_s, delay_max_s, ai_personalize, "
-                      "created_at, updated_at")
+                      "created_at, updated_at, early_resume_date, "
+                      "ai_compose, ai_signature")
 
     def get(self, campaign_id: int, user_id: str) -> dict[str, Any] | None:
         """One campaign (None when missing or not the caller's) + progress."""
@@ -314,7 +401,7 @@ class CampaignStore:
         return out
 
     def sends(self, campaign_id: int, user_id: str,
-              limit: int = 200) -> list[dict[str, Any]] | None:
+              limit: int = 5000) -> list[dict[str, Any]] | None:
         """The send queue (pending order first, then sent/failed/skipped).
         None when the campaign is not the caller's."""
         conn = self._conn()
@@ -347,7 +434,35 @@ class CampaignStore:
             for r in rows
         ]
 
+    def record_bounce(self, campaign_id: int, email: str, *, account_id: int = 0,
+                      reason: str = "") -> None:
+        conn = self._conn()
+        conn.execute(
+            "INSERT OR IGNORE INTO campaign_bounces "
+            "(campaign_id, email, account_id, bounced_at, reason) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (campaign_id, email.strip().lower(), account_id, _now(), reason[:300]),
+        )
+        conn.commit()
+        conn.close()
+
+    def bounces(self, campaign_id: int, user_id: str) -> list[dict[str, Any]] | None:
+        conn = self._conn()
+        owns = conn.execute("SELECT 1 FROM campaigns WHERE id = ? AND user_id = ?",
+                            (campaign_id, user_id)).fetchone()
+        if owns is None:
+            conn.close()
+            return None
+        rows = conn.execute(
+            "SELECT email, account_id, bounced_at, reason FROM campaign_bounces "
+            "WHERE campaign_id = ? ORDER BY bounced_at DESC", (campaign_id,),
+        ).fetchall()
+        conn.close()
+        return [{"email": r[0], "account_id": r[1], "bounced_at": r[2],
+                 "reason": r[3]} for r in rows]
+
     def followups(self, campaign_id: int) -> list[dict[str, Any]]:
+
         """The campaign's follow-up definitions, in step order."""
         conn = self._conn()
         rows = conn.execute(
@@ -418,6 +533,9 @@ class CampaignStore:
             "delay_min_s": r[11], "delay_max_s": r[12],
             "ai_personalize": bool(r[13]),
             "created_at": r[14], "updated_at": r[15],
+            "early_resume_date": r[16] or "",
+            "ai_compose": bool(r[17]),
+            "ai_signature": r[18] or "",
             "pending": counts.get("pending", 0),
             "sent": counts.get("sent", 0),
             "failed": counts.get("failed", 0),
@@ -484,7 +602,9 @@ class CampaignStore:
             params.append(now_iso)
         if verified_only:
             where += (" AND EXISTS (SELECT 1 FROM campaign_email_checks v "
-                      "WHERE v.email = campaign_sends.email AND v.status = 'ready')")
+                      "WHERE v.email = campaign_sends.email AND v.status = 'ready' "
+                      "AND v.reason IN ('mails.so:deliverable', "
+                      "'first-party:reply-confirmed'))")
         conn = self._conn()
         row = conn.execute(
             f"SELECT id, email, step, attempts FROM campaign_sends "
@@ -496,13 +616,27 @@ class CampaignStore:
             return None
         return {"id": row[0], "email": row[1], "step": row[2], "attempts": row[3]}
 
+    def next_pending_at(self, campaign_id: int) -> str:
+        """Earliest scheduled pending follow-up, if there is one."""
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT MIN(not_before) FROM campaign_sends "
+            "WHERE campaign_id = ? AND state = 'pending' AND not_before != ''",
+            (campaign_id,),
+        ).fetchone()
+        conn.close()
+        return (row[0] or "") if row else ""
+
     def email_check_status(self, email: str) -> str | None:
         conn = self._conn()
         row = conn.execute(
-            "SELECT status, checked_at FROM campaign_email_checks WHERE email = ?",
+            "SELECT status, checked_at, reason FROM campaign_email_checks WHERE email = ?",
             ((email or "").strip().lower(),),
         ).fetchone()
         conn.close()
+        if row and row[0] == "ready" and row[2] not in (
+                "mails.so:deliverable", "first-party:reply-confirmed"):
+            return "hold"
         if row and row[0] == "ready":
             cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
             if row[1] <= cutoff:
@@ -527,7 +661,9 @@ class CampaignStore:
 
     def emails_to_verify(self, *, limit: int = 100,
                          retry_before: str = "",
-                         ready_before: str = "") -> list[str]:
+                         ready_before: str = "",
+                         provider_retry_before: str = "",
+                         builtin_retry_before: str = "") -> list[str]:
         """Distinct queued recipients without a result, plus old holds."""
         conn = self._conn()
         rows = conn.execute(
@@ -535,13 +671,67 @@ class CampaignStore:
             "LEFT JOIN campaign_email_checks v ON v.email = s.email "
             "WHERE s.state = 'pending' AND (v.email IS NULL "
             "OR v.status = 'invalid' "
-            "OR (v.status = 'hold' AND v.checked_at <= ?) "
-            "OR (v.status = 'ready' AND v.checked_at <= ?)) "
-            "GROUP BY lower(s.email) ORDER BY MIN(s.id) LIMIT ?",
-            (retry_before, ready_before, int(limit)),
+            "OR (v.status = 'hold' AND v.checked_at <= ? "
+            "AND v.reason NOT LIKE 'mails.so:%' "
+            "AND v.reason NOT LIKE 'builtin:%') "
+            "OR (v.status = 'hold' AND v.checked_at <= ? "
+            "AND v.reason LIKE 'mails.so:%') "
+            "OR (v.status = 'hold' AND v.checked_at <= ? "
+            "AND (v.reason LIKE 'builtin:%' OR v.reason LIKE 'smtp-probe:%')) "
+            "OR (v.status = 'ready' AND (v.checked_at <= ? "
+            "OR v.reason NOT IN ('mails.so:deliverable', "
+            "'first-party:reply-confirmed')))) "
+            "GROUP BY lower(s.email) "
+            "ORDER BY COALESCE(v.checked_at, '') ASC, MIN(s.step), MIN(s.id) LIMIT ?",
+            (retry_before, provider_retry_before, builtin_retry_before,
+             ready_before, int(limit)),
         ).fetchall()
         conn.close()
         return [row[0] for row in rows]
+
+    def reserve_mails_so_validation(self, day: str, *, limit: int) -> bool:
+        """Persist a conservative per-day request cap before network I/O."""
+        conn = self._conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            used = conn.execute(
+                "SELECT requests FROM mails_so_validation_usage WHERE day=?",
+                (day,),
+            ).fetchone()
+            if used and used[0] >= limit:
+                conn.rollback()
+                return False
+            conn.execute(
+                "INSERT INTO mails_so_validation_usage(day,requests) VALUES (?,1) "
+                "ON CONFLICT(day) DO UPDATE SET requests=requests+1",
+                (day,),
+            )
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+
+    def reserve_builtin_smtp_probe(self, day: str, *, limit: int) -> bool:
+        """Cap no-DATA SMTP probes per UTC day before touching remote MXes."""
+        conn = self._conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            used = conn.execute(
+                "SELECT requests FROM builtin_smtp_probe_usage WHERE day=?",
+                (day,),
+            ).fetchone()
+            if used and used[0] >= limit:
+                conn.rollback()
+                return False
+            conn.execute(
+                "INSERT INTO builtin_smtp_probe_usage(day,requests) VALUES (?,1) "
+                "ON CONFLICT(day) DO UPDATE SET requests=requests+1",
+                (day,),
+            )
+            conn.commit()
+            return True
+        finally:
+            conn.close()
 
     def save_email_check(self, email: str, status: str, reason: str) -> None:
         if status not in {"ready", "hold", "invalid"}:
@@ -581,7 +771,7 @@ class CampaignStore:
         return (row[0] or "") if row else ""
 
     def sent_today_for_account(self, account_id: int, today: str) -> int:
-        """Sent count for the ACCOUNT (all campaigns) on one UTC date — the
+        """Sent count for the ACCOUNT (all campaigns) on one Pakistan date — the
         daily cap is per Gmail account, not per campaign. Pre-E5 rows (no
         send-level account) count via the campaign's primary account."""
         conn = self._conn()
@@ -589,7 +779,7 @@ class CampaignStore:
             "SELECT COUNT(*) FROM campaign_sends s JOIN campaigns c "
             "ON s.campaign_id = c.id WHERE s.state = 'sent' AND "
             "(CASE WHEN s.account_id > 0 THEN s.account_id ELSE c.account_id END) = ? "
-            "AND substr(s.sent_at, 1, 10) = ?",
+            "AND date(s.sent_at, '+5 hours') = ?",
             (account_id, today),
         ).fetchone()
         conn.close()
@@ -597,20 +787,276 @@ class CampaignStore:
 
     def already_sent_emails(self, user_id: str,
                             emails: list[str]) -> set[str]:
-        """Which of these emails were ALREADY sent to (any campaign, this
-        user)? Used at create time to never double-email a lead."""
+        """Recipients already queued or emailed in this user's campaigns."""
         if not emails:
             return set()
         conn = self._conn()
-        marks = ",".join("?" * len(emails))
         rows = conn.execute(
-            f"SELECT DISTINCT s.email FROM campaign_sends s "
-            f"JOIN campaigns c ON s.campaign_id = c.id "
-            f"WHERE c.user_id = ? AND s.state = 'sent' AND s.email IN ({marks})",
-            [user_id, *emails],
+            "SELECT DISTINCT lower(s.email) FROM campaign_sends s "
+            "JOIN campaigns c ON s.campaign_id = c.id "
+            "WHERE c.user_id = ? AND s.step = 0", (user_id,),
+        ).fetchall()
+        historical = conn.execute(
+            "SELECT email FROM campaign_recipient_history WHERE user_id = ?",
+            (user_id,),
         ).fetchall()
         conn.close()
-        return {r[0] for r in rows}
+        requested = {e.strip().lower() for e in emails}
+        return {r[0] for r in [*rows, *historical] if r[0] in requested}
+
+    def recipient_statuses(self, user_id: str) -> dict[str, list[str]]:
+        """Campaign membership for the user's lead picker, including deleted sends."""
+        conn = self._conn()
+        queued = {r[0] for r in conn.execute(
+            "SELECT DISTINCT lower(s.email) FROM campaign_sends s "
+            "JOIN campaigns c ON c.id=s.campaign_id "
+            "WHERE c.user_id=? AND s.step=0 AND s.state<>'sent'",
+            (user_id,),
+        )}
+        emailed = {r[0] for r in conn.execute(
+            "SELECT email FROM campaign_recipient_history WHERE user_id=?",
+            (user_id,),
+        )}
+        conn.close()
+        return {"queued": sorted(queued - emailed), "emailed": sorted(emailed)}
+
+    def activity_for_user(self, user_id: str, limit: int = 100,
+                          offset: int = 0) -> list[dict[str, Any]]:
+        """Sent emails across campaigns, with sender and detected reply metadata."""
+        conn = self._conn()
+        rows = conn.execute(
+            "SELECT s.id, s.email, s.step, s.sent_at, s.subject, "
+            "CASE WHEN s.account_id > 0 THEN s.account_id ELSE c.account_id END, "
+            "c.id, c.name, r.received_at, r.subject "
+            "FROM campaign_sends s JOIN campaigns c ON c.id = s.campaign_id "
+            "LEFT JOIN campaign_replies r ON r.campaign_id = c.id AND r.email = s.email "
+            "WHERE c.user_id = ? AND s.state = 'sent' "
+            "ORDER BY s.sent_at DESC, s.id DESC LIMIT ? OFFSET ?",
+            (user_id, int(limit), int(offset)),
+        ).fetchall()
+        conn.close()
+        return [
+            {"send_id": r[0], "email": r[1], "step": r[2],
+             "sent_at": r[3] or "", "subject": r[4] or "",
+             "account_id": r[5], "campaign_id": r[6],
+             "campaign_name": r[7], "replied_at": r[8] or "",
+             "reply_subject": r[9] or ""}
+            for r in rows
+        ]
+
+    def explore_activity(
+        self, user_id: str, *,
+        view: str = "sent", from_date: str = "", to_date: str = "",
+        account_id: int = 0, campaign_id: int = 0, email: str = "",
+        limit: int = 50, offset: int = 0,
+    ) -> dict[str, Any]:
+        """Paged, owner-scoped history with totals for every matching date/account."""
+        if view not in ("sent", "replied", "bounced", "followup"):
+            raise ValueError("unknown activity view")
+        conn = self._conn()
+        try:
+            scope = ""
+            owner_args: list[Any] = [user_id]
+            account = "CASE WHEN s.account_id > 0 THEN s.account_id ELSE c.account_id END"
+            if view == "bounced":
+                source = (
+                    "SELECT COALESCE(s.id, 0) AS send_id, b.email, 0 AS step, "
+                    "b.bounced_at AS event_at, COALESCE(s.sent_at, '') AS sent_at, "
+                    "COALESCE(s.subject, '') AS subject, "
+                    "CASE WHEN b.account_id > 0 THEN b.account_id ELSE c.account_id END AS account_id, "
+                    "c.id AS campaign_id, c.name AS campaign_name, "
+                    "'' AS replied_at, '' AS reply_subject, b.reason AS reason "
+                    "FROM campaign_bounces b JOIN campaigns c ON c.id = b.campaign_id "
+                    "LEFT JOIN campaign_sends s ON s.campaign_id = b.campaign_id "
+                    "AND s.email = b.email AND s.step = 0 "
+                    "WHERE c.user_id = ?" + scope
+                )
+            elif view == "replied":
+                source = (
+                    "SELECT s.id AS send_id, s.email, s.step, r.received_at AS event_at, "
+                    "s.sent_at, s.subject, " + account + " AS account_id, "
+                    "c.id AS campaign_id, c.name AS campaign_name, "
+                    "r.received_at AS replied_at, r.subject AS reply_subject, '' AS reason "
+                    "FROM campaign_replies r JOIN campaigns c ON c.id = r.campaign_id "
+                    "JOIN campaign_sends s ON s.campaign_id = c.id AND s.email = r.email AND s.step = 0 "
+                    "WHERE c.user_id = ?" + scope
+                )
+            else:
+                step_clause = "s.step > 0" if view == "followup" else "s.step = 0"
+                source = (
+                    "SELECT s.id AS send_id, s.email, s.step, s.sent_at AS event_at, "
+                    "s.sent_at, s.subject, " + account + " AS account_id, "
+                    "c.id AS campaign_id, c.name AS campaign_name, "
+                    "COALESCE(r.received_at, '') AS replied_at, "
+                    "COALESCE(r.subject, '') AS reply_subject, '' AS reason "
+                    "FROM campaign_sends s JOIN campaigns c ON c.id = s.campaign_id "
+                    "LEFT JOIN campaign_replies r ON r.campaign_id = c.id AND r.email = s.email "
+                    "WHERE c.user_id = ?" + scope +
+                    " AND s.state = 'sent' AND " + step_clause
+                )
+            filters = ["event_at != ''"]
+            values: list[Any] = []
+            if from_date:
+                filters.append("substr(event_at, 1, 10) >= ?")
+                values.append(from_date)
+            if to_date:
+                filters.append("substr(event_at, 1, 10) <= ?")
+                values.append(to_date)
+            if account_id:
+                filters.append("account_id = ?")
+                values.append(account_id)
+            if campaign_id:
+                filters.append("campaign_id = ?")
+                values.append(campaign_id)
+            if email:
+                filters.append("lower(email) LIKE ?")
+                values.append("%" + email.strip().lower() + "%")
+            filtered = "WITH activity AS (" + source + ") SELECT * FROM activity WHERE " + " AND ".join(filters)
+            args = (*owner_args, *values)
+            cols = [d[0] for d in conn.execute(filtered + " LIMIT 0", args).description]
+            rows = conn.execute(
+                filtered + " ORDER BY event_at DESC, send_id DESC LIMIT ? OFFSET ?",
+                (*args, limit, offset),
+            ).fetchall()
+            total, first_date = conn.execute(
+                "SELECT COUNT(*), MIN(substr(event_at, 1, 10)) FROM (" + filtered + ")",
+                args,
+            ).fetchone()
+            by_date = conn.execute(
+                "SELECT substr(event_at, 1, 10), COUNT(*) FROM (" + filtered + ") "
+                "GROUP BY substr(event_at, 1, 10) ORDER BY 1 DESC", args,
+            ).fetchall()
+            by_account = conn.execute(
+                "SELECT account_id, COUNT(*) FROM (" + filtered + ") "
+                "GROUP BY account_id ORDER BY 2 DESC", args,
+            ).fetchall()
+            return {
+                "rows": [dict(zip(cols, row, strict=True)) for row in rows],
+                "total": total,
+                "first_date": first_date or "",
+                "by_date": [{"date": day, "count": count} for day, count in by_date],
+                "by_account": [{"account_id": aid, "count": count} for aid, count in by_account],
+            }
+        finally:
+            conn.close()
+
+    def recipient_history(
+        self, send_id: int, user_id: str, *,
+        campaign_id: int = 0, email: str = "",
+    ) -> dict[str, Any] | None:
+        """All saved send steps and outcomes for one owned campaign recipient."""
+        conn = self._conn()
+        try:
+            scope = ""
+            args = (send_id, user_id)
+            if send_id:
+                anchor = conn.execute(
+                    "SELECT s.campaign_id, s.email, c.name FROM campaign_sends s "
+                    "JOIN campaigns c ON c.id = s.campaign_id "
+                    "WHERE s.id = ? AND c.user_id = ?" + scope, args,
+                ).fetchone()
+            else:
+                anchor = conn.execute(
+                    "SELECT b.campaign_id, b.email, c.name FROM campaign_bounces b "
+                    "JOIN campaigns c ON c.id = b.campaign_id "
+                    "WHERE b.campaign_id = ? AND b.email = ? AND c.user_id = ?",
+                    (campaign_id, email.strip().lower(), user_id),
+                ).fetchone()
+            if anchor is None:
+                return None
+            campaign_id, email, campaign_name = anchor
+            sends = conn.execute(
+                "SELECT s.id, s.step, s.state, s.subject, s.sent_at, s.not_before, "
+                "s.error, CASE WHEN s.account_id > 0 THEN s.account_id ELSE c.account_id END, "
+                "COALESCE(d.body, '') "
+                "FROM campaign_sends s JOIN campaigns c ON c.id = s.campaign_id "
+                "LEFT JOIN campaign_drafts d ON d.campaign_id = s.campaign_id "
+                "AND d.email = s.email AND d.step = s.step "
+                "WHERE s.campaign_id = ? AND s.email = ? ORDER BY s.step, s.id",
+                (campaign_id, email),
+            ).fetchall()
+            reply = conn.execute(
+                "SELECT received_at, subject FROM campaign_replies "
+                "WHERE campaign_id = ? AND email = ?", (campaign_id, email),
+            ).fetchone()
+            bounce = conn.execute(
+                "SELECT bounced_at, reason FROM campaign_bounces "
+                "WHERE campaign_id = ? AND email = ?", (campaign_id, email),
+            ).fetchone()
+            return {
+                "campaign_id": campaign_id, "campaign_name": campaign_name,
+                "email": email,
+                "sends": [
+                    {"send_id": r[0], "step": r[1], "state": r[2],
+                     "subject": r[3] or "", "sent_at": r[4] or "",
+                     "not_before": r[5] or "", "error": r[6] or "",
+                     "account_id": r[7], "body": r[8]}
+                    for r in sends
+                ],
+                "reply": {"received_at": reply[0], "subject": reply[1]} if reply else None,
+                "bounce": {"bounced_at": bounce[0], "reason": bounce[1]} if bounce else None,
+            }
+        finally:
+            conn.close()
+
+    def reply_context(self, send_id: int, user_id: str) -> dict[str, Any] | None:
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT s.email, s.sent_at, "
+            "CASE WHEN s.account_id > 0 THEN s.account_id ELSE c.account_id END, "
+            "r.received_at, r.subject "
+            "FROM campaign_sends s JOIN campaigns c ON c.id = s.campaign_id "
+            "JOIN campaign_replies r ON r.campaign_id = c.id AND r.email = s.email "
+            "WHERE s.id = ? AND c.user_id = ? AND s.state = 'sent'",
+            (send_id, user_id),
+        ).fetchone()
+        conn.close()
+        if row is None:
+            return None
+        return {"email": row[0], "sent_at": row[1] or "",
+                "account_id": row[2], "replied_at": row[3] or "",
+                "reply_subject": row[4] or ""}
+
+    def duplicate_owner(self, campaign_id: int, user_id: str,
+                        email: str) -> bool:
+        """True when another campaign owns this first outreach.
+
+        A completed send wins; otherwise the oldest pending campaign wins.
+        This catches queues created before cross-campaign dedup was added.
+        """
+        conn = self._conn()
+        rows = conn.execute(
+            "SELECT s.campaign_id, s.state FROM campaign_sends s "
+            "JOIN campaigns c ON c.id = s.campaign_id "
+            "WHERE c.user_id = ? AND lower(s.email) = ? AND s.step = 0 "
+            "AND s.state IN ('pending', 'sent') ORDER BY s.campaign_id",
+            (user_id, email.strip().lower()),
+        ).fetchall()
+        historical = conn.execute(
+            "SELECT campaign_id FROM campaign_recipient_history "
+            "WHERE user_id = ? AND email = ?",
+            (user_id, email.strip().lower()),
+        ).fetchone()
+        conn.close()
+        if historical is not None and historical[0] != campaign_id:
+            return True
+        sent_owners = [r[0] for r in rows if r[1] == "sent"]
+        owner = min(sent_owners) if sent_owners else (rows[0][0] if rows else campaign_id)
+        return owner != campaign_id
+
+    def initial_sender(self, campaign_id: int, email: str) -> int | None:
+        """Account that sent step 0, for keeping follow-ups on that account."""
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT CASE WHEN s.account_id > 0 THEN s.account_id "
+            "ELSE c.account_id END FROM campaign_sends s "
+            "JOIN campaigns c ON c.id = s.campaign_id "
+            "WHERE s.campaign_id = ? AND lower(s.email) = ? "
+            "AND s.step = 0 AND s.state = 'sent'",
+            (campaign_id, email.strip().lower()),
+        ).fetchone()
+        conn.close()
+        return int(row[0]) if row else None
 
     # -- Follow-up queueing + replies (Phase E4) ---------------------------
 
@@ -678,6 +1124,7 @@ class CampaignStore:
                 "DELETE FROM campaign_sends WHERE lower(email) = ?", (addr,),
             ).rowcount
             conn.execute("DELETE FROM campaign_hooks WHERE lower(email) = ?", (addr,))
+            conn.execute("DELETE FROM campaign_drafts WHERE lower(email) = ?", (addr,))
             conn.execute("DELETE FROM campaign_replies WHERE lower(email) = ?", (addr,))
             for cid in campaign_ids:
                 conn.execute(
@@ -806,6 +1253,8 @@ class CampaignStore:
                         delay_max_s: int | None = None,
                         followups: list[dict[str, Any]] | None = None,
                         ai_personalize: bool | None = None,
+                        ai_compose: bool | None = None,
+                        ai_signature: str | None = None,
                         ) -> bool:
         """Edit future sends atomically; preserve sent rows and their history."""
         conn = self._conn()
@@ -814,7 +1263,7 @@ class CampaignStore:
             scope = (campaign_id, user_id)
             row = conn.execute(
                 "SELECT status, account_id, start_at, daily_limit, delay_min_s, "
-                "delay_max_s, ai_personalize FROM campaigns "
+                "delay_max_s, ai_personalize, ai_compose, ai_signature FROM campaigns "
                 "WHERE id = ? AND user_id = ?",
                 scope,
             ).fetchone()
@@ -832,13 +1281,26 @@ class CampaignStore:
                 "UPDATE campaigns SET name = ?, subject = ?, body = ?, "
                 "account_id = ?, start_at = ?, status = ?, daily_limit = ?, "
                 "delay_min_s = ?, delay_max_s = ?, ai_personalize = ?, "
+                "ai_compose = ?, ai_signature = ?, "
+                "early_resume_date = CASE WHEN ? THEN '' ELSE early_resume_date END, "
                 "updated_at = ? WHERE id = ? AND user_id = ?",
                 (name, subject, body, primary, new_start, new_status,
                  int(daily_limit if daily_limit is not None else row[3]),
                  int(delay_min_s if delay_min_s is not None else row[4]),
                  int(delay_max_s if delay_max_s is not None else row[5]),
                  int(ai_personalize if ai_personalize is not None else row[6]),
+                 int(ai_compose if ai_compose is not None else row[7]),
+                 ai_signature.strip() if ai_signature is not None else row[8],
+                 int(start_at is not None and new_start != row[2]),
                  _now(), *scope),
+            )
+            conn.execute(
+                "DELETE FROM campaign_drafts WHERE campaign_id = ? AND "
+                "EXISTS (SELECT 1 FROM campaign_sends s WHERE "
+                "s.campaign_id = campaign_drafts.campaign_id "
+                "AND lower(s.email) = lower(campaign_drafts.email) "
+                "AND s.step = campaign_drafts.step AND s.state = 'pending')",
+                (campaign_id,),
             )
             if account_id is not None or account_ids is not None:
                 existing_accounts = [r[0] for r in conn.execute(
@@ -857,14 +1319,20 @@ class CampaignStore:
                 wanted_emails = list(dict.fromkeys(e.strip().lower() for e in emails if e.strip()))
                 # A sent or terminal first email stays in history and cannot
                 # be turned back into a pending send by an audience edit.
-                sent_elsewhere = {
+                claimed_elsewhere = {
                     r[0] for r in conn.execute(
-                        "SELECT DISTINCT s.email FROM campaign_sends s "
+                        "SELECT DISTINCT lower(s.email) FROM campaign_sends s "
                         "JOIN campaigns c ON c.id = s.campaign_id "
-                        "WHERE c.user_id = ? AND s.state = 'sent'",
-                        (user_id,),
+                        "WHERE c.user_id = ? AND s.step = 0 AND "
+                        "(s.state = 'sent' OR "
+                        "(s.state = 'pending' AND s.campaign_id != ?))",
+                        (user_id, campaign_id),
                     )
                 }
+                claimed_elsewhere.update(r[0] for r in conn.execute(
+                    "SELECT email FROM campaign_recipient_history WHERE user_id = ?",
+                    (user_id,),
+                ))
                 terminal_here = {
                     r[0] for r in conn.execute(
                         "SELECT email FROM campaign_sends WHERE campaign_id = ? "
@@ -873,7 +1341,7 @@ class CampaignStore:
                     )
                 }
                 desired = [e for e in wanted_emails
-                           if e not in sent_elsewhere and e not in terminal_here]
+                           if e not in claimed_elsewhere and e not in terminal_here]
                 keep = set(desired)
                 for (send_id, email) in conn.execute(
                     "SELECT id, email FROM campaign_sends WHERE campaign_id = ? "
@@ -940,8 +1408,25 @@ class CampaignStore:
         conn = self._conn()
         cur = conn.execute(
             "UPDATE campaigns SET status = ?, paused_reason = ?, resume_at = ?, "
+            "early_resume_date = CASE WHEN ? = 'user' THEN '' ELSE early_resume_date END, "
             "updated_at = ? WHERE id = ?",
-            (status, paused_reason, resume_at, _now(), campaign_id),
+            (status, paused_reason, resume_at, paused_reason, _now(), campaign_id),
+        )
+        conn.commit()
+        conn.close()
+        return cur.rowcount > 0
+
+    def continue_now(self, campaign_id: int, user_id: str,
+                     pakistan_day: str) -> bool:
+        """Override today's start clock only; preserve tomorrow's schedule."""
+        conn = self._conn()
+        cur = conn.execute(
+            "UPDATE campaigns SET status = 'running', paused_reason = '', "
+            "resume_at = '', early_resume_date = ?, updated_at = ? "
+            "WHERE id = ? AND user_id = ? AND "
+            "(status IN ('scheduled', 'running') OR "
+            "(status = 'paused' AND paused_reason = 'user'))",
+            (pakistan_day, _now(), campaign_id, user_id),
         )
         conn.commit()
         conn.close()
@@ -1003,7 +1488,7 @@ class CampaignStore:
             return False
         for table in ("campaign_sends", "campaign_followups",
                       "campaign_replies", "campaign_accounts",
-                      "campaign_hooks"):
+                      "campaign_hooks", "campaign_bounces", "campaign_drafts"):
             conn.execute(f"DELETE FROM {table} WHERE campaign_id = ?",
                          (campaign_id,))
         conn.execute("DELETE FROM campaigns WHERE id = ?", (campaign_id,))
@@ -1014,17 +1499,57 @@ class CampaignStore:
     # -- Send outcomes ------------------------------------------------------
 
     def mark_sent(self, send_id: int, *, subject: str, sent_at: str,
-                  account_id: int = 0) -> None:
+                  account_id: int = 0, body: str = "") -> None:
         conn = self._conn()
+        row = conn.execute(
+            "SELECT c.user_id, lower(s.email), s.campaign_id, s.step "
+            "FROM campaign_sends s JOIN campaigns c ON c.id=s.campaign_id "
+            "WHERE s.id=?", (send_id,),
+        ).fetchone()
         conn.execute(
             "UPDATE campaign_sends SET state = 'sent', subject = ?, "
             "sent_at = ?, account_id = ?, error = '' WHERE id = ?",
             (subject, sent_at, int(account_id), send_id),
         )
+        if row is not None and body:
+            conn.execute(
+                "INSERT OR IGNORE INTO campaign_drafts "
+                "(campaign_id, email, step, subject, body) VALUES (?, ?, ?, ?, ?)",
+                (row[2], row[1], row[3], subject, body),
+            )
+        if row is not None and row[3] == 0:
+            conn.execute(
+                "INSERT OR IGNORE INTO campaign_recipient_history "
+                "(user_id,email,campaign_id,account_id,sent_at) "
+                "VALUES (?,?,?,?,?)",
+                (row[0], row[1], row[2], int(account_id), sent_at),
+            )
         conn.commit()
         conn.close()
 
     # -- AI opening lines (Phase E5) ---------------------------------------
+
+    def get_draft(self, campaign_id: int, email: str,
+                  step: int) -> dict[str, str] | None:
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT subject, body FROM campaign_drafts WHERE "
+            "campaign_id = ? AND email = ? AND step = ?",
+            (campaign_id, email, step),
+        ).fetchone()
+        conn.close()
+        return {"subject": row[0], "body": row[1]} if row else None
+
+    def set_draft(self, campaign_id: int, email: str, step: int,
+                  subject: str, body: str) -> None:
+        conn = self._conn()
+        conn.execute(
+            "INSERT OR IGNORE INTO campaign_drafts "
+            "(campaign_id, email, step, subject, body) VALUES (?, ?, ?, ?, ?)",
+            (campaign_id, email, step, subject, body),
+        )
+        conn.commit()
+        conn.close()
 
     def get_hook(self, campaign_id: int, email: str) -> str | None:
         """The cached AI opening line for one lead. None = never generated

@@ -109,8 +109,8 @@ export default function EmailHistory() {
           <p className="mt-1 text-slate-300">{row.campaign_name}{row.step > 0 && ` · Follow-up ${row.step}`}</p>
           <p className="mt-1 break-all text-slate-400">{row.account_email || `Account #${row.account_id}`}</p>
           <p className="mt-1 text-slate-400">{formatDate(row.event_at)}</p>
-          <button type="button" disabled={!row.send_id} onClick={() => setSelected(row)}
-            className="mt-2 min-h-11 rounded-lg border border-indigo-400/30 px-3 text-indigo-100 disabled:opacity-40">View record</button>
+          <button type="button" onClick={() => setSelected(row)}
+            className="mt-2 min-h-11 rounded-lg border border-indigo-400/30 px-3 text-indigo-100">View record</button>
         </div>)}
       </div>}
       {result && result.rows.length > 0 && <div className="mt-4 hidden overflow-x-auto rounded-lg border border-white/10 md:block">
@@ -125,8 +125,8 @@ export default function EmailHistory() {
             <td className="px-3 py-3 text-slate-300">{row.campaign_name}</td>
             <td className="break-all px-3 py-3 text-slate-300">{row.account_email || `Account #${row.account_id}`}</td>
             <td className="whitespace-nowrap px-3 py-3 text-slate-300">{formatDate(row.event_at)}</td>
-            <td className="px-3 py-2"><button type="button" disabled={!row.send_id} onClick={() => setSelected(row)}
-              className="min-h-10 rounded-lg px-2 text-indigo-200 underline hover:text-white disabled:opacity-40">View record</button></td>
+            <td className="px-3 py-2"><button type="button" onClick={() => setSelected(row)}
+              className="min-h-10 rounded-lg px-2 text-indigo-200 underline hover:text-white">View record</button></td>
           </tr>)}</tbody>
         </table>
       </div>}
@@ -161,7 +161,7 @@ export default function EmailHistory() {
 }
 
 function RecipientRecord({ row, onClose }: { row: CampaignHistoryRow; onClose: () => void }) {
-  const timeline = useQuery({ queryKey: ["campaign-recipient-timeline", row.send_id], queryFn: () => api.campaignRecipientTimeline(row.send_id) });
+  const timeline = useQuery({ queryKey: ["campaign-recipient-timeline", row.campaign_id, row.email, row.send_id], queryFn: () => api.campaignRecipientTimeline(row.send_id, row.campaign_id, row.email) });
   const [readReply, setReadReply] = useState(false);
   const reply = useQuery({ queryKey: ["campaign-reply", row.send_id], queryFn: () => api.campaignReplyContent(row.send_id), enabled: readReply, retry: false });
   return <div role="dialog" aria-modal="true" aria-label="Email record" className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-3 sm:p-5" onClick={onClose}>
@@ -170,12 +170,14 @@ function RecipientRecord({ row, onClose }: { row: CampaignHistoryRow; onClose: (
         <button type="button" onClick={onClose} aria-label="Close email record" className="flex min-h-11 min-w-11 items-center justify-center rounded-lg text-slate-300 hover:bg-white/10"><X className="h-4 w-4" /></button>
       </div>
       <p className="mt-3 text-xs text-slate-400">Campaign: <span className="text-slate-200">{row.campaign_name}</span></p>
+      <p className="mt-1 break-all text-xs text-slate-400">From: <span className="text-slate-200">{row.account_email || `Account #${row.account_id}`}</span> · {formatDate(row.event_at)}</p>
       {timeline.isLoading && <p className="mt-4 text-sm text-slate-400">Loading full record…</p>}
       {timeline.isError && <p role="alert" className="mt-4 text-sm text-rose-300">Could not load this record.</p>}
       {timeline.data && <>
         <div className="mt-4 space-y-2">{timeline.data.sends.map((send) => <div key={send.send_id} className="rounded-lg border border-white/10 p-3">
           <div className="flex flex-wrap justify-between gap-2 text-xs"><strong className="text-slate-100">{send.step === 0 ? "First email" : `Follow-up ${send.step}`}</strong><span className="capitalize text-slate-300">{send.state}</span></div>
           <p className="mt-1 break-all text-xs text-slate-300">Subject: {send.subject || "Not sent yet"}</p>
+          {send.body && <div className="mt-2 max-h-56 overflow-y-auto whitespace-pre-wrap rounded-lg border border-white/10 bg-black/20 p-3 text-sm text-slate-200">{send.body}</div>}
           <p className="mt-1 text-xs text-slate-400">From: {send.account_email || `Account #${send.account_id}`}</p>
           <p className="mt-1 text-xs text-slate-400">{send.sent_at ? `Sent: ${formatDate(send.sent_at)}` : send.not_before ? `Scheduled after: ${formatDate(send.not_before)}` : "Awaiting send"}</p>
           {send.error && <p className="mt-1 text-xs text-rose-300">{send.error}</p>}

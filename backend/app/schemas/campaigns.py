@@ -23,7 +23,10 @@ class CampaignCreateIn(BaseModel):
     account_ids: list[int] = Field(default_factory=list, max_length=4)
     subject: str = Field(min_length=1, max_length=500)
     body: str = Field(min_length=1, max_length=20000)
-    emails: list[str] = Field(min_length=1, max_length=500)
+    emails: list[str] = Field(default_factory=list, max_length=500)
+    audience_count: int | None = Field(default=None, ge=1, le=500)
+    audience_folder: str = Field(default="*", max_length=200)
+    audience_recommendation: str = Field(default="contact_now", max_length=40)
     """ISO-8601 datetime (with offset) — the 9:00 AM start, computed in the
     user's timezone by the client."""
     start_at: str = Field(min_length=10, max_length=40)
@@ -36,6 +39,8 @@ class CampaignCreateIn(BaseModel):
     """Prepend an AI-written opening line to each first email, built from
     the lead's VERIFIED dossier evidence only (E5)."""
     ai_personalize: bool = False
+    ai_compose: bool = False
+    ai_signature: str = Field(default="", max_length=2000)
 
 
 class CampaignSendOut(BaseModel):
@@ -76,11 +81,14 @@ class CampaignOut(BaseModel):
     status: str
     paused_reason: str
     resume_at: str
+    early_resume_date: str = ""
     start_at: str
     daily_limit: int
     delay_min_s: int
     delay_max_s: int
     ai_personalize: bool = False
+    ai_compose: bool = False
+    ai_signature: str = ""
     created_at: str
     updated_at: str
     pending: int
@@ -176,6 +184,8 @@ class CampaignUpdateIn(BaseModel):
     delay_max_s: int | None = Field(default=None, ge=20, le=7200)
     followups: list[FollowupIn] | None = Field(default=None, max_length=3)
     ai_personalize: bool | None = None
+    ai_compose: bool | None = None
+    ai_signature: str | None = Field(default=None, max_length=2000)
 
 
 class CampaignsOut(BaseModel):

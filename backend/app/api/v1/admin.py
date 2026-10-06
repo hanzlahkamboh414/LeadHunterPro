@@ -652,6 +652,16 @@ def wrong_phone_archive() -> list[dict]:
     return phone_store.list_wrong_archive()
 
 
+@router.get("/phones/wrong/page")
+def wrong_phone_archive_page(
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+) -> dict:
+    """Fetch only the archive rows the admin opened and can see."""
+    from app.api.v1.phones import _store as phone_store
+    return phone_store.wrong_archive_page(limit=limit, offset=offset)
+
+
 @router.post("/phones/wrong/{archive_id}/recover")
 def recover_wrong_phone(archive_id: int) -> dict:
     from app.api.v1.phones import _store as phone_store

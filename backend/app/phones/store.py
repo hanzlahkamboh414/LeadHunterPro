@@ -996,6 +996,23 @@ class PhoneLeadsStore:
         finally:
             conn.close()
 
+    def wrong_archive_page(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
+        """A bounded admin archive page with its full active-row count."""
+        conn = self._conn()
+        try:
+            total = conn.execute(
+                "SELECT COUNT(*) FROM phone_wrong_archive WHERE recovered_at = ''"
+            ).fetchone()[0]
+            cur = conn.execute(
+                "SELECT id, user_id, phone, created_at FROM phone_wrong_archive "
+                "WHERE recovered_at = '' ORDER BY id DESC LIMIT ? OFFSET ?",
+                (limit, offset),
+            )
+            cols = [column[0] for column in cur.description]
+            return {"total": total, "rows": [dict(zip(cols, row, strict=True)) for row in cur.fetchall()]}
+        finally:
+            conn.close()
+
     def recover_wrong_number(self, archive_id: int) -> bool:
         """Admin-only caller: restore exact archived row to the shared pool."""
         conn = self._conn()

@@ -640,6 +640,9 @@ export const api = {
   adminWrongPhones(): Promise<WrongPhoneArchiveRow[]> {
     return request<WrongPhoneArchiveRow[]>("/admin/phones/wrong");
   },
+  adminWrongPhonesPage(limit: number, offset: number): Promise<{ total: number; rows: WrongPhoneArchiveRow[] }> {
+    return request(`/admin/phones/wrong/page?limit=${limit}&offset=${offset}`);
+  },
   adminRecoverWrongPhone(archiveId: number): Promise<{ recovered: boolean }> {
     return request(`/admin/phones/wrong/${archiveId}/recover`, { method: "POST" });
   },

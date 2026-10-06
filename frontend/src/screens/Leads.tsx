@@ -1,7 +1,7 @@
 import { useCallback, useLayoutEffect, useMemo, useState } from "react";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useLocation, useSearchParams } from "react-router-dom";
-import { Check, Download, CheckSquare, Flame, Gauge, Inbox, Layers, Pencil, Square, Sprout, Tag, Trash2, UserCheck, X } from "lucide-react";
+import { Check, ChevronDown, Download, CheckSquare, Flame, Gauge, Inbox, Layers, Pencil, Square, Sprout, Tag, Trash2, UserCheck, X } from "lucide-react";
 import { api } from "../api/client";
 import { PageHeader } from "../components/PageHeader";
 import { Combobox, Select } from "../components/Select";
@@ -217,6 +217,7 @@ export default function Leads() {
   // (never the whole store). q is answered server-side now, so the queryKey
   // carries it and the old client-side filter memo is gone.
   const PAGE = 100;
+  const [campaignPanelOpen, setCampaignPanelOpen] = useState(false);
   const [campaignView, setCampaignView] = useState<"all" | "sent" | "unsent" | "available">("all");
   const [campaignFocus, setCampaignFocus] = useState(0);
   const usageFilter = {
@@ -264,6 +265,7 @@ export default function Leads() {
     queryKey: ["leads-campaign-usage", rec, bound, minScore, src, folder, tag, date, stage, q, importId],
     queryFn: () => api.campaignUsage(usageFilter),
     staleTime: 15_000,
+    enabled: campaignPanelOpen || campaignView !== "all",
   });
   const campaignDetails = campaignUsageQ.data?.details ?? {};
   const queuedEmails = useMemo(
@@ -795,7 +797,12 @@ export default function Leads() {
         </div>
       </div>
       </section>
-      <section className="mt-4 rounded-xl border border-white/10 bg-white/[0.025] p-3 sm:p-4" aria-label="Campaign email status">
+      <button type="button" onClick={() => setCampaignPanelOpen((open) => !open)} aria-expanded={campaignPanelOpen} aria-controls="companies-campaign-status"
+        className="mt-4 inline-flex min-h-11 items-center gap-2 rounded-lg border border-white/10 bg-white/[0.04] px-4 text-[13px] font-medium text-slate-100 hover:bg-white/[0.08]">
+        Campaign status{campaignView !== "all" ? ` · ${campaignView === "unsent" ? "Not sent" : campaignView === "available" ? "Available" : "Sent"}` : ""}
+        <ChevronDown className={`h-4 w-4 transition-transform ${campaignPanelOpen ? "rotate-180" : ""}`} aria-hidden="true" />
+      </button>
+      {campaignPanelOpen && <section id="companies-campaign-status" className="mt-2 rounded-xl border border-white/10 bg-white/[0.025] p-3 sm:p-4" aria-label="Campaign email status">
         <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
           <h2 className="text-sm font-semibold text-white">Email campaign status</h2>
           <span role="status" className="text-xs text-slate-300">{campaignUsageQ.data ? `${campaignUsageQ.data.total.toLocaleString()} emails in this view` : "Loading full counts…"}</span>
@@ -820,8 +827,8 @@ export default function Leads() {
       </div>
       {campaignUsageQ.data && campaignUsageQ.data.campaigns.length > 0 && (
         <div className="mt-3 border-t border-white/10 pt-3">
-          <p className="mb-2 text-xs font-medium text-slate-300">By campaign · choose a count to see those emails</p>
-          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+          <p className="mb-2 text-xs font-medium text-slate-300">By campaign ({campaignUsageQ.data.campaigns.length}) · choose a count to see those emails</p>
+          <div className="grid max-h-72 gap-2 overflow-y-auto pr-1 sm:grid-cols-2 xl:grid-cols-3">
             {campaignUsageQ.data.campaigns.map((item) => (
               <div key={item.id} className="flex min-w-0 items-center justify-between gap-2 rounded-lg border border-white/10 bg-white/[0.035] px-3 py-2">
                 <span className="min-w-0 truncate text-xs font-medium text-slate-100" title={item.name}>{item.name}</span>
@@ -835,7 +842,7 @@ export default function Leads() {
           {campaignFocus > 0 && <button type="button" onClick={() => setCampaignFocus(0)} className="mt-2 min-h-10 text-xs font-medium text-teal-200 underline">Clear campaign filter</button>}
         </div>
       )}
-      </section>
+      </section>}
       <p className="mt-1 text-xs text-slate-400">Select emails across loaded pages, then set one folder. Use Show more to load the next page; selection stays saved.</p>
           {junkNote && (
             <p className="mt-3 text-[12.5px] text-emerald-300 bg-emerald-500/10 rounded-lg px-3 py-2">

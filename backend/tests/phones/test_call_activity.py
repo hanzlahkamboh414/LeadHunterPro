@@ -44,6 +44,22 @@ def test_wrong_number_leaves_user_sheet_stays_archived_and_admin_recovers(tmp_pa
     assert store.pool_stats()["total"] == 1
 
 
+def test_wrong_number_archive_uses_bounded_pages(tmp_path):
+    store = PhoneLeadsStore(db_path=str(tmp_path / "phones.db"))
+    with sqlite3.connect(store._db_path) as conn:
+        conn.executemany(
+            "INSERT INTO phone_wrong_archive (user_id, phone, snapshot_json, created_at) "
+            "VALUES ('alice', ?, '{}', '2030-01-01')",
+            [(f"+1503111{i:04d}",) for i in range(12)],
+        )
+    first = store.wrong_archive_page(limit=10, offset=0)
+    second = store.wrong_archive_page(limit=10, offset=10)
+    assert first["total"] == second["total"] == 12
+    assert len(first["rows"]) == 10
+    assert len(second["rows"]) == 2
+    assert first["rows"][0]["id"] > second["rows"][0]["id"]
+
+
 def test_wrong_number_suppresses_every_pool_row_with_same_phone(tmp_path):
     store = PhoneLeadsStore(db_path=str(tmp_path / "phones.db"))
     store.add([

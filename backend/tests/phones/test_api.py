@@ -195,8 +195,12 @@ def test_call_activity_and_wrong_archive_are_owner_and_admin_scoped(
     assert activity["dialed"] == 1
     assert activity["outcomes"]["wrong_number"] == 1
     assert client.get("/api/v1/admin/phones/wrong", headers=bob_headers).status_code == 403
+    assert client.get("/api/v1/admin/phones/wrong/page", headers=bob_headers).status_code == 403
     archive = client.get("/api/v1/admin/phones/wrong", headers=admin_headers).json()
     assert len(archive) == 1
+    page = client.get("/api/v1/admin/phones/wrong/page", headers=admin_headers,
+                      params={"limit": 10, "offset": 0}).json()
+    assert page == {"total": 1, "rows": archive}
     recovered = client.post(
         f"/api/v1/admin/phones/wrong/{archive[0]['id']}/recover",
         headers=admin_headers,

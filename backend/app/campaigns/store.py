@@ -831,7 +831,7 @@ class CampaignStore:
         rows = conn.execute(
             "SELECT lower(s.email), s.state, c.id, c.name "
             "FROM campaign_sends s JOIN campaigns c ON c.id=s.campaign_id "
-            "WHERE c.user_id=? AND s.step=0 AND s.state IN ('sent','pending','failed') "
+            "WHERE c.user_id=? AND s.step=0 AND s.state IN ('sent','pending','failed','skipped') "
             "ORDER BY c.id", (user_id,),
         ).fetchall()
         history = conn.execute(

@@ -40,7 +40,8 @@ READONLY = "https://www.googleapis.com/auth/gmail.readonly"
 
 
 def _setup(tmp_path, monkeypatch, *, clock: Clock | None = None,
-           scopes: str = "", token_ttl: timedelta = timedelta(days=30)):
+           scopes: str = "", token_ttl: timedelta = timedelta(days=30),
+           ai_ask=None):
     """All stores on tmp DBs + a client + a scheduler; the connected Gmail
     carries the given granted scopes ('' = a pre-E4 account)."""
     from app.auth.jwt import create_access_token
@@ -81,6 +82,8 @@ def _setup(tmp_path, monkeypatch, *, clock: Clock | None = None,
         campaign_store, email_store, lead_store,
         clock=clock or Clock(), rng=lambda a, b: b,  # always the max gap
         reply_interval_s=0,   # every pass checks (tests control time)
+        ai_ask=ai_ask or (lambda _prompt: '{"subject":"Re: Sample estimate",'
+                         '"body":"I can share a short estimate sample for your review."}'),
     )
     return {"client": client, "user": user, "email_store": email_store,
             "account_id": account_id, "store": campaign_store,
@@ -232,21 +235,50 @@ def test_scheduler_followup_sends_after_days(tmp_path, monkeypatch):
     assert fu_row["not_before"].startswith(
         _iso(NOW + timedelta(days=3))[:10])
 
-    # Day 2: still nothing. Day 3 + pacing gap: the follow-up goes out with
-    # ITS OWN rendered subject/body.
+    # Day 2: still nothing. Day 3 + pacing gap: AI writes a follow-up.
     ctx["sched"]._clock.advance(2 * 86400)
     assert ctx["sched"].run_once()["sent"] == 0
     ctx["sched"]._clock.advance(86400 + 8 * 60)
     ctx["sched"].run_once()
     assert len(sent_calls) == 2
-    assert sent_calls[1]["subject"] == "Re: Acme Corp estimating"
-    assert "following up" in sent_calls[1]["body"]
+    assert sent_calls[1]["subject"] == "Re: Sample estimate"
+    assert "estimate sample" in sent_calls[1]["body"]
 
     # Drained: campaign completed, lead CRM carries the follow-up note.
     assert ctx["store"].get(c["id"], ctx["user"].id)["status"] == "completed"
     crm = ctx["leads"].get_crm("jane@acme.com")
     assert crm["crm_status"] == "contacted"  # follow-ups never re-promote
     assert any("follow-up #1" in e["detail"] for e in crm["events"])
+
+
+def test_ai_followup_needs_only_timing_and_keeps_sender_signature(tmp_path, monkeypatch):
+    prompts = []
+
+    def ask(prompt):
+        prompts.append(prompt)
+        return ('{"subject":"Re: Takeoff support",'
+                '"body":"I can share a short takeoff sample for your review."}')
+
+    ctx = _setup(tmp_path, monkeypatch, ai_ask=ask)
+    ctx["leads"].save(_dossier("jane@acme.com"))
+    campaign = ctx["store"].create(
+        ctx["user"].id, account_id=ctx["account_id"],
+        name="Estimate support", subject="Takeoff support",
+        body="Hi Jane,\n\nWe prepare quantity takeoffs.\n\nBest regards,\nSender Name",
+        emails=["jane@acme.com"], start_at=_iso(NOW - timedelta(minutes=1)),
+        followups=[{"after_days": 3, "subject": "", "body": ""}],
+    )
+    sent = []
+    monkeypatch.setattr(google, "send_gmail",
+                        lambda token, **kw: sent.append(kw) or {})
+    ctx["sched"].run_once()
+    ctx["sched"]._clock.advance(3 * 86400 + 8 * 60)
+    ctx["sched"].run_once()
+    assert len(sent) == 2
+    assert sent[1]["subject"] == "Re: Takeoff support"
+    assert sent[1]["body"].endswith("Best regards,\nSender Name")
+    assert "We prepare quantity takeoffs" in prompts[0]
+    assert ctx["store"].get(campaign["id"], ctx["user"].id)["status"] == "completed"
 
 
 def test_scheduler_followup_not_queued_when_replied(tmp_path, monkeypatch):
@@ -450,11 +482,11 @@ def test_api_followup_validation(tmp_path, monkeypatch):
                            json={**base, "followups": [
                                {"after_days": 0, "subject": "s", "body": "b"}]})
     assert r.status_code == 422
-    # ...and a follow-up needs its own subject/body (no blank rungs).
+    # AI can derive a follow-up from the campaign when no direction is given.
     r = ctx["client"].post("/api/v1/campaigns",
                            json={**base, "followups": [
-                               {"after_days": 3, "subject": "", "body": "b"}]})
-    assert r.status_code == 422
+                               {"after_days": 3}]})
+    assert r.status_code == 200, r.text
 
 
 def test_api_account_scopes_roundtrip(tmp_path, monkeypatch):

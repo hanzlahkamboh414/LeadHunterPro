@@ -577,7 +577,7 @@ function EditCampaignForm({
     onError: (e) => setTestResult({ ok: false, text: e instanceof ApiError ? e.message : "Test send failed" }),
   });
   const activeFollowups = followups.filter((row, index) => row.on && (index === 0 || followups.slice(0, index).every((previous) => previous.on)));
-  const validFollowups = activeFollowups.every((row) => row.after_days >= 1 && row.after_days <= 30 && row.subject.trim() && row.body.trim());
+  const validFollowups = activeFollowups.every((row) => row.after_days >= 1 && row.after_days <= 30);
   const canSave =
     name.trim() !== "" && subject.trim() !== "" && body.trim() !== "" &&
     (!aiCompose || aiSignature.trim() !== "") &&
@@ -628,6 +628,9 @@ function EditCampaignForm({
           <textarea className={`${INPUT} mt-1 h-20 resize-y`} maxLength={2000} value={aiSignature} onChange={(e) => setAiSignature(e.target.value)} placeholder="Your name, company and contact details" />
         </label> : <><div className="flex flex-wrap gap-1.5">{TEMPLATE_VARS.map((v) => <code key={v} className="rounded bg-white/[0.05] px-1.5 py-0.5 text-[11px] text-slate-400">{v}</code>)}</div>
         <label className="flex items-center gap-2 text-[12.5px] text-slate-300"><input type="checkbox" checked={aiPersonalize} onChange={(e) => setAiPersonalize(e.target.checked)} /> AI opening line from verified lead facts</label></>}
+        {!aiCompose && <label className="block text-xs text-slate-400">Follow-up sign-off (optional)
+          <textarea className={`${INPUT} mt-1 h-20 resize-y`} maxLength={2000} value={aiSignature} onChange={(e) => setAiSignature(e.target.value)} placeholder="Name, title and company. Blank uses the sign-off in your email script." />
+        </label>}
         <label className="flex items-center gap-2 text-[12.5px] text-slate-300"><input type="checkbox" checked={aiCompose} onChange={(e) => setAiCompose(e.target.checked)} /> AI writes each email from verified research</label>
         {!aiCompose && <div className="mt-2.5">
           <SpamPanel
@@ -653,7 +656,7 @@ function EditCampaignForm({
         </div>
         <div className="rounded-lg border border-white/5 p-3">
           <p className="text-[12px] font-semibold text-slate-300">Follow-ups (optional)</p>
-          <p className="mt-1 text-[11.5px] text-slate-500">{aiCompose ? "Enter a goal and brief for each follow-up. AI writes it for every lead. Replies stop the ladder." : "Each follows the previous email after the chosen number of days. Replies stop the ladder."}</p>
+          <p className="mt-1 text-[11.5px] text-slate-400">Choose the timing. AI writes each follow-up from the lead research and the previous email. Optional direction is available below. Replies stop the ladder.</p>
           <div className="mt-2 space-y-2">{followups.map((row, index) => (index === 0 || followups[index - 1].on) && <FollowupEditor key={index} label={`Follow-up ${index + 1}`} on={row.on} setOn={(v) => updateFollowup(index, { on: v })} days={row.after_days} setDays={(v) => updateFollowup(index, { after_days: v })} subject={row.subject} setSubject={(v) => updateFollowup(index, { subject: v })} body={row.body} setBody={(v) => updateFollowup(index, { body: v })} input={INPUT} />)}</div>
         </div>
         <div className="rounded-lg border border-white/5 p-3">
@@ -957,20 +960,23 @@ function FollowupEditor({
         )}
       </div>
       {on && (
-        <div className="mt-2.5 space-y-2">
+        <details className="mt-2.5">
+          <summary className="cursor-pointer text-[12px] text-slate-400">Optional direction for AI</summary>
+          <div className="mt-2 space-y-2">
           <input
             className={input}
             value={subject}
             onChange={(e) => setSubject(e.target.value)}
-            placeholder="Subject — Re: {{company_name}} estimating"
+            placeholder="Optional subject direction"
           />
           <textarea
             className={`${input} h-20 resize-y`}
             value={body}
             onChange={(e) => setBody(e.target.value)}
-            placeholder={"Hi {{first_name}}, just bumping this to the top of your inbox…"}
+            placeholder="Optional focus or offer for this follow-up"
           />
-        </div>
+          </div>
+        </details>
       )}
     </div>
   );
@@ -1042,13 +1048,13 @@ function CampaignBuilder({
   const create = useMutation({
     mutationFn: () => {
       const followups: FollowupInput[] = [];
-      if (fu1On && fu1Subject.trim() && fu1Body.trim()) {
+      if (fu1On) {
         followups.push({ after_days: fu1Days, subject: fu1Subject, body: fu1Body });
       }
-      if (fu2On && fu2Subject.trim() && fu2Body.trim()) {
+      if (fu1On && fu2On) {
         followups.push({ after_days: fu2Days, subject: fu2Subject, body: fu2Body });
       }
-      if (fu1On && fu2On && fu3On && fu3Subject.trim() && fu3Body.trim()) {
+      if (fu1On && fu2On && fu3On) {
         followups.push({ after_days: fu3Days, subject: fu3Subject, body: fu3Body });
       }
       return api.createCampaign({
@@ -1104,16 +1110,16 @@ function CampaignBuilder({
     (!aiCompose || aiSignature.trim()) && poolEmails.length === quantity && !pool.isFetching && startAt &&
     delayMin >= 20 && delayMin <= 3600 && delayMax >= delayMin && delayMax <= 7200 &&
     dailyLimit >= 1 && dailyLimit <= 200 &&
-    (!fu1On || (fu1Subject.trim() && fu1Body.trim() && fu1Days >= 1 && fu1Days <= 30)) &&
-    (!fu2On || (fu2Subject.trim() && fu2Body.trim() && fu2Days >= 1 && fu2Days <= 30)) &&
-    (!fu3On || (fu3Subject.trim() && fu3Body.trim() && fu3Days >= 1 && fu3Days <= 30));
+    (!fu1On || (fu1Days >= 1 && fu1Days <= 30)) &&
+    (!fu2On || (fu2Days >= 1 && fu2Days <= 30)) &&
+    (!fu3On || (fu3Days >= 1 && fu3Days <= 30));
 
   const emailOk = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(testEmail.trim());
   const canTest = !!accountId && subject.trim() !== "" && body.trim() !== "" && emailOk;
   const followupsValid =
-    (!fu1On || (fu1Subject.trim() && fu1Body.trim() && fu1Days >= 1 && fu1Days <= 30)) &&
-    (!fu2On || (fu2Subject.trim() && fu2Body.trim() && fu2Days >= 1 && fu2Days <= 30)) &&
-    (!fu3On || (fu3Subject.trim() && fu3Body.trim() && fu3Days >= 1 && fu3Days <= 30));
+    (!fu1On || (fu1Days >= 1 && fu1Days <= 30)) &&
+    (!fu2On || (fu2Days >= 1 && fu2Days <= 30)) &&
+    (!fu3On || (fu3Days >= 1 && fu3Days <= 30));
   const audienceValid = quantity >= 1 && quantity <= 500 && Number.isInteger(quantity) &&
     poolEmails.length === quantity && !pool.isFetching && !!startAt &&
     delayMin >= 20 && delayMin <= 3600 && delayMax >= delayMin && delayMax <= 7200 &&
@@ -1289,6 +1295,10 @@ function CampaignBuilder({
               <textarea className={`${input} mt-1 h-24 resize-y`} maxLength={2000} value={aiSignature} onChange={(e) => setAiSignature(e.target.value)} placeholder={"Your name\nCompany\nContact details"} />
               <span className="mt-1 block text-[11.5px] text-slate-500">This exact text is added to every AI-written email in this campaign.</span>
             </label>}
+            {!aiCompose && <label className="mt-3 block text-[12px] text-slate-300">Follow-up sign-off (optional)
+              <textarea className={`${input} mt-1 h-24 resize-y`} maxLength={2000} value={aiSignature} onChange={(e) => setAiSignature(e.target.value)} placeholder="Your name, title and company" />
+              <span className="mt-1 block text-[11.5px] text-slate-500">AI writes follow-ups in this mode too. Leave blank to use the sign-off in your email script.</span>
+            </label>}
           </div>
 
           {/* Spam risk — live score + the mistakes + the one-click fix. */}
@@ -1312,7 +1322,7 @@ function CampaignBuilder({
               Follow-ups (optional)
             </p>
             <p className="mt-1 text-[11.5px] text-slate-500">
-              {aiCompose ? "For each follow-up, enter its goal and brief. AI writes that email for every lead. Replies stop the ladder." : "Each fires after the chosen number of days. Replies stop the ladder."}
+              Choose the timing. AI writes each follow-up from the lead research and previous email. Optional direction is available below. Replies stop the ladder.
             </p>
             <div className="mt-3 space-y-3">
               <FollowupEditor

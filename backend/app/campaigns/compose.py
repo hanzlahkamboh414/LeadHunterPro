@@ -25,6 +25,17 @@ def has_referral_request(body: str) -> bool:
     return bool(_REFERRAL_REQUEST.search(body))
 
 
+_SIGNOFF = re.compile(r"(?im)^\s*(?:best regards|kind regards|regards|sincerely),?\s*$")
+
+
+def split_script_signature(body: str) -> tuple[str, str]:
+    """Keep the sender's saved sign-off fixed while AI writes the message."""
+    match = _SIGNOFF.search(body)
+    if match is None:
+        return body.strip(), ""
+    return body[:match.start()].strip(), body[match.end():].strip()[:2000]
+
+
 def strip_recipient_footer(body: str, *, person: str, company: str) -> str:
     """The model sometimes signs as the recipient. Remove only exact tail lines."""
     lines = body.rstrip().splitlines()
@@ -42,7 +53,7 @@ def strip_recipient_footer(body: str, *, person: str, company: str) -> str:
 
 def compose_email(ask: Ask, dossier: Any, *, campaign_name: str,
                   angle: str, brief: str, signature: str,
-                  step: int = 0) -> dict[str, str]:
+                  step: int = 0, previous_email: str = "") -> dict[str, str]:
     """Return a finished subject/body. Invalid AI output is never sent."""
     facts = verified_facts(dossier)
     company = (dossier.company.name or dossier.domain or "").strip()
@@ -55,6 +66,7 @@ def compose_email(ask: Ask, dossier: Any, *, campaign_name: str,
         "campaign_goal": angle[:500],
         "our_offer_and_constraints": brief[:6000],
         "message_number": step + 1,
+        "previous_email": previous_email[:2500] if step else "",
     }
     prompt = (
         "Write one short, natural business email to this recipient. "
@@ -65,6 +77,8 @@ def compose_email(ask: Ask, dossier: Any, *, campaign_name: str,
         "are empty, make no specific claim about the recipient. "
         "If message_number is greater than 1, write a short follow-up that "
         "does not imply the recipient read or engaged with earlier mail. "
+        "Use previous_email only to understand what was already sent; avoid "
+        "repeating its opening and request. Do not imply any reply or interest. "
         "Write 60 to 130 words. Plain language, one clear reason to reply, "
         "no hype, no false urgency, no links unless the sender supplied one. "
         "Never ask who handles estimating, whether someone else handles it, "

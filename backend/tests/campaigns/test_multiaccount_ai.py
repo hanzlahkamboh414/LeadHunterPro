@@ -502,8 +502,13 @@ def test_scheduler_ai_off_sends_plain(tmp_path, monkeypatch):
     assert sent[0]["body"] == "Hi Jane, saw Acme Corp."
 
 
-def test_scheduler_followup_not_personalized(tmp_path, monkeypatch):
+def test_legacy_followup_is_ai_written_from_previous_email(tmp_path, monkeypatch):
+    prompts = []
     def ask(prompt):
+        prompts.append(prompt)
+        if '"message_number": 2' in prompt:
+            return ('{"subject":"Re: Estimating support",'
+                    '"body":"I can share a short estimating sample if that would be useful."}')
         return "Saw Acme broke ground on the Riverside job."
 
     ctx = _setup(tmp_path, monkeypatch, ai_ask=ask)
@@ -519,18 +524,21 @@ def test_scheduler_followup_not_personalized(tmp_path, monkeypatch):
         start_at=_iso(NOW - timedelta(minutes=1)),
         delay_min_s=0, delay_max_s=0,
         followups=[{"after_days": 3, "subject": "Re: hi",
-                    "body": "Hi {{first_name}}, bumping this."}],
+                    "body": "Hi {{first_name}}, bumping this.\n\nBest regards,\nSender Name"}],
         ai_personalize=True,
     )
     ctx["leads"].save(_dossier("jane@acme.com"))
     sched.run_once()  # step 0 — personalized (greeting + hook + script)
     clock.advance(3 * 86400)
-    sched.run_once()  # step 1 — the follow-up is NOT personalized
+    sched.run_once()  # step 1 — AI composes it using the prior message
     assert len(sent) == 2
     assert sent[0]["body"] == ("Hi Jane,\n\n"
                                "Saw Acme broke ground on the Riverside job."
                                "\n\nFirst.")
-    assert sent[1]["body"] == "Hi Jane, bumping this."
+    assert sent[1]["subject"] == "Re: Estimating support"
+    assert "estimating sample" in sent[1]["body"]
+    assert sent[1]["body"].endswith("Best regards,\nSender Name")
+    assert any("First." in prompt and '"message_number": 2' in prompt for prompt in prompts)
 
 
 # ---------------------------------------------------------------------------

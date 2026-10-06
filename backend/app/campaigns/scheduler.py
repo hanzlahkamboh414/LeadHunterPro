@@ -50,7 +50,7 @@ from app.campaigns.personalize import (
     default_ask,
     generate_hook,
 )
-from app.campaigns.compose import compose_email, has_referral_request
+from app.campaigns.compose import compose_email, has_referral_request, split_script_signature
 from app.campaigns.hard_bounce import hard_bounce_target, invalid_recipient_reason
 from app.campaigns.deliverability_guard import DeliverabilityGuard
 from app.campaigns.pre_send_verifier import CampaignEmailVerifier
@@ -563,17 +563,29 @@ class CampaignScheduler:
             subject_tmpl, body_tmpl = c["subject"], c["body"]
         subject = render(subject_tmpl, ctx)
         body = render_email_body(body_tmpl, ctx)
-        if c.get("ai_compose"):
+        if c.get("ai_compose") or send["step"] > 0:
             draft = self._store.get_draft(c["id"], send["email"], send["step"])
             if draft is None:
                 try:
                     if self._ai_ask is None:
                         self._ai_ask = default_ask()
+                    brief, saved_signature = split_script_signature(body_tmpl)
+                    if send["step"] > 0 and (not brief or has_referral_request(brief)):
+                        brief, _ = split_script_signature(c["body"])
+                    previous = self._store.get_draft(c["id"], send["email"], send["step"] - 1) \
+                        if send["step"] > 0 else None
+                    previous_body = previous["body"] if previous else ""
+                    if send["step"] > 0 and not previous_body:
+                        previous_body = render_email_body(c["body"], ctx)
+                    signature = (c.get("ai_signature") or "").strip() or saved_signature
+                    if not signature and send["step"] > 0:
+                        _, signature = split_script_signature(c["body"])
                     draft = compose_email(
                         self._ai_ask, dossier, campaign_name=c["name"],
-                        angle=subject_tmpl, brief=body_tmpl,
-                        signature=c.get("ai_signature", ""),
+                        angle=subject_tmpl or c["subject"], brief=brief,
+                        signature=signature,
                         step=send["step"],
+                        previous_email=previous_body,
                     )
                 except Exception as exc:  # noqa: BLE001 — never send a broken AI draft
                     logger.warning("AI email for campaign %d, lead %s failed: %s",

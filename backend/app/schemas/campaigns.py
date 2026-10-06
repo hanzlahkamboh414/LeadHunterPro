@@ -10,8 +10,8 @@ class FollowupIn(BaseModel):
     are assigned in list order; ``after_days`` counts from the previous
     step's SEND, not from the campaign start."""
     after_days: int = Field(ge=1, le=30)
-    subject: str = Field(min_length=1, max_length=500)
-    body: str = Field(min_length=1, max_length=20000)
+    subject: str = Field(default="", max_length=500)
+    body: str = Field(default="", max_length=20000)
 
 
 class CampaignCreateIn(BaseModel):

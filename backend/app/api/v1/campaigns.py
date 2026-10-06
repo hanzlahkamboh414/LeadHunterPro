@@ -19,6 +19,7 @@ from app.auth.vertical_access import require_email_access
 from app.auth.dependencies import get_current_user
 from app.auth.models import User
 from app.campaigns import spamcheck
+from app.campaigns.compose import has_referral_request
 from app.campaigns.scheduler import PAKISTAN_TZ, READONLY_SCOPE, ensure_access_token, parse_ts
 from app.campaigns.store import get_campaign_store
 from app.campaigns.templates import render, render_email_body, sample_context
@@ -35,6 +36,7 @@ from app.schemas.campaigns import (
     CampaignTestSendOut,
     CampaignUpdateIn,
     CampaignsOut,
+    FollowupIn,
     SpamCheckIn,
     SpamCheckOut,
     SpamImproveIn,
@@ -103,6 +105,21 @@ def _validate_start_at(start_at: str) -> str:
     return dt.astimezone(timezone.utc).isoformat()
 
 
+def _validate_outreach_copy(body: str, followups: list[FollowupIn] | None) -> None:
+    """Reject copy the send-time safety rule would otherwise block permanently."""
+    if has_referral_request(body):
+        raise HTTPException(
+            status_code=422,
+            detail="The campaign email asks for another contact. Address the recipient directly.",
+        )
+    for step, followup in enumerate(followups or [], 1):
+        if has_referral_request(followup.body):
+            raise HTTPException(
+                status_code=422,
+                detail=f"Follow-up {step} asks for another contact. Address the recipient directly.",
+            )
+
+
 @router.post("", response_model=CampaignCreateOut)
 def create_campaign(
     body: CampaignCreateIn, user: User = Depends(require_email_access)
@@ -135,6 +152,7 @@ def create_campaign(
     if body.delay_min_s > body.delay_max_s:
         raise HTTPException(status_code=422,
                             detail="delay_min_s must be <= delay_max_s")
+    _validate_outreach_copy(body.body, body.followups)
 
     start_at = _validate_start_at(body.start_at)
 
@@ -511,6 +529,7 @@ def update_campaign(
     effective_max = body.delay_max_s if body.delay_max_s is not None else current["delay_max_s"]
     if effective_min > effective_max:
         raise HTTPException(status_code=422, detail="delay_min_s must be <= delay_max_s")
+    _validate_outreach_copy(body.body, body.followups)
     new_start = _validate_start_at(body.start_at) if body.start_at is not None else None
 
     primary = body.account_id if body.account_id is not None else current["account_id"]

@@ -1396,6 +1396,18 @@ class CampaignStore:
                                 "WHERE id = ? AND state = 'pending'",
                                 (due, queued_id),
                             )
+                            # A corrected follow-up can safely retry sends that
+                            # were blocked before Gmail was ever contacted.
+                            conn.execute(
+                                "UPDATE campaign_sends SET state = 'pending', "
+                                "attempts = 0, error = '', not_before = ? "
+                                "WHERE id = ? AND state = 'failed' "
+                                "AND error = 'email asks recipient for another contact' "
+                                "AND NOT EXISTS (SELECT 1 FROM campaign_bounces b "
+                                "WHERE b.campaign_id = campaign_sends.campaign_id "
+                                "AND lower(b.email) = lower(campaign_sends.email))",
+                                (due, queued_id),
+                            )
             conn.commit()
             return True
         except Exception:

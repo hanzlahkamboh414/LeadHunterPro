@@ -76,3 +76,47 @@ def test_edit_all_settings_preserves_sent_and_updates_pending(tmp_path, monkeypa
     assert next(s for s in rows if s["email"] == "a@x.com" and s["step"] == 0)["subject"].startswith("Estimating")
     queued = next(s for s in rows if s["email"] == "a@x.com" and s["step"] == 1)
     assert queued["not_before"] == _iso(NOW + timedelta(days=5))
+
+
+def test_referral_followup_is_rejected_before_scheduling(tmp_path, monkeypatch):
+    ctx = _setup(tmp_path, monkeypatch, accounts=1)
+    ctx["leads"].save(_dossier("a@x.com"))
+    response = ctx["client"].post("/api/v1/campaigns", json={
+        "name": "Test", "account_id": ctx["account_ids"][0],
+        "subject": "Estimating support", "body": "Could I share a work sample?",
+        "emails": ["a@x.com"], "start_at": _iso(NOW),
+        "followups": [{"after_days": 3, "subject": "Checking in",
+                       "body": "Could you point me to the person who handles estimating?"}],
+    })
+    assert response.status_code == 422
+    assert "Follow-up 1" in response.json()["detail"]
+
+
+def test_corrected_followup_requeues_content_blocked_send(tmp_path, monkeypatch):
+    ctx = _setup(tmp_path, monkeypatch, accounts=1)
+    campaign = _make_campaign(ctx, emails=["a@x.com"], followups=[
+        {"after_days": 3, "subject": "Checking in",
+         "body": "Could you point me to the person who handles estimating?"},
+    ])
+    store = ctx["store"]
+    first = store.sends(campaign["id"], ctx["user"].id)[0]
+    store.mark_sent(first["id"], subject="Estimating support",
+                    sent_at=_iso(NOW - timedelta(days=4)),
+                    account_id=ctx["account_ids"][0])
+    store.queue_followup(campaign["id"], "a@x.com", step=1,
+                         not_before=_iso(NOW - timedelta(days=1)))
+    followup = next(row for row in store.sends(campaign["id"], ctx["user"].id)
+                    if row["step"] == 1)
+    store.mark_failed(followup["id"], error="email asks recipient for another contact")
+
+    response = ctx["client"].put(f"/api/v1/campaigns/{campaign['id']}", json={
+        "name": campaign["name"], "subject": campaign["subject"],
+        "body": campaign["body"],
+        "followups": [{"after_days": 3, "subject": "Checking in",
+                       "body": "Would a short sample estimate be useful?"}],
+    })
+    assert response.status_code == 200, response.text
+    retried = next(row for row in response.json()["sends"] if row["step"] == 1)
+    assert retried["state"] == "pending"
+    assert retried["attempts"] == 0
+    assert retried["error"] == ""

@@ -610,6 +610,11 @@ function EditCampaignForm({
   const [testEmail, setTestEmail] = useState("");
   const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null);
   const accounts = useQuery({ queryKey: ["email-accounts"], queryFn: () => api.emailAccounts() });
+  const connectedAccounts = (accounts.data || []).filter((account) => account.status === "connected");
+  const connectedIds = new Set(connectedAccounts.map((account) => account.id));
+  const selectedAccountIsConnected = connectedIds.has(accountId);
+  const oldAccount = accounts.data?.find((account) => account.id === accountId);
+  const unavailableExtras = extraIds.filter((id) => !connectedIds.has(id));
   const folders = useQuery({ queryKey: ["folders"], queryFn: () => api.listFolders() });
   const pool = useQuery({
     queryKey: ["campaign-pool", folder, recommendation],
@@ -628,21 +633,26 @@ function EditCampaignForm({
   const canSave =
     name.trim() !== "" && subject.trim() !== "" && body.trim() !== "" &&
     (!aiCompose || aiSignature.trim() !== "") &&
-    !!accountId && !!startAt && !Number.isNaN(new Date(startAt).getTime()) &&
+    selectedAccountIsConnected && !!startAt && !Number.isNaN(new Date(startAt).getTime()) &&
     dailyLimit >= 1 && dailyLimit <= 200 && delayMin >= 20 && delayMin <= 3600 &&
     delayMax >= delayMin && delayMax <= 7200 && validFollowups &&
     (!replaceAudience || (!!pool.data?.length && !pool.isFetching)) && !saving;
-  const save = () => onSave({
-    name: name.trim(), subject, body, account_id: accountId,
-    account_ids: extraIds.filter((id) => id !== accountId),
-    start_at: new Date(startAt).toISOString(), daily_limit: dailyLimit,
-    delay_min_s: delayMin, delay_max_s: delayMax,
-    ai_personalize: aiPersonalize,
-    ai_compose: aiCompose,
-    ai_signature: aiSignature,
-    followups: activeFollowups.map(({ after_days, subject: s, body: b }) => ({ after_days, subject: s, body: b })),
-    ...(replaceAudience ? { emails: (pool.data || []).map((lead) => lead.email) } : {}),
-  });
+  const save = () => {
+    const followupSettings = activeFollowups.map(({ after_days, subject: s, body: b }) => ({ after_days, subject: s, body: b }));
+    const currentFollowups = c.followups.map(({ after_days, subject: s, body: b }) => ({ after_days, subject: s, body: b }));
+    onSave({
+      name: name.trim(), subject, body, account_id: accountId,
+      account_ids: extraIds.filter((id) => id !== accountId && connectedIds.has(id)),
+      ...(startAt !== localDateTime(c.start_at) ? { start_at: new Date(startAt).toISOString() } : {}),
+      daily_limit: dailyLimit, delay_min_s: delayMin, delay_max_s: delayMax,
+      ai_personalize: aiPersonalize,
+      ai_compose: aiCompose,
+      ai_signature: aiSignature,
+      ...(JSON.stringify(followupSettings) !== JSON.stringify(currentFollowups)
+        ? { followups: followupSettings } : {}),
+      ...(replaceAudience ? { emails: (pool.data || []).map((lead) => lead.email) } : {}),
+    });
+  };
 
   return (
     <div className="mt-4 rounded-lg border border-indigo-500/20 bg-white/[0.02] p-3.5">
@@ -696,10 +706,14 @@ function EditCampaignForm({
         </div>}
         <div className="rounded-lg border border-white/5 p-3">
           <p className="text-[12px] font-semibold text-slate-300">Sending accounts</p>
-          <select className={`${INPUT} mt-2`} value={accountId} onChange={(e) => { const id = Number(e.target.value); setAccountId(id); setExtraIds((prev) => prev.filter((x) => x !== id)); }}>
-            {(accounts.data || []).filter((a) => a.status === "connected" || a.id === accountId).map((a) => <option key={a.id} value={a.id}>{a.email}{a.status !== "connected" ? " (disconnected)" : ""}</option>)}
+          <p className="mt-1 text-[11.5px] text-slate-400">Choose the Gmail for future sends. Already sent emails keep their original sender. Saving will not resume a paused campaign.</p>
+          <select className={`${INPUT} mt-2`} value={accountId} disabled={accounts.isLoading} onChange={(e) => { const id = Number(e.target.value); setAccountId(id); setExtraIds((prev) => prev.filter((x) => x !== id)); }}>
+            {!selectedAccountIsConnected && <option value={accountId} disabled>{oldAccount ? `${oldAccount.email} (reconnect required)` : `Previous Gmail removed (#${accountId}) — choose another`}</option>}
+            {connectedAccounts.map((a) => <option key={a.id} value={a.id}>{a.email}</option>)}
           </select>
-          <div className="mt-2 space-y-1">{(accounts.data || []).filter((a) => a.id !== accountId && (a.status === "connected" || extraIds.includes(a.id))).map((a) => <label key={a.id} className="flex gap-2 text-[12px] text-slate-300"><input type="checkbox" checked={extraIds.includes(a.id)} onChange={(e) => setExtraIds((prev) => e.target.checked ? (prev.length >= 4 ? prev : [...prev, a.id]) : prev.filter((id) => id !== a.id))} /> Also send from {a.email}{a.status !== "connected" ? " (disconnected)" : ""}</label>)}</div>
+          {!selectedAccountIsConnected && !accounts.isLoading && <p role="alert" className="mt-2 text-[12px] text-amber-300">Select a connected Gmail before saving this campaign.</p>}
+          {unavailableExtras.length > 0 && <p className="mt-2 text-[11.5px] text-amber-300">{unavailableExtras.length} removed or disconnected extra Gmail account(s) will be dropped when you save.</p>}
+          <div className="mt-2 space-y-1">{connectedAccounts.filter((a) => a.id !== accountId).map((a) => <label key={a.id} className="flex gap-2 text-[12px] text-slate-300"><input type="checkbox" checked={extraIds.includes(a.id)} onChange={(e) => setExtraIds((prev) => e.target.checked ? (prev.filter((id) => connectedIds.has(id)).length >= 4 ? prev : [...prev, a.id]) : prev.filter((id) => id !== a.id))} /> Also send from {a.email}</label>)}</div>
         </div>
         <div className="rounded-lg border border-white/5 p-3">
           <p className="text-[12px] font-semibold text-slate-300">Follow-ups (optional)</p>

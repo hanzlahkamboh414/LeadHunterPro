@@ -682,6 +682,10 @@ class CampaignScheduler:
                                c["id"], creds["email"])
                 return
 
+        # A running campaign can change its sending Gmail while a draft or
+        # token is prepared. Never send from an account removed by that edit.
+        if account_id not in self._store.campaign_accounts(c["id"]):
+            return
         # The admin may press Pause while AI prepares a draft or a token is
         # refreshed. Recheck immediately before the external send request.
         if self._sending_pause_file and os.path.exists(self._sending_pause_file):

@@ -1408,7 +1408,8 @@ class CampaignStore:
             scope = (campaign_id, user_id)
             row = conn.execute(
                 "SELECT status, account_id, start_at, daily_limit, delay_min_s, "
-                "delay_max_s, ai_personalize, ai_compose, ai_signature FROM campaigns "
+                "delay_max_s, ai_personalize, ai_compose, ai_signature, "
+                "name, subject, body FROM campaigns "
                 "WHERE id = ? AND user_id = ?",
                 scope,
             ).fetchone()
@@ -1439,14 +1440,21 @@ class CampaignStore:
                  int(start_at is not None and new_start != row[2]),
                  _now(), *scope),
             )
-            conn.execute(
-                "DELETE FROM campaign_drafts WHERE campaign_id = ? AND "
-                "EXISTS (SELECT 1 FROM campaign_sends s WHERE "
-                "s.campaign_id = campaign_drafts.campaign_id "
-                "AND lower(s.email) = lower(campaign_drafts.email) "
-                "AND s.step = campaign_drafts.step AND s.state = 'pending')",
-                (campaign_id,),
+            draft_content_changed = (
+                name != row[9] or subject != row[10] or body != row[11]
+                or (ai_compose is not None and int(ai_compose) != row[7])
+                or (ai_signature is not None and ai_signature.strip() != row[8])
+                or followups is not None
             )
+            if draft_content_changed:
+                conn.execute(
+                    "DELETE FROM campaign_drafts WHERE campaign_id = ? AND "
+                    "EXISTS (SELECT 1 FROM campaign_sends s WHERE "
+                    "s.campaign_id = campaign_drafts.campaign_id "
+                    "AND lower(s.email) = lower(campaign_drafts.email) "
+                    "AND s.step = campaign_drafts.step AND s.state = 'pending')",
+                    (campaign_id,),
+                )
             if account_id is not None or account_ids is not None:
                 existing_accounts = [r[0] for r in conn.execute(
                     "SELECT account_id FROM campaign_accounts WHERE campaign_id = ?",

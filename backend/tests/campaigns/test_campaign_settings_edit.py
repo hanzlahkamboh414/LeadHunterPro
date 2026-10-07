@@ -78,6 +78,75 @@ def test_edit_all_settings_preserves_sent_and_updates_pending(tmp_path, monkeypa
     assert queued["not_before"] == _iso(NOW + timedelta(days=5))
 
 
+def test_running_campaign_can_replace_deleted_sender(tmp_path, monkeypatch):
+    ctx = _setup(tmp_path, monkeypatch, accounts=2)
+    old_id, new_id = ctx["account_ids"]
+    campaign = _make_campaign(ctx, emails=["a@x.com"], account_ids=[old_id])
+    ctx["store"].set_status(campaign["id"], status="running")
+    ctx["store"].set_draft(campaign["id"], "a@x.com", 0, "Saved subject", "Saved body")
+    assert ctx["email_store"].delete(old_id, ctx["user"].id)
+
+    response = ctx["client"].put(f"/api/v1/campaigns/{campaign['id']}", json={
+        "name": campaign["name"], "subject": campaign["subject"],
+        "body": campaign["body"], "account_id": new_id,
+    })
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "running"
+    assert response.json()["account_ids"] == [new_id]
+    assert ctx["store"].get_draft(campaign["id"], "a@x.com", 0) == {
+        "subject": "Saved subject", "body": "Saved body",
+    }
+
+    sent = []
+    monkeypatch.setattr(google, "send_gmail", lambda *args, **kwargs:
+                        sent.append(kwargs["from_email"]) or {"id": "m1"})
+    assert ctx["sched"].run_once()["sent"] == 1
+    assert sent == ["sender2@gmail.com"]
+
+
+def test_paused_campaign_can_replace_deleted_sender_without_resuming(tmp_path, monkeypatch):
+    ctx = _setup(tmp_path, monkeypatch, accounts=2)
+    old_id, new_id = ctx["account_ids"]
+    campaign = _make_campaign(ctx, emails=["a@x.com"], account_ids=[old_id])
+    ctx["store"].set_status(campaign["id"], status="paused", paused_reason="user")
+    assert ctx["email_store"].delete(old_id, ctx["user"].id)
+
+    response = ctx["client"].put(f"/api/v1/campaigns/{campaign['id']}", json={
+        "name": campaign["name"], "subject": campaign["subject"],
+        "body": campaign["body"], "account_id": new_id,
+    })
+    assert response.status_code == 200, response.text
+    assert response.json()["account_ids"] == [new_id]
+    assert response.json()["status"] == "paused"
+    assert ctx["sched"].run_once()["sent"] == 0
+
+
+def test_sender_change_during_draft_prevents_send_from_old_account(tmp_path, monkeypatch):
+    ctx = _setup(tmp_path, monkeypatch, accounts=2)
+    old_id, new_id = ctx["account_ids"]
+    campaign = _make_campaign(ctx, emails=["a@x.com"], account_ids=[old_id])
+    ctx["store"].set_status(campaign["id"], status="running")
+    sent = []
+    monkeypatch.setattr(google, "send_gmail", lambda *args, **kwargs:
+                        sent.append(kwargs["from_email"]) or {"id": "m1"})
+    real_access_token = ctx["sched"]._access_token
+
+    def switch_while_preparing(**kwargs):
+        assert ctx["store"].update_campaign(
+            campaign["id"], ctx["user"].id,
+            name=campaign["name"], subject=campaign["subject"],
+            body=campaign["body"], account_id=new_id, account_ids=[],
+        )
+        return "old-token"
+
+    monkeypatch.setattr(ctx["sched"], "_access_token", switch_while_preparing)
+    assert ctx["sched"].run_once()["sent"] == 0
+    assert sent == []
+    monkeypatch.setattr(ctx["sched"], "_access_token", real_access_token)
+    assert ctx["sched"].run_once()["sent"] == 1
+    assert sent == ["sender2@gmail.com"]
+
+
 def test_referral_followup_is_rejected_before_scheduling(tmp_path, monkeypatch):
     ctx = _setup(tmp_path, monkeypatch, accounts=1)
     ctx["leads"].save(_dossier("a@x.com"))

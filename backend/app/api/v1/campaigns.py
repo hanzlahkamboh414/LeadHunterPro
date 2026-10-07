@@ -560,20 +560,26 @@ def update_campaign(
     _validate_outreach_copy(body.body, body.followups)
     new_start = _validate_start_at(body.start_at) if body.start_at is not None else None
 
+    changing_accounts = body.account_id is not None or body.account_ids is not None
+    owned = ({a["id"]: a for a in get_email_store().list_for_user(user.id)}
+             if changing_accounts else {})
     primary = body.account_id if body.account_id is not None else current["account_id"]
-    extras = (body.account_ids if body.account_ids is not None else
-              [aid for aid in current["account_ids"] if aid != primary])
+    if body.account_ids is not None:
+        extras = body.account_ids
+    elif changing_accounts:
+        extras = [aid for aid in current["account_ids"] if aid != primary
+                  and owned.get(aid, {}).get("status") == "connected"]
+    else:
+        extras = []
     wanted = list(dict.fromkeys([primary, *(aid for aid in extras if aid != primary)]))
     if len(wanted) > 5:
         raise HTTPException(status_code=422, detail="at most 5 sending accounts per campaign")
-    if body.account_id is not None or body.account_ids is not None:
-        owned = {a["id"]: a for a in get_email_store().list_for_user(
-            user.id)}
+    if changing_accounts:
         for aid in wanted:
             account = owned.get(aid)
             if account is None:
-                raise HTTPException(status_code=404, detail="no such connected account")
-            if account["status"] != "connected" and aid not in current["account_ids"]:
+                raise HTTPException(status_code=404, detail="Select a connected sending account")
+            if account["status"] != "connected":
                 raise HTTPException(status_code=409,
                                     detail=f"account {account['email']} must be reconnected")
     safe_emails = None
@@ -586,8 +592,8 @@ def update_campaign(
     if not store.update_campaign(
             campaign_id, user.id, name=body.name.strip(),
             subject=body.subject, body=body.body,
-            account_id=primary if body.account_id is not None or body.account_ids is not None else None,
-            account_ids=wanted[1:] if body.account_id is not None or body.account_ids is not None else None,
+            account_id=primary if changing_accounts else None,
+            account_ids=wanted[1:] if changing_accounts else None,
             emails=safe_emails, start_at=new_start,
             daily_limit=body.daily_limit, delay_min_s=body.delay_min_s,
             delay_max_s=body.delay_max_s,

@@ -13,6 +13,7 @@ import app.api.v1.auth as auth_module
 import app.auth.activity as activity_module
 import app.auth.dependencies as deps
 import app.harvester.lane_schedule as lane_module
+import app.harvester.control as control_module
 from app.auth.activity import ActivityStore
 from app.auth.jwt import create_access_token
 from app.auth.models import UserStore
@@ -28,6 +29,8 @@ def _setup(tmp_path, monkeypatch):
     monkeypatch.setattr(activity_module, "_activity_store", activity)
     lane_store = lane_module.HarvesterLaneStore(db_path=str(tmp_path / "h.db"))
     monkeypatch.setattr(lane_module, "_instance", lane_store)
+    control_store = control_module.HarvesterControlStore(db_path=str(tmp_path / "h.db"))
+    monkeypatch.setattr(control_module, "_instance", control_store)
 
     admin = user_store.ensure_admin()
     token = create_access_token(admin.id, admin.is_admin, username=admin.username)
@@ -49,6 +52,27 @@ def test_default_status_is_both_lanes(tmp_path, monkeypatch):
     # The honest limits travel WITH the payload, so the UI need not invent them.
     assert any("ZERO AI" in n for n in body["notes"])
     assert any("never blocked" in n for n in body["notes"])
+
+
+def test_harvester_control_reports_worker_and_preserves_schedule(tmp_path, monkeypatch):
+    client, _, lane_store = _setup(tmp_path, monkeypatch)
+    control = control_module.get_control_store()
+
+    initial = client.get("/api/v1/admin/harvester/lane").json()
+    assert initial["control_mode"] == "off"
+    assert initial["harvester_enabled"] is False
+
+    control.heartbeat()
+    enabled = client.post("/api/v1/admin/harvester/control", json={"mode": "on"})
+    assert enabled.status_code == 200
+    assert enabled.json()["control_mode"] == "on"
+    assert enabled.json()["worker_online"] is True
+    assert enabled.json()["harvester_enabled"] is True
+    assert lane_store.load().mode == "both"
+
+    stopped = client.post("/api/v1/admin/harvester/control", json={"mode": "off"})
+    assert stopped.json()["harvester_enabled"] is False
+    assert control.mode() == "off"
 
 
 def test_saving_an_auto_schedule_is_live_and_read_back(tmp_path, monkeypatch):

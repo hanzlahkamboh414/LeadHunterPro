@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 import logging
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -43,6 +44,7 @@ from app.schemas.admin import (
     AdminDeletedOut,
     AdminGmailInboxModeIn,
     AdminKeysOut,
+    AdminHarvesterControlIn,
     AdminLaneScheduleIn,
     AdminLaneStatusOut,
     AdminLeadActionOut,
@@ -516,9 +518,12 @@ def _lane_status_payload() -> AdminLaneStatusOut:
     """The stored schedule + what the worker will actually do next pass."""
     from app.core.config import settings
     from app.harvester.lane_schedule import get_lane_store
+    from app.harvester.control import get_control_store
 
     now = datetime.now(timezone.utc)
     decision = get_lane_store().resolve(now)
+    control_mode, heartbeat_at = get_control_store().read()
+    worker_online = heartbeat_at > 0 and time.time() - heartbeat_at < 30
     spec = decision.spec
     return AdminLaneStatusOut(
         mode=spec.mode,
@@ -527,7 +532,7 @@ def _lane_status_payload() -> AdminLaneStatusOut:
         email_min=spec.email_min,
         phone_first=spec.phone_first,
         started_at=spec.started_at,
-        effective_mode=decision.mode,
+        effective_mode="both" if control_mode == "on" else decision.mode,
         in_phone_slot=decision.in_phone_slot,
         cycle_s=decision.cycle_s,
         position_s=decision.position_s,
@@ -537,7 +542,9 @@ def _lane_status_payload() -> AdminLaneStatusOut:
             if decision.next_switch_at else ""
         ),
         one_time_done=decision.one_time_done,
-        harvester_enabled=bool(getattr(settings, "HARVESTER_ENABLED", True)),
+        harvester_enabled=worker_online and control_mode != "off",
+        control_mode=control_mode,
+        worker_online=worker_online,
         interval_s=float(getattr(settings, "HARVESTER_INTERVAL_S", 300.0)),
         notes=[
             "phones lane = free license-board SODA fetches: ZERO AI spend. "
@@ -553,6 +560,19 @@ def _lane_status_payload() -> AdminLaneStatusOut:
 @router.get("/harvester/lane", response_model=AdminLaneStatusOut)
 def harvester_lane() -> AdminLaneStatusOut:
     """The live AI-lane schedule: stored spec + the lane the next pass runs."""
+    return _lane_status_payload()
+
+
+@router.post("/harvester/control", response_model=AdminLaneStatusOut)
+def set_harvester_control(
+    body: AdminHarvesterControlIn, admin: User = Depends(require_admin)
+) -> AdminLaneStatusOut:
+    """Change the durable worker switch without restarting or changing its schedule."""
+    from app.harvester.control import get_control_store
+
+    get_control_store().set_mode(body.mode)
+    get_activity().record(admin.id, admin.username, "harvester-control", detail=body.mode)
+    logger.info("POST /admin/harvester/control -> %s (by %s)", body.mode, admin.username)
     return _lane_status_payload()
 
 

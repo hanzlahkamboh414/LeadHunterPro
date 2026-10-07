@@ -2104,7 +2104,7 @@ function LaneSchedulePanel() {
           <div className="mt-4 grid grid-cols-1 gap-2 rounded-lg border border-white/5 bg-black/20 p-3 text-[12.5px] sm:grid-cols-2 lg:grid-cols-4">
             <span className="text-slate-500">
               Running now:{" "}
-              <span className="text-slate-200">{laneLabel(seeded.effective_mode)}</span>
+              <span className="text-slate-200">{!seeded.worker_online ? "Worker offline" : seeded.control_mode === "off" ? "Stopped" : laneLabel(seeded.effective_mode)}</span>
             </span>
             <span className="text-slate-500">
               Saved mode: <span className="text-slate-200">{laneLabel(seeded.mode)}</span>
@@ -2121,8 +2121,8 @@ function LaneSchedulePanel() {
               Harvester:{" "}
               <span className={seeded.harvester_enabled ? "text-emerald-300" : "text-rose-300"}>
                 {seeded.harvester_enabled
-                  ? `enabled · pass every ${Math.round(seeded.interval_s / 60)} min`
-                  : "disabled in .env"}
+                  ? `running · pass every ${Math.round(seeded.interval_s / 60)} min`
+                  : seeded.worker_online ? "stopped by admin" : "worker offline"}
               </span>
             </span>
           </div>

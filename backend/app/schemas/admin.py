@@ -301,6 +301,12 @@ class AdminLaneStatusOut(BaseModel):
     # Environment context — the operator needs to know whether the schedule
     # is even reaching a running worker, and how soon a change lands.
     harvester_enabled: bool = True
+    control_mode: Literal["off", "on", "schedule"] = "schedule"
+    worker_online: bool = False
     interval_s: float = 300.0
     #: Honest limits, stated in the payload so the UI never has to invent them.
     notes: list[str] = Field(default_factory=list)
+
+
+class AdminHarvesterControlIn(BaseModel):
+    mode: Literal["off", "on", "schedule"]

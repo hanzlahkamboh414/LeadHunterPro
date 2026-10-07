@@ -231,10 +231,6 @@ class CampaignScheduler:
         if self._sending_pause_file and os.path.exists(self._sending_pause_file):
             self._check_replies(now, stats)
             self._cleanup_hard_bounces()
-            for c in self._store.running_campaigns():
-                self._store.set_status(c["id"], status="paused",
-                                       paused_reason="deliverability")
-                stats["paused"] += 1
             return stats
 
         for cid in self._store.promote_scheduled(_iso(now)):
@@ -501,6 +497,8 @@ class CampaignScheduler:
 
     def _drain_one(self, c: dict[str, Any], now: datetime,
                    stats: dict[str, int]) -> None:
+        if self._sending_pause_file and os.path.exists(self._sending_pause_file):
+            return
         start = parse_ts(c["start_at"])
         pakistan_now = now.astimezone(PAKISTAN_TZ)
         if (start is not None
@@ -684,6 +682,10 @@ class CampaignScheduler:
                                c["id"], creds["email"])
                 return
 
+        # The admin may press Pause while AI prepares a draft or a token is
+        # refreshed. Recheck immediately before the external send request.
+        if self._sending_pause_file and os.path.exists(self._sending_pause_file):
+            return
         try:
             if creds.get("provider") == "smtp":
                 smtp.send_smtp(

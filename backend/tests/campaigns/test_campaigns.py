@@ -572,6 +572,24 @@ def test_activity_explorer_uses_pakistan_calendar_day(tmp_path):
                                   to_date="2026-10-02")["total"] == 1
     assert store.explore_activity("u1", view="sent", to_date="2026-10-01")["total"] == 0
 
+
+def test_global_pause_stops_scheduler_and_preserves_campaign_state(tmp_path, monkeypatch):
+    ctx = _setup(tmp_path, monkeypatch)
+    campaign = _make_campaign(ctx, emails=("jane@acme.com",))
+    flag = tmp_path / "campaign_sending_paused.flag"
+    ctx["sched"]._sending_pause_file = str(flag)
+    sent = []
+    monkeypatch.setattr(google, "send_gmail", lambda *args, **kwargs: sent.append(kwargs) or {"id": "m1"})
+
+    flag.write_text("Paused by admin")
+    assert ctx["sched"].run_once()["sent"] == 0
+    assert ctx["store"].get(campaign["id"], ctx["user"].id)["status"] == "scheduled"
+    assert sent == []
+
+    flag.unlink()
+    assert ctx["sched"].run_once()["sent"] == 1
+    assert len(sent) == 1
+
 def test_api_pause_resume_delete(tmp_path, monkeypatch):
     ctx = _setup(tmp_path, monkeypatch)
     ctx["leads"].save(_dossier("jane@acme.com"))

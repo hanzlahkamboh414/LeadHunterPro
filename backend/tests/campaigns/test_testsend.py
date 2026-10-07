@@ -87,7 +87,7 @@ def test_global_delivery_hold_blocks_direct_test_send(tmp_path, monkeypatch):
     sent = _capture_send(monkeypatch)
     response = _post(ctx)
     assert response.status_code == 409
-    assert "paused after Gmail delivery blocks" in response.json()["detail"]
+    assert "paused by the admin" in response.json()["detail"]
     assert not sent
     status = ctx["client"].get("/api/v1/campaigns/sending-status")
     assert status.status_code == 200

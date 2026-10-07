@@ -1026,6 +1026,16 @@ export const api = {
     return request("/campaigns/sending-status");
   },
 
+  adminCampaignSendingStatus(): Promise<{ paused: boolean }> {
+    return request("/admin/campaign-sending");
+  },
+  adminPauseCampaignSending(): Promise<{ paused: boolean }> {
+    return request("/admin/campaign-sending/pause", { method: "POST" });
+  },
+  adminResumeCampaignSending(): Promise<{ paused: boolean }> {
+    return request("/admin/campaign-sending/resume", { method: "POST" });
+  },
+
   getCampaign(id: number): Promise<Campaign & { sends: CampaignSend[]; followups: CampaignFollowup[] }> {
     return request(`/campaigns/${id}`);
   },

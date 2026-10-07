@@ -11,6 +11,7 @@ import {
   LockKeyhole,
   LockOpen,
   Mail,
+  Pause,
   Phone,
   RefreshCw,
   Share2,
@@ -49,13 +50,14 @@ function count(values: Record<string, number>, key: string): string {
   return (values[key] ?? 0).toLocaleString();
 }
 
-type Tab = "overview" | "users" | "access" | "data" | "lanes" | "keys" | "caches" | "audit";
+type Tab = "overview" | "users" | "access" | "data" | "campaigns" | "lanes" | "keys" | "caches" | "audit";
 
 const TABS: { id: Tab; label: string; icon: typeof ShieldCheck }[] = [
   { id: "overview", label: "Overview", icon: Gauge },
   { id: "users", label: "Users & Activity", icon: UsersIcon },
   { id: "access", label: "Admin Access", icon: ShieldCheck },
   { id: "data", label: "Data Control", icon: EyeOff },
+  { id: "campaigns", label: "Campaign Sending", icon: Mail },
   { id: "lanes", label: "AI Lanes", icon: Timer },
   { id: "keys", label: "API Keys", icon: KeyRound },
   { id: "caches", label: "Caches", icon: Database },
@@ -67,7 +69,7 @@ export default function Admin({ initialTab = "overview" }: { initialTab?: Tab })
   const navigate = useNavigate();
   const { user: activeUser } = useAuth();
   const isPrimaryAdmin = activeUser?.username === "admin4269" && activeUser.is_admin;
-  const allowedTabs = TABS.filter(({ id }) => id === "access"
+  const allowedTabs = TABS.filter(({ id }) => id === "access" || id === "campaigns"
     ? isPrimaryAdmin : isPrimaryAdmin || activeUser?.admin_permissions.includes(id));
   const [tab, setTab] = useState<Tab>(initialTab);
   useEffect(() => {
@@ -457,6 +459,8 @@ export default function Admin({ initialTab = "overview" }: { initialTab?: Tab })
         </>
       )}
 
+      {tab === "campaigns" && isPrimaryAdmin && <CampaignSendingPanel />}
+
       {/* -------------------------------------------------------------- */}
       {/* API KEYS */}
       {/* -------------------------------------------------------------- */}
@@ -658,6 +662,69 @@ export default function Admin({ initialTab = "overview" }: { initialTab?: Tab })
 }
 
 // ---------------------------------------------------------------------------
+// Primary admin's global sending switch
+// ---------------------------------------------------------------------------
+
+function CampaignSendingPanel() {
+  const qc = useQueryClient();
+  const campaignSending = useQuery({
+    queryKey: ["admin-campaign-sending"],
+    queryFn: () => api.adminCampaignSendingStatus(),
+    refetchInterval: 10_000,
+  });
+  const pauseCampaignSending = useMutation({
+    mutationFn: () => api.adminPauseCampaignSending(),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["admin-campaign-sending"] });
+      qc.invalidateQueries({ queryKey: ["campaign-sending-status"] });
+    },
+  });
+  const resumeCampaignSending = useMutation({
+    mutationFn: () => api.adminResumeCampaignSending(),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["admin-campaign-sending"] });
+      qc.invalidateQueries({ queryKey: ["campaign-sending-status"] });
+    },
+  });
+
+  return <section className={`${cardClass} mt-6 max-w-2xl`}>
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <div>
+        <h2 className="text-[16px] font-semibold text-white">All campaign sending</h2>
+        <p className="mt-1 text-[12.5px] text-slate-400">Master control for every account and campaign.</p>
+      </div>
+      <span role="status" className={`rounded-full px-3 py-1 text-xs font-semibold ${campaignSending.data?.paused ? "bg-amber-500/15 text-amber-200" : "bg-emerald-500/15 text-emerald-200"}`}>
+        {campaignSending.isLoading ? "Checking…" : campaignSending.isError ? "Status unavailable" : campaignSending.data?.paused ? "Sending paused" : "Sending enabled"}
+      </span>
+    </div>
+    <p className="mt-4 max-w-prose text-[13px] leading-relaxed text-slate-300">
+      Pause stops new campaign sends while you investigate an issue. Enable lets running or scheduled campaigns continue. Individually paused campaigns and account delivery holds stay separate.
+    </p>
+    <div className="mt-4 flex flex-wrap gap-2">
+      {campaignSending.data?.paused ? (
+        <button type="button" onClick={() => resumeCampaignSending.mutate()} disabled={resumeCampaignSending.isPending}
+          className="inline-flex min-h-11 items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-[13px] font-semibold text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50">
+          <LockOpen className="h-4 w-4" /> {resumeCampaignSending.isPending ? "Enabling…" : "Enable sending"}
+        </button>
+      ) : (
+        <button type="button" onClick={() => pauseCampaignSending.mutate()} disabled={!campaignSending.data || pauseCampaignSending.isPending}
+          className="inline-flex min-h-11 items-center gap-2 rounded-lg bg-amber-600 px-4 py-2 text-[13px] font-semibold text-white hover:bg-amber-500 disabled:cursor-not-allowed disabled:opacity-50">
+          <Pause className="h-4 w-4" /> {pauseCampaignSending.isPending ? "Pausing…" : "Pause all sending"}
+        </button>
+      )}
+      <button type="button" onClick={() => void campaignSending.refetch()}
+        className="inline-flex min-h-11 items-center gap-2 rounded-lg border border-white/10 px-3 text-[13px] text-slate-200 hover:bg-white/5">
+        <RefreshCw className="h-4 w-4" /> Refresh status
+      </button>
+    </div>
+    {(campaignSending.isError || pauseCampaignSending.isError || resumeCampaignSending.isError) && (
+      <p role="alert" className="mt-3 text-xs text-rose-300">Could not update campaign sending. Refresh the status and try again.</p>
+    )}
+    <p className="mt-3 text-xs text-slate-400">An email already in flight may finish after Pause is pressed.</p>
+  </section>;
+}
+
+// ---------------------------------------------------------------------------
 // Audit Log tab — the user delete-feed + the admin's Confirm / Restore answer
 // ---------------------------------------------------------------------------
 
@@ -810,7 +877,7 @@ function AdminAccessPanel({ users, loading, error }: {
       qc.invalidateQueries({ queryKey: ["admin-activity"] });
     },
   });
-  const controls = TABS.filter(({ id }) => id !== "access");
+  const controls = TABS.filter(({ id }) => id !== "access" && id !== "campaigns");
   const unchanged = JSON.stringify([...draft].sort()) ===
     JSON.stringify([...(selected?.admin_permissions ?? [])].sort());
 

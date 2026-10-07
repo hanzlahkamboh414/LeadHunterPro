@@ -333,9 +333,11 @@ function CampaignCard({
           <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-2.5 sm:flex sm:flex-wrap sm:items-center">
             <h2 className="min-w-0 truncate text-[15px] font-semibold text-white">{c.name}</h2>
             <span
-              className={`max-w-[140px] break-words rounded-full px-2 py-0.5 text-center text-[11px] font-semibold sm:max-w-full ${STATUS_STYLES[c.status] || STATUS_STYLES.completed}`}
+              className={`max-w-[140px] break-words rounded-full px-2 py-0.5 text-center text-[11px] font-semibold sm:max-w-full ${sendingPaused && (c.status === "running" || c.status === "scheduled") ? STATUS_STYLES.paused : STATUS_STYLES[c.status] || STATUS_STYLES.completed}`}
             >
-              {c.status === "paused" && c.paused_reason
+              {sendingPaused && (c.status === "running" || c.status === "scheduled")
+                ? "Paused globally"
+                : c.status === "paused" && c.paused_reason
                 ? PAUSE_REASONS[c.paused_reason] || "Paused"
                 : c.status}
             </span>

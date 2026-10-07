@@ -13,7 +13,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 import logging
+import os
 from datetime import datetime, timezone
+from pathlib import Path
 
 from app.admin_read import (
     AdminReadRepository,
@@ -25,6 +27,7 @@ from app.auth.activity import get_activity
 from app.auth import dependencies as auth_deps
 from app.auth.dependencies import require_admin
 from app.auth.models import User, UserStore
+from app.campaigns.store import get_campaign_store
 from app.core.runtime_keys import KNOWN_KEY_NAMES, RuntimeKeyStore
 from app.lead_research.service import _email_hash
 from app.phones.store import PhoneLeadsStore
@@ -76,6 +79,43 @@ router = APIRouter(
 
 _reader = AdminReadRepository()
 _key_store = RuntimeKeyStore()
+
+
+def _campaign_pause_file() -> Path:
+    return Path(get_campaign_store()._db_path).parent / "campaign_sending_paused.flag"
+
+
+def _require_primary_admin(user: User) -> None:
+    if not user.is_admin or user.username != "admin4269":
+        raise HTTPException(status_code=403, detail="Primary admin access required")
+
+
+@router.get("/campaign-sending")
+def campaign_sending_control_status(user: User = Depends(require_admin)) -> dict[str, bool]:
+    _require_primary_admin(user)
+    return {"paused": _campaign_pause_file().exists()}
+
+
+@router.post("/campaign-sending/pause")
+def pause_all_campaign_sending(user: User = Depends(require_admin)) -> dict[str, bool]:
+    """Stop campaign sends across all users; preserve each campaign's own state."""
+    _require_primary_admin(user)
+    flag = _campaign_pause_file()
+    flag.parent.mkdir(parents=True, exist_ok=True)
+    temporary = flag.with_name(f"{flag.name}.{os.getpid()}.tmp")
+    temporary.write_text("Paused by admin", encoding="utf-8")
+    os.replace(temporary, flag)
+    logger.warning("Campaign sending globally paused by %s", user.username)
+    return {"paused": True}
+
+
+@router.post("/campaign-sending/resume")
+def resume_all_campaign_sending(user: User = Depends(require_admin)) -> dict[str, bool]:
+    """Lift the global stop; user and deliverability pauses remain separate."""
+    _require_primary_admin(user)
+    _campaign_pause_file().unlink(missing_ok=True)
+    logger.warning("Campaign sending globally enabled by %s", user.username)
+    return {"paused": False}
 
 
 def _keys_payload() -> AdminKeysOut:

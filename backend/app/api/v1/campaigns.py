@@ -61,8 +61,7 @@ def _require_sending_available() -> None:
     if _sending_is_paused():
         raise HTTPException(
             status_code=409,
-            detail="Campaign sending is paused after Gmail delivery blocks. "
-                   "Use a permission-based recipient list before resuming.",
+            detail="Campaign sending is paused by the admin.",
         )
 
 
@@ -348,8 +347,7 @@ def campaign_sending_status(
 ) -> dict[str, bool | str]:
     paused = _sending_is_paused()
     return {"paused": paused,
-            "reason": "Gmail blocked campaign messages; recipient opt-in is required"
-            if paused else ""}
+            "reason": "Paused by admin" if paused else ""}
 
 
 @router.get("/recipient-status")

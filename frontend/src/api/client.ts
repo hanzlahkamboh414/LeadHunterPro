@@ -1076,6 +1076,10 @@ export const api = {
     return request(`/campaigns/${id}/resume`, { method: "POST" });
   },
 
+  continueCampaignNow(id: number): Promise<{ id: number; status: string; message: string }> {
+    return request(`/campaigns/${id}/continue-now`, { method: "POST" });
+  },
+
   /** Edit the pitch (name/subject/body) of a campaign that already
    * started — pending sends use the new text, sent ones keep their
    * record. Returns the refreshed detail. */

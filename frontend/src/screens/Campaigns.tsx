@@ -153,6 +153,14 @@ export default function Campaigns() {
     mutationFn: (id: number) => api.resumeCampaign(id),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["campaigns"] }),
   });
+  const continueNow = useMutation({
+    mutationFn: (id: number) => api.continueCampaignNow(id),
+    onSuccess: (result) => {
+      setBanner({ ok: true, text: result.message });
+      queryClient.invalidateQueries({ queryKey: ["campaigns"] });
+    },
+    onError: (error: Error) => setBanner({ ok: false, text: error.message }),
+  });
   const remove = useMutation({
     mutationFn: (id: number) => api.deleteCampaign(id),
     onSuccess: () => {
@@ -245,9 +253,10 @@ export default function Campaigns() {
             accountsById={accountsById.data || {}}
             onPause={() => pause.mutate(c.id)}
             onResume={() => resume.mutate(c.id)}
+            onContinueNow={() => continueNow.mutate(c.id)}
             sendingPaused={Boolean(sendingStatus.data?.paused)}
             onRemove={() => remove.mutate(c.id)}
-            actionsPending={pause.isPending || resume.isPending || remove.isPending}
+            actionsPending={pause.isPending || resume.isPending || continueNow.isPending || remove.isPending}
           />
         ))}
       </div>
@@ -264,6 +273,7 @@ function CampaignCard({
   accountsById,
   onPause,
   onResume,
+  onContinueNow,
   sendingPaused,
   onRemove,
   actionsPending,
@@ -272,6 +282,7 @@ function CampaignCard({
   accountsById: Record<number, string>;
   onPause: () => void;
   onResume: () => void;
+  onContinueNow: () => void;
   sendingPaused: boolean;
   onRemove: () => void;
   actionsPending: boolean;
@@ -400,6 +411,21 @@ function CampaignCard({
             >
               <Play className="w-3.5 h-3.5" />
               Resume
+            </button>
+          )}
+          {c.status !== "completed" && (
+            <button
+              onClick={onContinueNow}
+              disabled={actionsPending || sendingPaused || (c.status === "paused" && c.paused_reason !== "user")}
+              title={sendingPaused
+                ? "Sending is paused in Admin settings"
+                : c.status === "paused" && c.paused_reason !== "user"
+                ? PAUSE_REASONS[c.paused_reason || ""] || "This campaign cannot continue yet"
+                : "Start today's eligible emails now"}
+              className="flex min-h-10 min-w-0 items-center justify-center gap-1.5 rounded-lg border border-emerald-500/25 bg-emerald-500/10 px-3 py-1.5 text-[12.5px] font-semibold text-emerald-200 hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-45"
+            >
+              <Play className="h-3.5 w-3.5 shrink-0" />
+              Continue now
             </button>
           )}
           <button

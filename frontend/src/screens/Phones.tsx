@@ -41,6 +41,16 @@ function prettyPhone(e164: string): string {
 
 type Tab = "sheet" | "leads" | "contacts" | "history";
 
+const CALL_RESULT_LABELS: Record<string, string> = {
+  not_interested: "Not interested",
+  follow_up: "Follow up",
+  no_answer: "No answer",
+  hr: "HR",
+  wrong_number: "Wrong number",
+  no_longer_in_service: "No longer in service",
+  not_exist: "Not exist",
+};
+
 /** A tiny inline note editor — one open at a time (a lead id or saved id). */
 function NoteEditor({
   initial,
@@ -295,9 +305,9 @@ export default function Phones() {
     try {
       await api.phoneRecordEvent(id, action);
       refreshActivity();
-      if (action === "wrong_number") {
+      if (action === "wrong_number" || action === "no_longer_in_service" || action === "not_exist") {
         refreshMine();
-        say("Wrong number archived. It is off your sheet; admin can recover it.");
+        say(`${CALL_RESULT_LABELS[action]} archived. It is off your sheet; admin can recover it.`);
       } else if (action !== "dialed" && action !== "copied") {
         say("Call outcome saved to your daily history.");
       }
@@ -397,6 +407,11 @@ export default function Phones() {
             <span className="text-right font-medium text-white">{count}</span>
           </div>)}
         </div>
+        {((activity?.outcomes.hr ?? 0) + (activity?.outcomes.no_longer_in_service ?? 0) + (activity?.outcomes.not_exist ?? 0)) > 0 && (
+          <p className="mt-3 border-t border-white/10 pt-3 text-xs text-slate-400">
+            Other results: HR {activity?.outcomes.hr ?? 0} · No longer in service {activity?.outcomes.no_longer_in_service ?? 0} · Not exist {activity?.outcomes.not_exist ?? 0}
+          </p>
+        )}
       </section>
 
       {/* Search form — trade-less by design (P7.5): state + quantity */}
@@ -667,17 +682,24 @@ export default function Phones() {
                             >
                               <StickyNote className="w-3 h-3" /> Note
                             </button>
-                            <button title="Not interested" onClick={() => recordEvent(l.id, "not_interested")}
-                              aria-pressed={sheetOutcomes.get(l.id) === "not_interested"}
-                              className={`rounded-md px-2 py-1 text-[11.5px] ${sheetOutcomes.get(l.id) === "not_interested" ? "bg-rose-500 text-white font-semibold ring-2 ring-rose-300" : "bg-rose-500/10 text-rose-300"}`}>Not interested</button>
-                            <button title="Call again later" onClick={() => recordEvent(l.id, "follow_up")}
-                              aria-pressed={sheetOutcomes.get(l.id) === "follow_up"}
-                              className={`rounded-md px-2 py-1 text-[11.5px] ${sheetOutcomes.get(l.id) === "follow_up" ? "bg-sky-500 text-white font-semibold ring-2 ring-sky-300" : "bg-sky-500/10 text-sky-300"}`}>Follow up</button>
-                            <button title="No answer" onClick={() => recordEvent(l.id, "no_answer")}
-                              aria-pressed={sheetOutcomes.get(l.id) === "no_answer"}
-                              className={`rounded-md px-2 py-1 text-[11.5px] ${sheetOutcomes.get(l.id) === "no_answer" ? "bg-slate-300 text-slate-950 font-semibold ring-2 ring-slate-200" : "bg-white/[0.06] text-slate-300"}`}>No answer</button>
-                            <button title="Wrong or nonexistent number; remove from my sheet" onClick={() => recordEvent(l.id, "wrong_number")}
-                              className="rounded-md bg-orange-500/10 px-2 py-1 text-[11.5px] text-orange-300">Wrong number</button>
+                            <select
+                              aria-label={`Call result for ${l.business_name || l.person_name || prettyPhone(l.phone)}`}
+                              value=""
+                              onChange={(e) => {
+                                const action = e.target.value as Exclude<PhoneCallAction, "lead" | "voicemail" | "dialed" | "copied">;
+                                if (action) void recordEvent(l.id, action);
+                              }}
+                              className="min-h-11 max-w-[180px] rounded-lg border border-white/10 bg-[#151923] px-2.5 text-[12px] text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                            >
+                              <option value="">{sheetOutcomes.get(l.id) ? `Last: ${CALL_RESULT_LABELS[sheetOutcomes.get(l.id)!]}` : "Call result…"}</option>
+                              <option value="not_interested">Not interested</option>
+                              <option value="follow_up">Follow up</option>
+                              <option value="no_answer">No answer</option>
+                              <option value="hr">HR</option>
+                              <option value="wrong_number">Wrong number · archive</option>
+                              <option value="no_longer_in_service">No longer in service · archive</option>
+                              <option value="not_exist">Not exist · archive</option>
+                            </select>
                           </div>
                         )}
                       </td>
@@ -694,7 +716,7 @@ export default function Phones() {
           {(activity?.events ?? []).length === 0 && <p className="text-sm text-slate-500">No recorded call activity on this date.</p>}
           {(activity?.events ?? []).map((event) => <div key={event.id} className="flex flex-wrap justify-between gap-2 border-b border-white/5 py-2 text-xs">
             <span className="text-slate-300">{event.business_name || event.person_name || "—"} · {prettyPhone(event.phone)} · {event.state}</span>
-            <span className="text-slate-400">{event.action.replace(/_/g, " ")} · {event.created_at.slice(11, 16)} UTC</span>
+            <span className="text-slate-400">{CALL_RESULT_LABELS[event.action] || event.action.replace(/_/g, " ")} · {event.created_at.slice(11, 16)} UTC</span>
           </div>)}
         </div>}
         {(tab === "leads" || tab === "contacts") && (

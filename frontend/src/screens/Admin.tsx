@@ -1164,7 +1164,7 @@ function UsersTab({
       <section className={`${cardClass} mt-6`}>
         <button type="button" onClick={() => setWrongArchiveOpen((open) => !open)} aria-expanded={wrongArchiveOpen} aria-controls="admin-wrong-archive"
           className="flex min-h-11 w-full items-center justify-between gap-3 text-left text-[16px] font-semibold text-white">
-          <span>Wrong-number archive {wrongPhones.data && <span className="ml-1 text-xs font-medium text-slate-300">({wrongPhones.data.total.toLocaleString()})</span>}</span>
+          <span>Invalid-number archive {wrongPhones.data && <span className="ml-1 text-xs font-medium text-slate-300">({wrongPhones.data.total.toLocaleString()})</span>}</span>
           <ChevronDown className={`h-4 w-4 shrink-0 text-slate-300 transition-transform ${wrongArchiveOpen ? "rotate-180" : ""}`} aria-hidden="true" />
         </button>
         {wrongArchiveOpen && <div id="admin-wrong-archive" className="border-t border-white/10 pt-3">
@@ -1172,11 +1172,11 @@ function UsersTab({
           {wrongPhones.isLoading && <p className="mt-2 text-xs text-slate-400">Loading archive…</p>}
           {wrongPhones.isError && <p role="alert" className="mt-2 text-xs text-rose-300">Archive unavailable: {(wrongPhones.error as Error).message} <button type="button" className="underline" onClick={() => void wrongPhones.refetch()}>Retry</button></p>}
           {(wrongPhones.data?.rows ?? []).map((row) => <div key={row.id} className="flex flex-wrap items-center justify-between gap-2 border-b border-white/5 py-2 text-xs">
-            <span className="min-w-0 break-all text-slate-200">{row.phone} · {row.created_at.slice(0, 10)} · {row.user_id}</span>
+            <span className="min-w-0 break-all text-slate-200">{row.phone} · {row.created_at.slice(0, 10)} · {row.user_id} <span className="ml-1 rounded bg-white/10 px-1.5 py-0.5 text-slate-300">{row.reason === "no_longer_in_service" ? "No longer in service" : row.reason === "not_exist" ? "Not exist" : "Wrong number"}</span></span>
             <button type="button" disabled={recoverWrong.isPending} onClick={() => recoverWrong.mutate(row.id)}
               className="min-h-10 shrink-0 rounded-md bg-indigo-500/15 px-3 text-indigo-200 disabled:opacity-50">Recover</button>
           </div>)}
-          {wrongPhones.data?.total === 0 && <p className="mt-2 text-xs text-slate-400">No wrong numbers in archive.</p>}
+          {wrongPhones.data?.total === 0 && <p className="mt-2 text-xs text-slate-400">No invalid numbers in archive.</p>}
           {wrongPhones.data && wrongPhones.data.total > wrongArchivePageSize && <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-300">
             <span>{wrongArchivePage * wrongArchivePageSize + 1}–{Math.min((wrongArchivePage + 1) * wrongArchivePageSize, wrongPhones.data.total)} of {wrongPhones.data.total}</span>
             <div className="flex gap-2">

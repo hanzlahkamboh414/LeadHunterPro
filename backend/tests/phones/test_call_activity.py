@@ -44,6 +44,26 @@ def test_wrong_number_leaves_user_sheet_stays_archived_and_admin_recovers(tmp_pa
     assert store.pool_stats()["total"] == 1
 
 
+def test_hr_result_stays_on_sheet_and_invalid_results_archive_with_reason(tmp_path):
+    store = PhoneLeadsStore(db_path=str(tmp_path / "phones.db"))
+    for phone in ("5031110001", "5031110002", "5031110003"):
+        _stock(store, phone)
+    leads = store.serve("", "WA", "", 3, "alice")
+    assert store.record_call_event(leads[0]["id"], "alice", "hr") is not None
+    assert store.list_owned("alice")
+    for lead, reason in zip(leads[1:], ("no_longer_in_service", "not_exist")):
+        assert store.mark_invalid_number(lead["id"], "bob", reason) is None
+        assert store.mark_invalid_number(lead["id"], "alice", reason) is not None
+        archived = next(row for row in store.list_wrong_archive() if row["phone"] == lead["phone"])
+        assert archived["reason"] == reason
+        assert store.recover_wrong_number(archived["id"]) is True
+    activity = store.call_activity("alice")
+    assert activity["outcomes"]["hr"] == 1
+    assert activity["outcomes"]["no_longer_in_service"] == 1
+    assert activity["outcomes"]["not_exist"] == 1
+    assert store.pool_stats()["total"] == 3
+
+
 def test_wrong_number_archive_uses_bounded_pages(tmp_path):
     store = PhoneLeadsStore(db_path=str(tmp_path / "phones.db"))
     with sqlite3.connect(store._db_path) as conn:

@@ -84,7 +84,7 @@ class NoteIn(BaseModel):
 
 
 class PhoneEventIn(BaseModel):
-    action: str = Field(..., pattern="^(dialed|copied|not_interested|follow_up|no_answer|wrong_number)$")
+    action: str = Field(..., pattern="^(dialed|copied|not_interested|follow_up|no_answer|hr|wrong_number|no_longer_in_service|not_exist)$")
 
 
 class PhoneLeadOut(BaseModel):
@@ -323,8 +323,8 @@ def record_call_event(
     lead_id: int, body: PhoneEventIn,
     user: User = Depends(require_phone_category),
 ) -> dict:
-    if body.action == "wrong_number":
-        result = _store.mark_wrong_number(lead_id, user.id)
+    if body.action in ("wrong_number", "no_longer_in_service", "not_exist"):
+        result = _store.mark_invalid_number(lead_id, user.id, body.action)
     else:
         result = _store.record_call_event(lead_id, user.id, body.action)
     return _act(lead_id, user, body.action, result)

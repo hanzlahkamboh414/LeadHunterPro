@@ -189,15 +189,18 @@ def test_call_activity_and_wrong_archive_are_owner_and_admin_scoped(
     path = f"/api/v1/phones/leads/{lead_id}/event"
     assert client.post(path, headers=bob_headers, json={"action": "dialed"}).status_code == 404
     assert client.post(path, headers=alice_headers, json={"action": "dialed"}).status_code == 200
+    assert client.post(path, headers=alice_headers, json={"action": "hr"}).status_code == 200
     assert client.post(path, headers=alice_headers,
                        json={"action": "wrong_number"}).status_code == 200
     activity = client.get("/api/v1/phones/activity", headers=alice_headers).json()
     assert activity["dialed"] == 1
+    assert any(event["action"] == "hr" for event in activity["events"])
     assert activity["outcomes"]["wrong_number"] == 1
     assert client.get("/api/v1/admin/phones/wrong", headers=bob_headers).status_code == 403
     assert client.get("/api/v1/admin/phones/wrong/page", headers=bob_headers).status_code == 403
     archive = client.get("/api/v1/admin/phones/wrong", headers=admin_headers).json()
     assert len(archive) == 1
+    assert archive[0]["reason"] == "wrong_number"
     page = client.get("/api/v1/admin/phones/wrong/page", headers=admin_headers,
                       params={"limit": 10, "offset": 0}).json()
     assert page == {"total": 1, "rows": archive}

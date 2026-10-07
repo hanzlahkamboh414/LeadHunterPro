@@ -859,7 +859,8 @@ export interface PhonePoolStats {
 }
 
 export type PhoneCallAction = "dialed" | "copied" | "lead" | "voicemail" |
-  "not_interested" | "follow_up" | "no_answer" | "wrong_number";
+  "not_interested" | "follow_up" | "no_answer" | "hr" | "wrong_number" |
+  "no_longer_in_service" | "not_exist";
 
 export interface PhoneCallEvent {
   id: number;
@@ -889,6 +890,7 @@ export interface WrongPhoneArchiveRow {
   user_id: string;
   phone: string;
   created_at: string;
+  reason?: "wrong_number" | "no_longer_in_service" | "not_exist";
 }
 
 /** One user's row in the admin phone-claims report. */

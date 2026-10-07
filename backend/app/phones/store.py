@@ -286,6 +286,10 @@ class PhoneLeadsStore:
                     recovered_at TEXT NOT NULL DEFAULT ''
                 )
             """)
+            if "reason" not in {row[1] for row in conn.execute(
+                    "PRAGMA table_info(phone_wrong_archive)")}:
+                conn.execute("ALTER TABLE phone_wrong_archive "
+                             "ADD COLUMN reason TEXT NOT NULL DEFAULT 'wrong_number'")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_phone_call_day "
                 "ON phone_call_events (user_id, created_at)"
@@ -901,7 +905,7 @@ class PhoneLeadsStore:
         self, lead_id: int, user_id: str, action: str,
     ) -> dict[str, Any] | None:
         """Owner-only dial/copy or non-terminal call outcome."""
-        if action not in ("dialed", "copied", "not_interested", "follow_up", "no_answer"):
+        if action not in ("dialed", "copied", "not_interested", "follow_up", "no_answer", "hr"):
             raise ValueError("unknown phone call action")
         lead = self._owned_lead(lead_id, user_id)
         if lead is None:
@@ -956,18 +960,26 @@ class PhoneLeadsStore:
     def mark_wrong_number(
         self, lead_id: int, user_id: str,
     ) -> dict[str, Any] | None:
-        """Suppress a bad number, remove it from the sheet, retain archive."""
+        """Compatibility entry point for the original invalid-number action."""
+        return self.mark_invalid_number(lead_id, user_id, "wrong_number")
+
+    def mark_invalid_number(
+        self, lead_id: int, user_id: str, action: str,
+    ) -> dict[str, Any] | None:
+        """Suppress an unusable number and keep a recoverable audit row."""
+        if action not in ("wrong_number", "no_longer_in_service", "not_exist"):
+            raise ValueError("unknown invalid-number action")
         lead = self._owned_lead(lead_id, user_id)
         if lead is None:
             return None
         conn = self._conn()
         try:
             conn.execute("BEGIN IMMEDIATE")
-            self._insert_call_event(conn, lead, user_id, "wrong_number")
+            self._insert_call_event(conn, lead, user_id, action)
             cur = conn.execute(
                 "INSERT INTO phone_wrong_archive "
-                "(user_id, phone, snapshot_json, created_at) VALUES (?, ?, ?, ?)",
-                (user_id, lead["phone"], json.dumps(lead), _now()),
+                "(user_id, phone, snapshot_json, created_at, reason) VALUES (?, ?, ?, ?, ?)",
+                (user_id, lead["phone"], json.dumps(lead), _now(), action),
             )
             conn.execute(
                 "DELETE FROM phone_lead_owners WHERE lead_id IN "
@@ -977,7 +989,7 @@ class PhoneLeadsStore:
             conn.execute("DELETE FROM phone_leads WHERE phone = ?", (lead["phone"],))
             conn.execute(
                 "INSERT OR IGNORE INTO phone_suppressions (phone, reason, created_at) "
-                "VALUES (?, 'wrong_number', ?)", (lead["phone"], _now()),
+                "VALUES (?, ?, ?)", (lead["phone"], action, _now()),
             )
             conn.commit()
             return {"archive_id": cur.lastrowid, "retired": True}
@@ -988,7 +1000,7 @@ class PhoneLeadsStore:
         conn = self._conn()
         try:
             cur = conn.execute(
-                "SELECT id, user_id, phone, created_at FROM phone_wrong_archive "
+                "SELECT id, user_id, phone, created_at, reason FROM phone_wrong_archive "
                 "WHERE recovered_at = '' ORDER BY id DESC"
             )
             cols = [d[0] for d in cur.description]
@@ -1004,7 +1016,7 @@ class PhoneLeadsStore:
                 "SELECT COUNT(*) FROM phone_wrong_archive WHERE recovered_at = ''"
             ).fetchone()[0]
             cur = conn.execute(
-                "SELECT id, user_id, phone, created_at FROM phone_wrong_archive "
+                "SELECT id, user_id, phone, created_at, reason FROM phone_wrong_archive "
                 "WHERE recovered_at = '' ORDER BY id DESC LIMIT ? OFFSET ?",
                 (limit, offset),
             )
@@ -1019,7 +1031,7 @@ class PhoneLeadsStore:
         try:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT phone, snapshot_json FROM phone_wrong_archive "
+                "SELECT phone, snapshot_json, reason FROM phone_wrong_archive "
                 "WHERE id = ? AND recovered_at = ''", (archive_id,),
             ).fetchone()
             if row is None:
@@ -1028,7 +1040,7 @@ class PhoneLeadsStore:
             suppression = conn.execute(
                 "SELECT reason FROM phone_suppressions WHERE phone = ?", (row[0],),
             ).fetchone()
-            if suppression is None or suppression[0] != "wrong_number":
+            if suppression is None or suppression[0] != row[2]:
                 conn.rollback()
                 return False
             lead = json.loads(row[1])

@@ -172,7 +172,7 @@ export default function Execute() {
         <button role="tab" aria-selected={researchMode === "market"} onClick={() => setResearchMode("market")} className={`min-h-11 rounded-lg px-4 text-sm font-semibold ${researchMode === "market" ? "bg-indigo-600 text-white" : "border border-white/10 text-slate-300"}`}>Find new leads</button>
         <button role="tab" aria-selected={researchMode === "file"} onClick={() => setResearchMode("file")} className={`min-h-11 rounded-lg px-4 text-sm font-semibold ${researchMode === "file" ? "bg-indigo-600 text-white" : "border border-white/10 text-slate-300"}`}>Research my file</button>
       </div>
-      {researchMode === "file" ? <ManualResearch /> : <>
+      {researchMode === "file" ? <ManualResearch aiEnabled={availability.data?.enabled !== false} /> : <>
       <div className="screen-tip"><span><b>01</b> Choose a market</span><span><b>02</b> Set your target</span><span><b>03</b> Review qualified leads</span></div>
 
       {/* API key (M12 baseline) */}
@@ -386,6 +386,11 @@ export default function Execute() {
           pausePending={pause.isPending}
           resumePending={resume.isPending}
         />
+      )}
+      {resume.isError && (
+        <p role="alert" className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
+          {(resume.error as ApiError).message}
+        </p>
       )}
       </>}
     </div>

@@ -6,7 +6,7 @@ import { api, ApiError, type LeadImportJob } from "../api/client";
 const activeStatus = (status: string) => !["completed", "cancelled"].includes(status);
 const errorText = (error: unknown) => error instanceof ApiError ? error.message : "Please try again.";
 
-export default function ManualResearch() {
+export default function ManualResearch({ aiEnabled = true }: { aiEnabled?: boolean }) {
   const qc = useQueryClient();
   const navigate = useNavigate();
   const input = useRef<HTMLInputElement>(null);
@@ -30,7 +30,11 @@ export default function ManualResearch() {
     if (next && next.size > 10 * 1024 * 1024) { setFileError("Choose a file smaller than 10 MB."); setFile(null); return; }
     setFileError(""); setFile(next);
   }
-  function submit(event: FormEvent) { event.preventDefault(); if (file && !upload.isPending) upload.mutate(); }
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    if (!aiEnabled) { setFileError("AI research is temporarily unavailable. Please wait a while and try again."); return; }
+    if (file && !upload.isPending) upload.mutate();
+  }
   function renameJob(job: LeadImportJob) { const title = window.prompt("Research name", job.name); if (title?.trim()) rename.mutate({ id: job.id, title: title.trim() }); }
   function deleteJob(job: LeadImportJob) { if (window.confirm(`Remove research "${job.name}"?`)) remove.mutate(job.id); }
   return <div className="space-y-5">

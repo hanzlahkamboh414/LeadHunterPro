@@ -228,21 +228,19 @@ def test_pending_row_cannot_be_marked_opened(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# The scheduler embeds the pixel; the email carries it
+# Campaign sends use plain text without a hidden tracking image.
 # ---------------------------------------------------------------------------
 
-def test_scheduler_send_carries_tracking_url(tmp_path, monkeypatch):
+def test_scheduler_send_has_opt_out_without_tracking_pixel(tmp_path, monkeypatch):
     ctx = _setup(tmp_path, monkeypatch, accounts=1)
     sent = _capture_send(monkeypatch)
     c = _make_campaign(ctx, emails=["a@x.com"])
     ctx["sched"].run_once()
 
     assert len(sent) == 1
-    url = sent[0]["tracking_url"]
-    assert "/api/v1/campaigns/track/" in url and url.endswith(".png")
-    # The token names the send row that just went out.
-    row = _sent_row(ctx, c["id"], "a@x.com")
-    assert parse_token(url.rsplit("/", 1)[1][:-4]) == row["id"]
+    assert not sent[0].get("tracking_url")
+    assert "reply Unsubscribe" in sent[0]["body"]
+    assert _sent_row(ctx, c["id"], "a@x.com")["state"] == "sent"
 
 
 def test_send_gmail_multipart_with_tracking(monkeypatch):
@@ -310,6 +308,7 @@ def test_send_gmail_plain_without_tracking(monkeypatch):
     msg = message_from_bytes(raw)
     assert not msg.is_multipart()
     assert msg.get_content_type() == "text/plain"
+    assert msg["Date"] and msg["Message-ID"]
     assert "plain" in msg.get_payload(decode=True).decode()
 
 

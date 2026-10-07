@@ -16,6 +16,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
+import pytest
 import requests
 from fastapi.testclient import TestClient
 
@@ -241,7 +242,7 @@ def test_scheduler_followup_sends_after_days(tmp_path, monkeypatch):
     ctx["sched"]._clock.advance(86400 + 8 * 60)
     ctx["sched"].run_once()
     assert len(sent_calls) == 2
-    assert sent_calls[1]["subject"] == "Re: Sample estimate"
+    assert sent_calls[1]["subject"] == "Sample estimate"
     assert "estimate sample" in sent_calls[1]["body"]
 
     # Drained: campaign completed, lead CRM carries the follow-up note.
@@ -275,8 +276,9 @@ def test_ai_followup_needs_only_timing_and_keeps_sender_signature(tmp_path, monk
     ctx["sched"]._clock.advance(3 * 86400 + 8 * 60)
     ctx["sched"].run_once()
     assert len(sent) == 2
-    assert sent[1]["subject"] == "Re: Takeoff support"
-    assert sent[1]["body"].endswith("Best regards,\nSender Name")
+    assert sent[1]["subject"] == "Takeoff support"
+    assert "Best regards,\nSender Name" in sent[1]["body"]
+    assert sent[1]["body"].endswith("reply Unsubscribe and we'll stop.")
     assert "We prepare quantity takeoffs" in prompts[0]
     assert ctx["store"].get(campaign["id"], ctx["user"].id)["status"] == "completed"
 
@@ -534,6 +536,37 @@ def test_reply_is_recorded_as_delivered(tmp_path, monkeypatch):
     assert stats["replied"] == 1
     assert ctx["bounce"].lookup("jane@acme.com") == "delivered"
     assert ctx["bounce"].counts() == {"delivered": 1}
+
+
+def test_unsubscribe_reply_suppresses_future_campaign_sends(tmp_path, monkeypatch):
+    ctx = _bounce_setup(tmp_path, monkeypatch, emails=("jane@acme.com", "other@acme.com"))
+    ctx["sched"].run_once()
+    ctx["store"].queue_followup(
+        ctx["campaign_id"], "jane@acme.com", step=1,
+        not_before=_iso(NOW + timedelta(days=3)))
+    monkeypatch.setattr(google, "list_inbox_senders", lambda tok, **kw: [{
+        "from": "Jane <jane@acme.com>", "subject": "Re: Estimating",
+        "snippet": "Please unsubscribe me from your emails",
+    }])
+    ctx["sched"]._clock.advance(2 * 3600)
+    ctx["sched"].run_once()
+    assert ctx["store"].is_suppressed(ctx["user"].id, "jane@acme.com")
+    sends = [s for s in ctx["store"].sends(ctx["campaign_id"], ctx["user"].id)
+             if s["email"] == "jane@acme.com"]
+    assert [s["state"] for s in sends] == ["sent", "skipped"]
+    assert "jane@acme.com" in ctx["store"].recipient_statuses(
+        ctx["user"].id)["suppressed"]
+
+
+def test_opted_out_address_cannot_be_queued_again(tmp_path):
+    store = CampaignStore(db_path=str(tmp_path / "campaigns.db"))
+    assert store.suppress_recipient("user-1", "jane@acme.com")
+    assert not store.suppress_recipient("user-1", "JANE@acme.com")
+    with pytest.raises(ValueError, match="already queued or emailed"):
+        store.create(
+            "user-1", account_id=1, name="new", subject="S", body="B",
+            emails=["jane@acme.com"], start_at=_iso(NOW),
+        )
 
 
 def test_dsn_is_recorded_as_bounce(tmp_path, monkeypatch):

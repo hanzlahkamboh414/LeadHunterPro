@@ -81,6 +81,19 @@ def test_test_send_renders_sample_lead_and_sends(tmp_path, monkeypatch):
     assert sent["token"] == "AT-1"
 
 
+def test_global_delivery_hold_blocks_direct_test_send(tmp_path, monkeypatch):
+    ctx = _setup(tmp_path, monkeypatch)
+    (tmp_path / "campaign_sending_paused.flag").write_text("Gmail policy block")
+    sent = _capture_send(monkeypatch)
+    response = _post(ctx)
+    assert response.status_code == 409
+    assert "paused after Gmail delivery blocks" in response.json()["detail"]
+    assert not sent
+    status = ctx["client"].get("/api/v1/campaigns/sending-status")
+    assert status.status_code == 200
+    assert status.json()["paused"] is True
+
+
 def test_test_send_creates_nothing(tmp_path, monkeypatch):
     """The spam check must never pollute real campaign data: no campaign,
     no send row, and the test recipient is not 'already emailed'."""

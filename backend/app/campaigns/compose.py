@@ -27,6 +27,19 @@ def has_referral_request(body: str) -> bool:
 
 _SIGNOFF = re.compile(r"(?im)^\s*(?:best regards|kind regards|regards|sincerely),?\s*$")
 
+_OPT_OUT = re.compile(
+    r"\b(?:unsubscribe|opt[ -]?out|stop (?:sending|emailing)|"
+    r"rather not receive (?:future|more) (?:emails|messages))\b", re.I)
+
+
+def with_opt_out(body: str) -> str:
+    """Give every campaign recipient a clear reply-based opt-out."""
+    if _OPT_OUT.search(body):
+        return body
+    return body.rstrip() + (
+        "\n\nIf you don't want further emails, reply Unsubscribe and we'll stop."
+    )
+
 
 def split_script_signature(body: str) -> tuple[str, str]:
     """Keep the sender's saved sign-off fixed while AI writes the message."""

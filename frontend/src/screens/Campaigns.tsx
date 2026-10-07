@@ -51,6 +51,7 @@ const PAUSE_REASONS: Record<string, string> = {
   user: "Paused by you",
   rate_limited: "Rate limited by Gmail — auto-resumes after cooldown",
   account: "Gmail account disconnected — resumes when reconnected",
+  deliverability: "Paused after delivery blocks",
 };
 
 const INPUT =
@@ -130,6 +131,14 @@ export default function Campaigns() {
     queryFn: () => api.campaigns(),
     refetchInterval: 15000,
   });
+  const sendingStatus = useQuery({
+    queryKey: ["campaign-sending-status"],
+    queryFn: () => api.campaignSendingStatus(),
+    refetchInterval: 15000,
+  });
+  useEffect(() => {
+    if (sendingStatus.data?.paused) setBuilding(false);
+  }, [sendingStatus.data?.paused]);
 
   // Sending-account addresses for the per-send "Via" column.
   const accountsById = useQuery({
@@ -160,8 +169,15 @@ export default function Campaigns() {
       <PageHeader
         eyebrow="LeadHunter Pro"
         title="Campaigns"
-        subtitle="Email outreach on your connected Gmail — paced slowly, capped daily, paused safely."
+        subtitle="Manage campaign recipients, replies and delivery status."
       />
+
+      {sendingStatus.data?.paused && (
+        <div role="alert" className="campaign-hold-alert mt-4 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-[13px] text-amber-100">
+          <p className="font-semibold">Campaign sending is paused</p>
+          <p className="mt-1 opacity-90">Gmail blocked messages from several accounts. These contacts came from public listings without opt-in. Campaigns will stay paused until a permission-based recipient list is ready.</p>
+        </div>
+      )}
 
       {banner && (
         <div
@@ -185,13 +201,13 @@ export default function Campaigns() {
 
       <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <p className="min-w-0 text-[13px] text-slate-500">
-          Sends go out with a random 3–7 minute gap and a daily cap per Gmail
-          account — add more sending accounts to scale volume safely. Every
-          send lands on the lead's CRM timeline.
+          Review each campaign's recipients and delivery record. New sends need
+          recipients who agreed to receive your emails.
         </p>
         <button
           onClick={() => setBuilding(true)}
-          className="flex min-h-10 w-full shrink-0 items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-[13px] font-semibold text-white hover:bg-indigo-500 sm:ml-4 sm:w-auto"
+          disabled={sendingStatus.data?.paused}
+          className="flex min-h-10 w-full shrink-0 items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-[13px] font-semibold text-white hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-45 sm:ml-4 sm:w-auto"
         >
           <Plus className="w-4 h-4" />
           New campaign
@@ -232,6 +248,7 @@ export default function Campaigns() {
             accountsById={accountsById.data || {}}
             onPause={() => pause.mutate(c.id)}
             onResume={() => resume.mutate(c.id)}
+            sendingPaused={Boolean(sendingStatus.data?.paused)}
             onRemove={() => remove.mutate(c.id)}
             actionsPending={pause.isPending || resume.isPending || remove.isPending}
           />
@@ -250,6 +267,7 @@ function CampaignCard({
   accountsById,
   onPause,
   onResume,
+  sendingPaused,
   onRemove,
   actionsPending,
 }: {
@@ -257,6 +275,7 @@ function CampaignCard({
   accountsById: Record<number, string>;
   onPause: () => void;
   onResume: () => void;
+  sendingPaused: boolean;
   onRemove: () => void;
   actionsPending: boolean;
 }) {
@@ -376,8 +395,8 @@ function CampaignCard({
           {c.status === "paused" && (
             <button
               onClick={onResume}
-              disabled={actionsPending}
-              className="flex min-h-10 items-center justify-center gap-1.5 rounded-lg border border-white/5 px-3 py-1.5 text-[12.5px] text-emerald-300 hover:bg-emerald-500/10"
+              disabled={actionsPending || sendingPaused}
+              className="flex min-h-10 items-center justify-center gap-1.5 rounded-lg border border-white/5 px-3 py-1.5 text-[12.5px] text-emerald-300 hover:bg-emerald-500/10 disabled:cursor-not-allowed disabled:opacity-45"
             >
               <Play className="w-3.5 h-3.5" />
               Resume

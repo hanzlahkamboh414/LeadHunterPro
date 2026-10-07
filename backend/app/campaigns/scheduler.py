@@ -39,6 +39,7 @@ from __future__ import annotations
 import logging
 import os
 import random
+import re
 import threading
 import smtplib
 from datetime import datetime, timedelta, timezone
@@ -50,7 +51,8 @@ from app.campaigns.personalize import (
     default_ask,
     generate_hook,
 )
-from app.campaigns.compose import compose_email, has_referral_request, split_script_signature
+from app.campaigns.compose import (compose_email, has_referral_request,
+                                   split_script_signature, with_opt_out)
 from app.campaigns.hard_bounce import (hard_bounce_target,
                                        invalid_recipient_reason,
                                        policy_block_target)
@@ -58,7 +60,6 @@ from app.campaigns.deliverability_guard import DeliverabilityGuard
 from app.campaigns.pre_send_verifier import CampaignEmailVerifier
 from app.campaigns.store import CampaignStore
 from app.campaigns.templates import context_for, render, render_email_body
-from app.campaigns.tracking import pixel_url
 from app.email_accounts import google, smtp
 from app.email_accounts.store import EmailAccountStore
 from app.lead_research.models import CRM_STATUSES
@@ -106,6 +107,17 @@ def _is_dsn_sender(addr: str) -> bool:
     """True when *addr* is a mail system, not a person."""
     local = (addr or "").split("@", 1)[0].strip().lower()
     return local in _DSN_LOCALS
+
+
+def _is_opt_out_reply(subject: str, snippet: str) -> bool:
+    """Use only a direct request, never an old quoted footer."""
+    cleaned_subject = re.sub(r"^(?:re|fwd):\s*", "", subject.strip(), flags=re.I)
+    if re.fullmatch(r"(?i)(?:unsubscribe|remove me|stop emailing me)", cleaned_subject):
+        return True
+    return bool(re.match(
+        r"(?i)^\s*(?:unsubscribe\b|please\s+unsubscribe\b|"
+        r"remove me from (?:your|this) (?:list|emails)\b|"
+        r"(?:please\s+)?stop emailing me\b)", snippet or ""))
 
 
 def ensure_access_token(email_store: EmailAccountStore, *, account_id: int,
@@ -376,6 +388,18 @@ class CampaignScheduler:
                                             account_id)
                     continue  # mail from someone we never emailed — not ours
                 subject = (msg.get("subject") or "")[:300]
+                if _is_opt_out_reply(subject, msg.get("snippet") or ""):
+                    self._store.suppress_recipient(
+                        target["user_id"], addr, source="reply")
+                    self._store.mark_replied(
+                        target["campaign_id"], addr,
+                        received_at=_iso(now), subject=subject)
+                    stats["replied"] += 1
+                    self._crm_event(
+                        addr, user_id=target["user_id"],
+                        note="recipient requested no further email")
+                    logger.info("opt-out recorded for %s", addr)
+                    continue
                 self._store.mark_replied(
                     target["campaign_id"], addr,
                     received_at=_iso(now), subject=subject)
@@ -517,6 +541,12 @@ class CampaignScheduler:
             self._store.mark_completed_if_drained(c["id"])
             return
 
+        if self._store.is_suppressed(c["user_id"], send["email"]):
+            self._store.mark_skipped(send["id"], error="recipient opted out")
+            self._store.mark_completed_if_drained(c["id"])
+            stats["skipped"] += 1
+            return
+
         if send["step"] > 0:
             original_account = self._store.initial_sender(c["id"], send["email"])
             if original_account is None:
@@ -631,6 +661,12 @@ class CampaignScheduler:
                            c["id"], send["email"])
             return
 
+        # These are separate messages, not RFC reply threads; a leading
+        # "Re:" would misrepresent them to recipients and receiving servers.
+        if send["step"] > 0:
+            subject = re.sub(r"(?i)^\s*re:\s*", "", subject).strip()
+        body = with_opt_out(body)
+
         creds = self._email_store.get_credentials(account_id, c["user_id"])
         access_token = ""
         if creds.get("provider") != "smtp":
@@ -655,13 +691,12 @@ class CampaignScheduler:
                     security=creds["smtp_security"],
                     username=creds["smtp_username"], password=creds["smtp_password"],
                     from_email=creds["email"], to=send["email"],
-                    subject=subject, body=body, tracking_url=pixel_url(send["id"]),
+                    subject=subject, body=body,
                 )
             else:
                 google.send_gmail(
                     access_token, to=send["email"], subject=subject, body=body,
                     from_email=creds["email"],
-                    tracking_url=pixel_url(send["id"]),
                 )
         except Exception as exc:  # noqa: BLE001 — mapped below by cause
             self._on_send_error(c, send, exc, stats, account_id=account_id,
@@ -859,7 +894,9 @@ def get_scheduler() -> CampaignScheduler:
             campaign_store, get_email_store(), lead_store,
             bounce_store=bounce_store,
             verifier=None,
-            deliverability_guard=None,
+            deliverability_guard=DeliverabilityGuard(os.path.join(
+                os.path.dirname(campaign_store._db_path),
+                "deliverability_guard.db")),
             sending_pause_file=os.path.join(
                 os.path.dirname(campaign_store._db_path),
                 "campaign_sending_paused.flag"),

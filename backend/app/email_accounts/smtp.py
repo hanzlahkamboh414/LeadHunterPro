@@ -8,7 +8,9 @@ import re
 import smtplib
 import socket
 import ssl
+from datetime import datetime, timezone
 from email.message import EmailMessage
+from email.utils import format_datetime, make_msgid
 
 
 def validate_host(host: str) -> str:
@@ -68,6 +70,8 @@ def send_smtp(*, host: str, port: int, security: str, username: str,
     msg["From"] = from_email
     msg["To"] = to
     msg["Subject"] = subject
+    msg["Date"] = format_datetime(datetime.now(timezone.utc))
+    msg["Message-ID"] = make_msgid(domain=from_email.rsplit("@", 1)[-1])
     msg.set_content(body)
     if tracking_url:
         content = html.escape(body).replace("\r\n", "\n")

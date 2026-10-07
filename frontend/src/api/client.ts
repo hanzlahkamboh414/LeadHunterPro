@@ -1022,6 +1022,10 @@ export const api = {
     return request<{ campaigns: Campaign[] }>("/campaigns").then((r) => r.campaigns);
   },
 
+  campaignSendingStatus(): Promise<{ paused: boolean; reason: string }> {
+    return request("/campaigns/sending-status");
+  },
+
   getCampaign(id: number): Promise<Campaign & { sends: CampaignSend[]; followups: CampaignFollowup[] }> {
     return request(`/campaigns/${id}`);
   },

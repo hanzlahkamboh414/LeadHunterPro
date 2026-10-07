@@ -31,7 +31,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from email.message import EmailMessage
-from email.utils import parseaddr
+from email.utils import format_datetime, make_msgid, parseaddr
 from typing import Any
 from urllib.parse import urlencode
 
@@ -239,6 +239,8 @@ def send_gmail(access_token: str, *, to: str, subject: str, body: str,
     msg["To"] = to
     msg["From"] = from_email
     msg["Subject"] = subject
+    msg["Date"] = format_datetime(datetime.now(timezone.utc))
+    msg["Message-ID"] = make_msgid(domain=from_email.rsplit("@", 1)[-1])
     if cc:
         msg["Cc"] = cc
     if bcc:

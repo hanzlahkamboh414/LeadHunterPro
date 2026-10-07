@@ -290,7 +290,7 @@ export interface Campaign {
   subject: string;
   body: string;
   status: string; // scheduled | running | paused | completed
-  paused_reason: string; // user | account | rate_limited
+  paused_reason: string; // user | account | rate_limited | deliverability
   resume_at: string;
   start_at: string;
   daily_limit: number;

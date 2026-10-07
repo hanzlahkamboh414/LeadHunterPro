@@ -9,6 +9,7 @@ and reported, never silently re-mailed).
 from __future__ import annotations
 
 import logging
+import os
 import smtplib
 from datetime import date, datetime, timedelta, timezone
 
@@ -48,6 +49,23 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/campaigns", tags=["Campaigns"])
 
 
+def _sending_is_paused() -> bool:
+    store = get_campaign_store()
+    flag = os.path.join(os.path.dirname(store._db_path),
+                        "campaign_sending_paused.flag")
+    return os.path.exists(flag)
+
+
+def _require_sending_available() -> None:
+    """Keep creation and direct send/resume actions behind the global hold."""
+    if _sending_is_paused():
+        raise HTTPException(
+            status_code=409,
+            detail="Campaign sending is paused after Gmail delivery blocks. "
+                   "Use a permission-based recipient list before resuming.",
+        )
+
+
 def _blocked_addresses(emails: list[str]) -> set[str]:
     store = BounceStore()
     try:
@@ -71,7 +89,7 @@ def _available_lead_emails(
     if recommendation not in ("", "contact_now", "nurture"):
         raise HTTPException(422, "Unknown lead quality filter")
     status = get_campaign_store().recipient_statuses(user.id)
-    used = set(status["queued"]) | set(status["emailed"])
+    used = set(status["queued"]) | set(status["emailed"]) | set(status["suppressed"])
     picked: list[str] = []
     offset = 0
     while len(picked) < count:
@@ -126,6 +144,7 @@ def create_campaign(
 ) -> dict:
     """Create a scheduled campaign. Exclude leads already queued or emailed
     by another campaign of this user, and report the excluded count."""
+    _require_sending_available()
     email_store = get_email_store()
     owned = {a["id"]: a for a in email_store.list_for_user(user.id)}
     # The primary + every extra account must exist, be the caller's, and
@@ -211,6 +230,7 @@ def campaign_test_send(
     chosen account. Creates nothing: no campaign, no send row, no CRM event,
     and the recipient is never counted as already-emailed (so you can test as
     often as you like without polluting future campaigns)."""
+    _require_sending_available()
     email_store = get_email_store()
     account = next(
         (a for a in email_store.list_for_user(user.id)
@@ -320,6 +340,16 @@ def list_campaigns(user: User = Depends(require_email_access)) -> dict:
                                if a in by_id]
         out.append(c)
     return {"campaigns": out}
+
+
+@router.get("/sending-status")
+def campaign_sending_status(
+    user: User = Depends(require_email_access),
+) -> dict[str, bool | str]:
+    paused = _sending_is_paused()
+    return {"paused": paused,
+            "reason": "Gmail blocked campaign messages; recipient opt-in is required"
+            if paused else ""}
 
 
 @router.get("/recipient-status")
@@ -603,6 +633,7 @@ def resume_campaign(campaign_id: int,
     if c["status"] != "paused":
         raise HTTPException(status_code=409,
                             detail=f"campaign is {c['status']}")
+    _require_sending_available()
     # Not started yet? It goes back to 'scheduled' (its start_at still
     # rules), never straight to running.
     now = datetime.now(timezone.utc)
@@ -623,6 +654,7 @@ def continue_campaign_now(campaign_id: int,
     c = store.get(campaign_id, user.id)
     if c is None:
         raise HTTPException(status_code=404, detail="no such campaign")
+    _require_sending_available()
     if c["status"] == "paused" and c["paused_reason"] != "user":
         raise HTTPException(status_code=409,
                             detail="Reconnect the sending account or wait for its cooldown")

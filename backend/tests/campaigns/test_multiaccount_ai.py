@@ -451,9 +451,10 @@ def test_scheduler_ai_hook_prepended_and_cached(tmp_path, monkeypatch):
     assert len(sent) == 1
     # Greeting first, then the AI line, then the script (its own "Hi" gone,
     # remainder capitalized) — one professional email, greeted exactly once.
-    assert sent[0]["body"] == ("Hi Jane,\n\n"
+    assert sent[0]["body"].startswith("Hi Jane,\n\n"
                                "Saw Acme broke ground on the Riverside job."
                                "\n\nSaw Acme Corp.")
+    assert sent[0]["body"].endswith("reply Unsubscribe and we'll stop.")
     # Cached — a re-run asks the AI nothing new.
     assert ctx["store"].get_hook(c["id"], "jane@acme.com") == \
         "Saw Acme broke ground on the Riverside job."
@@ -471,7 +472,7 @@ def test_scheduler_ai_failure_sends_plain(tmp_path, monkeypatch):
     # Best-effort: the uniform greeting + plain script went out, campaign
     # healthy, and the failure was NOT cached as an honest empty hook.
     assert stats["sent"] == 1
-    assert sent[0]["body"] == "Hi Jane,\n\nSaw Acme Corp."
+    assert sent[0]["body"].startswith("Hi Jane,\n\nSaw Acme Corp.")
     assert ctx["store"].get_hook(1, "jane@acme.com") is None
 
 
@@ -487,7 +488,7 @@ def test_scheduler_ai_none_is_honest_and_cached(tmp_path, monkeypatch):
     c = _make_campaign(ctx, emails=["jane@acme.com"], ai_personalize=True)
     ctx["sched"].run_once()
     # NONE -> no hook, but the uniform greeting + script still go out.
-    assert sent[0]["body"] == "Hi Jane,\n\nSaw Acme Corp."
+    assert sent[0]["body"].startswith("Hi Jane,\n\nSaw Acme Corp.")
     # '' cached = generated, nothing honest to say — never re-asked.
     assert ctx["store"].get_hook(c["id"], "jane@acme.com") == ""
     assert len(calls) == 1
@@ -498,8 +499,9 @@ def test_scheduler_ai_off_sends_plain(tmp_path, monkeypatch):
     sent = _capture_send(monkeypatch)
     _make_campaign(ctx, emails=["jane@acme.com"], ai_personalize=False)
     ctx["sched"].run_once()
-    # AI off -> the user's template exactly as written, untouched.
-    assert sent[0]["body"] == "Hi Jane, saw Acme Corp."
+    # AI off keeps the template and adds the standard opt-out footer.
+    assert sent[0]["body"].startswith("Hi Jane, saw Acme Corp.")
+    assert sent[0]["body"].endswith("reply Unsubscribe and we'll stop.")
 
 
 def test_legacy_followup_is_ai_written_from_previous_email(tmp_path, monkeypatch):
@@ -532,12 +534,13 @@ def test_legacy_followup_is_ai_written_from_previous_email(tmp_path, monkeypatch
     clock.advance(3 * 86400)
     sched.run_once()  # step 1 — AI composes it using the prior message
     assert len(sent) == 2
-    assert sent[0]["body"] == ("Hi Jane,\n\n"
+    assert sent[0]["body"].startswith("Hi Jane,\n\n"
                                "Saw Acme broke ground on the Riverside job."
                                "\n\nFirst.")
-    assert sent[1]["subject"] == "Re: Estimating support"
+    assert sent[1]["subject"] == "Estimating support"
     assert "estimating sample" in sent[1]["body"]
-    assert sent[1]["body"].endswith("Best regards,\nSender Name")
+    assert "Best regards,\nSender Name" in sent[1]["body"]
+    assert sent[1]["body"].endswith("reply Unsubscribe and we'll stop.")
     assert any("First." in prompt and '"message_number": 2' in prompt for prompt in prompts)
 
 

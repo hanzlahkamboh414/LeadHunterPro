@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient
 import app.api.v1.campaigns as campaigns_api
 from app.auth.activity import ActivityStore
 import app.auth.activity as activity_module
-from app.campaigns.scheduler import CampaignScheduler, _iso
+from app.campaigns.scheduler import CampaignScheduler, PAKISTAN_TZ, _iso
 from app.campaigns.store import CampaignStore
 from app.campaigns.templates import context_for, render
 from app.email_accounts import google
@@ -124,7 +124,10 @@ def _make_campaign(ctx, *, emails=("jane@acme.com", "bob@build.com"),
         name="Q3 GC outreach", subject="Estimating for {{company_name}}",
         body="Hi {{first_name}},\n\nSaw {{company_name}} in {{location}}.\n\n— Us",
         emails=list(emails),
-        start_at=start_at or _iso(NOW - timedelta(minutes=1)),
+        start_at=start_at or _iso(
+            NOW.astimezone(PAKISTAN_TZ).replace(
+                hour=0, minute=0, second=0, microsecond=0)
+            - timedelta(days=1)),
         daily_limit=daily_limit,
     )
 

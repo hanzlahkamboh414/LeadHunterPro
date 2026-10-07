@@ -201,6 +201,15 @@ class CampaignStore:
                 )
             """)
             conn.execute("""
+                CREATE TABLE IF NOT EXISTS campaign_opt_outs (
+                    user_id TEXT NOT NULL,
+                    email TEXT NOT NULL COLLATE NOCASE,
+                    requested_at TEXT NOT NULL,
+                    source TEXT NOT NULL DEFAULT 'reply',
+                    PRIMARY KEY (user_id, email)
+                )
+            """)
+            conn.execute("""
                 CREATE TABLE IF NOT EXISTS campaign_email_checks (
                     email TEXT PRIMARY KEY COLLATE NOCASE,
                     status TEXT NOT NULL CHECK(status IN ('ready', 'hold', 'invalid')),
@@ -318,6 +327,10 @@ class CampaignStore:
         )}
         claimed.update(row[0] for row in conn.execute(
             "SELECT email FROM campaign_recipient_history WHERE user_id = ?",
+            (user_id,),
+        ))
+        claimed.update(row[0] for row in conn.execute(
+            "SELECT email FROM campaign_opt_outs WHERE user_id = ?",
             (user_id,),
         ))
         seen = [e for e in seen if e.lower() not in claimed]
@@ -800,9 +813,14 @@ class CampaignStore:
             "SELECT email FROM campaign_recipient_history WHERE user_id = ?",
             (user_id,),
         ).fetchall()
+        suppressed = conn.execute(
+            "SELECT email FROM campaign_opt_outs WHERE user_id = ?",
+            (user_id,),
+        ).fetchall()
         conn.close()
         requested = {e.strip().lower() for e in emails}
-        return {r[0] for r in [*rows, *historical] if r[0] in requested}
+        return {r[0] for r in [*rows, *historical, *suppressed]
+                if r[0] in requested}
 
     def recipient_statuses(self, user_id: str) -> dict[str, list[str]]:
         """Campaign membership for the user's lead picker, including deleted sends."""
@@ -817,8 +835,51 @@ class CampaignStore:
             "SELECT email FROM campaign_recipient_history WHERE user_id=?",
             (user_id,),
         )}
+        suppressed = {r[0] for r in conn.execute(
+            "SELECT email FROM campaign_opt_outs WHERE user_id=?",
+            (user_id,),
+        )}
         conn.close()
-        return {"queued": sorted(queued - emailed), "emailed": sorted(emailed)}
+        return {"queued": sorted(queued - emailed - suppressed),
+                "emailed": sorted(emailed), "suppressed": sorted(suppressed)}
+
+    def is_suppressed(self, user_id: str, email: str) -> bool:
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT 1 FROM campaign_opt_outs WHERE user_id=? AND email=?",
+            (user_id, email.strip().lower()),
+        ).fetchone()
+        conn.close()
+        return row is not None
+
+    def suppress_recipient(self, user_id: str, email: str, *,
+                           source: str = "reply") -> bool:
+        """Honor one opt-out across all campaigns owned by this user."""
+        addr = email.strip().lower()
+        if not addr or "@" not in addr:
+            return False
+        conn = self._conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            added = conn.execute(
+                "INSERT OR IGNORE INTO campaign_opt_outs "
+                "(user_id,email,requested_at,source) VALUES (?,?,?,?)",
+                (user_id, addr, _now(), source[:40]),
+            ).rowcount > 0
+            conn.execute(
+                "UPDATE campaign_sends SET state='skipped', "
+                "error='recipient opted out' WHERE state='pending' "
+                "AND lower(email)=? AND campaign_id IN "
+                "(SELECT id FROM campaigns WHERE user_id=?)",
+                (addr, user_id),
+            )
+            conn.commit()
+            return added
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def recipient_usage(self, user_id: str) -> dict[str, dict[str, Any]]:
         """First-email campaign assignment per recipient; a sent email wins.
@@ -1415,6 +1476,10 @@ class CampaignStore:
                 }
                 claimed_elsewhere.update(r[0] for r in conn.execute(
                     "SELECT email FROM campaign_recipient_history WHERE user_id = ?",
+                    (user_id,),
+                ))
+                claimed_elsewhere.update(r[0] for r in conn.execute(
+                    "SELECT email FROM campaign_opt_outs WHERE user_id = ?",
                     (user_id,),
                 ))
                 terminal_here = {

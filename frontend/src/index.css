@@ -28,6 +28,12 @@ html {
   color-scheme: dark;
 }
 
+html[data-theme="light"] .workspace-main .campaign-hold-alert {
+  color: #513917;
+  background: #fff3d8;
+  border-color: #c69438;
+}
+
 /* Native select menus need an explicit palette: some browsers otherwise open
    a white option panel with the dark theme's white text. */
 .email-history select,

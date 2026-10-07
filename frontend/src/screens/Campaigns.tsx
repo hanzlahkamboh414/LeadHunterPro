@@ -136,9 +136,6 @@ export default function Campaigns() {
     queryFn: () => api.campaignSendingStatus(),
     refetchInterval: 15000,
   });
-  useEffect(() => {
-    if (sendingStatus.data?.paused) setBuilding(false);
-  }, [sendingStatus.data?.paused]);
 
   // Sending-account addresses for the per-send "Via" column.
   const accountsById = useQuery({
@@ -173,9 +170,9 @@ export default function Campaigns() {
       />
 
       {sendingStatus.data?.paused && (
-        <div role="alert" className="campaign-hold-alert mt-4 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-[13px] text-amber-100">
-          <p className="font-semibold">Campaign sending is paused</p>
-          <p className="mt-1 opacity-90">Gmail blocked messages from several accounts. These contacts came from public listings without opt-in. Campaigns will stay paused until a permission-based recipient list is ready.</p>
+        <div role="status" className="campaign-hold-alert mt-4 flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[12.5px] text-amber-100">
+          <Info className="h-4 w-4 shrink-0" aria-hidden="true" />
+          <p><strong>Sending paused.</strong> You can still browse campaigns, email addresses and delivery records.</p>
         </div>
       )}
 
@@ -206,8 +203,7 @@ export default function Campaigns() {
         </p>
         <button
           onClick={() => setBuilding(true)}
-          disabled={sendingStatus.data?.paused}
-          className="flex min-h-10 w-full shrink-0 items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-[13px] font-semibold text-white hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-45 sm:ml-4 sm:w-auto"
+          className="flex min-h-11 w-full shrink-0 items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-[13px] font-semibold text-white hover:bg-indigo-500 sm:ml-4 sm:w-auto"
         >
           <Plus className="w-4 h-4" />
           New campaign
@@ -216,6 +212,7 @@ export default function Campaigns() {
 
       {building && (
         <CampaignBuilder
+          sendingPaused={Boolean(sendingStatus.data?.paused)}
           onDone={(ok, text) => {
             setBuilding(false);
             setBanner({ ok, text });
@@ -280,7 +277,7 @@ function CampaignCard({
   actionsPending: boolean;
 }) {
   const [showSends, setShowSends] = useState(false);
-  const [sendView, setSendView] = useState<"sent" | "remaining" | "replied" | "bounced">("sent");
+  const [sendView, setSendView] = useState<"all" | "sent" | "remaining" | "replied" | "bounced">("all");
   const [editing, setEditing] = useState(false);
   const queryClient = useQueryClient();
 
@@ -317,7 +314,8 @@ function CampaignCard({
     else if (rows.some((row) => row.state === "sent")) recipientRows.sent.push(first);
     else if (first.state === "pending" || first.state === "failed") recipientRows.remaining.push(first);
   }
-  const visibleSends = sendView === "bounced" ? [] : recipientRows[sendView];
+  const allRecipients = [...byRecipient.values()].map((rows) => rows.find((row) => row.step === 0) || rows[0]);
+  const visibleSends = sendView === "bounced" ? [] : sendView === "all" ? allRecipients : recipientRows[sendView];
 
   const edit = useMutation({
     mutationFn: (input: CampaignUpdateInput) => api.updateCampaign(c.id, input),
@@ -364,7 +362,7 @@ function CampaignCard({
             }`}
           >
             <Eye className="w-3.5 h-3.5" />
-            Recipients
+            View emails
           </button>
           {c.status !== "completed" && (
             <button
@@ -442,10 +440,10 @@ function CampaignCard({
             <p className="text-[12.5px] text-rose-400">Could not load sends.</p>
           ) : (
             <>
-            <div className="mb-3 grid grid-cols-2 gap-2 sm:grid-cols-4" role="tablist" aria-label={`Recipients in ${c.name}`}>
-              {(["sent", "remaining", "replied", "bounced"] as const).map((view) => (
+            <div className="mb-3 grid grid-cols-2 gap-2 sm:grid-cols-5" role="tablist" aria-label={`Recipients in ${c.name}`}>
+              {(["all", "sent", "remaining", "replied", "bounced"] as const).map((view) => (
                 <button key={view} role="tab" aria-selected={sendView === view} onClick={() => setSendView(view)} className={`min-h-11 rounded-lg border px-3 text-left text-xs font-semibold capitalize ${sendView === view ? "border-indigo-400 bg-indigo-500/10 text-indigo-200" : "border-white/10 text-slate-300"}`}>
-                  {view} <span className="ml-1 opacity-70">{view === "bounced" ? bounced.length : recipientRows[view].length}</span>
+                  {view} <span className="ml-1 opacity-70">{view === "all" ? allRecipients.length : view === "bounced" ? bounced.length : recipientRows[view].length}</span>
                 </button>
               ))}
             </div>
@@ -470,7 +468,9 @@ function CampaignCard({
                 </thead>
                 <tbody>
                   {visibleSends.map((s) => {
-                    const st = sendStatus(s);
+                    const st = bounceEmails.has(s.email.toLowerCase())
+                      ? { label: "Bounced", cls: "bg-rose-500/15 text-rose-300" }
+                      : sendStatus(s);
                     return (
                       <tr key={s.id} className="border-b border-white/5 last:border-0">
                         <td className="px-3 py-2 text-slate-300 whitespace-nowrap">{s.email}</td>
@@ -1006,9 +1006,11 @@ function FollowupEditor({
 // ---------------------------------------------------------------------------
 
 function CampaignBuilder({
+  sendingPaused,
   onDone,
   onCancel,
 }: {
+  sendingPaused: boolean;
   onDone: (ok: boolean, text: string) => void;
   onCancel: () => void;
 }) {
@@ -1134,7 +1136,7 @@ function CampaignBuilder({
     (!fu3On || (fu3Days >= 1 && fu3Days <= 30));
 
   const emailOk = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(testEmail.trim());
-  const canTest = !!accountId && subject.trim() !== "" && body.trim() !== "" && emailOk;
+  const canTest = !sendingPaused && !!accountId && subject.trim() !== "" && body.trim() !== "" && emailOk;
   const followupsValid =
     (!fu1On || (fu1Days >= 1 && fu1Days <= 30)) &&
     (!fu2On || (fu2Days >= 1 && fu2Days <= 30)) &&
@@ -1532,13 +1534,14 @@ function CampaignBuilder({
             {step === 6 && (
             <button
               onClick={() => create.mutate()}
-              disabled={!canCreate || create.isPending}
+              disabled={sendingPaused || !canCreate || create.isPending}
               className="min-h-10 w-full rounded-lg bg-indigo-600 px-4 py-2 text-[13px] font-semibold text-white hover:bg-indigo-500 disabled:opacity-50 sm:w-auto"
             >
               {create.isPending ? "Scheduling…" : "Schedule campaign"}
             </button>
             )}
           </div>
+          {sendingPaused && step === 6 && <p role="status" className="mt-2 text-right text-xs text-amber-300">You can review this draft, but scheduling and test sends are paused.</p>}
         </>
       )}
     </div>

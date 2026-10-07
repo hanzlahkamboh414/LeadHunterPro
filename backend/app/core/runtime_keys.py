@@ -80,7 +80,9 @@ class RuntimeKeyStore:
             if not isinstance(parsed, dict):
                 logger.warning("RUNTIME KEYS %s: not a JSON object; ignoring overlay", self.path)
                 return {}
-            return {str(k): str(v) for k, v in parsed.items() if k in KNOWN_KEY_NAMES and v}
+            # An empty value is an explicit disable. Keep it so Clear can
+            # override a key supplied by .env as well as an overlay key.
+            return {str(k): str(v) for k, v in parsed.items() if k in KNOWN_KEY_NAMES and isinstance(v, str)}
         except (OSError, ValueError) as exc:
             logger.warning("RUNTIME KEYS %s unreadable (%s); ignoring overlay", self.path, exc)
             return {}
@@ -102,10 +104,7 @@ class RuntimeKeyStore:
             return
         overlay = self.load()
         value = (value or "").strip()
-        if value:
-            overlay[name] = value
-        else:
-            overlay.pop(name, None)
+        overlay[name] = value
         with self._lock:
             self._write(overlay)
         logger.info("RUNTIME KEYS %s set=%s", self.path, name)  # name only, never value
@@ -113,14 +112,15 @@ class RuntimeKeyStore:
             applier()
 
     def is_set(self, name: str, env_value: str = "") -> bool:
-        """True when the key is configured — from the overlay OR the env."""
-        if self.load().get(name):
-            return True
-        return bool((env_value or "").strip())
+        """True when the effective key is configured."""
+        overlay = self.load()
+        value = overlay[name] if name in overlay else env_value
+        return bool((value or "").strip())
 
     def masked(self, name: str, env_value: str = "") -> str:
         """``••••<last4>`` when configured, else ``""`` — never the full value."""
-        value = self.load().get(name) or env_value or ""
+        overlay = self.load()
+        value = overlay[name] if name in overlay else env_value or ""
         if not value:
             return ""
         tail = value[-4:] if len(value) > 4 else value
@@ -154,8 +154,8 @@ class RuntimeKeyStore:
         ``setattr`` reaches all of them.
 
         A key absent from the overlay falls back to its ``env_values`` entry
-        (the .env snapshot taken at boot), so CLEARING an overlay key reverts
-        to the .env value — the exact state a restart would produce.
+        (the .env snapshot taken at boot). An explicit empty override disables
+        it even when .env contains a key.
 
         Args:
             settings: The live settings object (``app.core.config.settings``).
@@ -168,7 +168,7 @@ class RuntimeKeyStore:
         overlay = self.load()
         changed: list[str] = []
         for name in KNOWN_KEY_NAMES:
-            value = overlay.get(name) or (env_values.get(name) or "")
+            value = overlay[name] if name in overlay else (env_values.get(name) or "")
             try:
                 if getattr(settings, name, None) != value:
                     setattr(settings, name, value)

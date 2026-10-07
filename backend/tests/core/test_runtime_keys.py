@@ -73,15 +73,20 @@ def test_set_and_load_roundtrip(tmp_path) -> None:
 # 3. set empty clears the key
 # ---------------------------------------------------------------------------
 
-def test_set_empty_clears_the_key(tmp_path) -> None:
-    """Setting a value to '' removes it from the overlay file."""
+def test_set_empty_disables_even_an_env_key(tmp_path) -> None:
+    """Clear persists an empty override so an old .env key cannot return."""
     store = _store(tmp_path)
     store.set("TAVILY_SEARCH_API_KEY", "tvly-abc")
     assert "TAVILY_SEARCH_API_KEY" in store.load()
 
     store.set("TAVILY_SEARCH_API_KEY", "")
     overlay = store.load()
-    assert "TAVILY_SEARCH_API_KEY" not in overlay
+    assert overlay["TAVILY_SEARCH_API_KEY"] == ""
+    assert store.is_set("TAVILY_SEARCH_API_KEY", env_value="tvly-env") is False
+    assert store.masked("TAVILY_SEARCH_API_KEY", env_value="tvly-env") == ""
+    original = _FakeSettings()
+    original.TAVILY_SEARCH_API_KEY = "tvly-env"
+    assert store.apply(original).TAVILY_SEARCH_API_KEY == ""
 
 
 # ---------------------------------------------------------------------------
@@ -243,7 +248,13 @@ def test_apply_live_mutates_settings_in_place_and_reports_changed() -> None:
         assert s.TAVILY_SEARCH_API_KEY == "tvly-hot"  # overlay wins
         assert changed == ["TAVILY_SEARCH_API_KEY"]
 
-        # Overlay removed -> falls back to the .env value, like a restart.
+        # Explicit clear overrides the .env value.
+        store.set("TAVILY_SEARCH_API_KEY", "")
+        changed = store.apply_live(s, env_values)
+        assert s.TAVILY_SEARCH_API_KEY == ""
+        assert changed == ["TAVILY_SEARCH_API_KEY"]
+
+        # Removing the override entirely still falls back to .env.
         with open(path, "w", encoding="utf-8") as fh:
             json.dump({}, fh)
         changed = store.apply_live(s, env_values)
@@ -255,3 +266,25 @@ def test_apply_live_mutates_settings_in_place_and_reports_changed() -> None:
     finally:
         if os.path.exists(path):
             os.remove(path)
+
+
+def test_refresh_runtime_keys_picks_up_other_process_changes(tmp_path, monkeypatch) -> None:
+    """A worker sees a saved or cleared key without a process restart."""
+    from app.core import config
+
+    store = _store(tmp_path)
+    fake = _FakeSettings()
+    fake.AI_API_KEY = "old-env-key"
+    monkeypatch.setattr(config, "_RuntimeKeyStore", lambda: store)
+    monkeypatch.setattr(config, "_RUNTIME_KEYS_STAMP", None)
+    monkeypatch.setattr(config, "_ENV_KEY_VALUES", {"AI_API_KEY": "old-env-key"})
+    monkeypatch.setattr(config, "settings", fake)
+
+    store.set("AI_API_KEY", "new-admin-key")
+    assert config.refresh_runtime_keys() == ["AI_API_KEY"]
+    assert fake.AI_API_KEY == "new-admin-key"
+    assert config.refresh_runtime_keys() == []
+
+    store.set("AI_API_KEY", "")
+    assert config.refresh_runtime_keys() == ["AI_API_KEY"]
+    assert fake.AI_API_KEY == ""

@@ -353,10 +353,9 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
-# Env-only snapshot of the managed secret keys, taken BEFORE the runtime overlay
-# is merged — this is the fallback the HOT-RELOAD path (admin PUT /keys) reverts
-# a key to when its overlay entry is cleared, so "clear" means back to .env,
-# matching what a restart would produce.
+# Env-only snapshot of managed keys before applying runtime overrides. Keys
+# without an override use these values; an explicit empty override disables
+# even a key supplied by .env.
 try:
     from app.core.runtime_keys import KNOWN_KEY_NAMES
 
@@ -378,3 +377,27 @@ try:
     settings = RuntimeKeyStore().apply(settings)
 except Exception:  # noqa: BLE001 — a broken overlay must never block startup
     pass
+
+
+def _runtime_key_stamp(path: str) -> int | None:
+    try:
+        return Path(path).stat().st_mtime_ns
+    except OSError:
+        return None
+
+
+from app.core.runtime_keys import RuntimeKeyStore as _RuntimeKeyStore
+
+_RUNTIME_KEYS_STAMP = _runtime_key_stamp(_RuntimeKeyStore().path)
+
+
+def refresh_runtime_keys() -> list[str]:
+    """Pick up Admin key changes in other processes, such as the worker."""
+    global _RUNTIME_KEYS_STAMP
+    store = _RuntimeKeyStore()
+    stamp = _runtime_key_stamp(store.path)
+    if stamp == _RUNTIME_KEYS_STAMP:
+        return []
+    changed = store.apply_live(settings, _ENV_KEY_VALUES)
+    _RUNTIME_KEYS_STAMP = stamp
+    return changed

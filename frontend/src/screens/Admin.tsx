@@ -138,7 +138,7 @@ export default function Admin({ initialTab = "overview" }: { initialTab?: Tab })
   const updateKey = useMutation({
     mutationFn: ({ name, value }: { name: string; value: string }) =>
       api.updateAdminKey(name, value),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["admin-keys"] }),
+    onSuccess: (result) => qc.setQueryData(["admin-keys"], result),
   });
   const purge = useMutation({
     mutationFn: () => api.purgeSearchCache(),
@@ -479,7 +479,7 @@ export default function Admin({ initialTab = "overview" }: { initialTab?: Tab })
             <h2 className="text-[16px] font-semibold text-white">API keys</h2>
           </div>
           <p className="mt-1 text-[12px] text-slate-500">
-            Add / clear provider keys without editing .env. Only a masked tail is shown —
+            Save a new key or clear the active key, including one loaded from .env. Only a masked tail is shown —
             a full secret never leaves the backend. Changes apply immediately (search
             providers are rebuilt with the new key) — no backend restart needed.
           </p>
@@ -515,7 +515,7 @@ export default function Admin({ initialTab = "overview" }: { initialTab?: Tab })
                         configured={k.configured}
                         masked={k.masked}
                         busy={updateKey.isPending}
-                        onSave={(value) => updateKey.mutate({ name: k.name, value })}
+                        onSave={(value) => updateKey.mutateAsync({ name: k.name, value })}
                       />
                     ))}
                   </tbody>
@@ -1894,9 +1894,21 @@ function KeyRow({
   configured: boolean;
   masked: string;
   busy: boolean;
-  onSave: (value: string) => void;
+  onSave: (value: string) => Promise<unknown>;
 }) {
   const [value, setValue] = useState("");
+  const [feedback, setFeedback] = useState<{ ok: boolean; text: string } | null>(null);
+  const submit = async () => {
+    const clearing = !value.trim();
+    setFeedback(null);
+    try {
+      await onSave(clearing ? "" : value.trim());
+      setValue("");
+      setFeedback({ ok: true, text: clearing ? "Key cleared" : "Key saved" });
+    } catch (error) {
+      setFeedback({ ok: false, text: (error as Error).message });
+    }
+  };
   return (
     <tr className="border-t border-white/5">
       <td className="py-2.5 pr-4 text-slate-200">{name}</td>
@@ -1913,19 +1925,25 @@ function KeyRow({
           <input
             type="password"
             value={value}
-            onChange={(e) => setValue(e.target.value)}
-            placeholder="new value (empty = clear)"
+            onChange={(e) => { setValue(e.target.value); setFeedback(null); }}
+            placeholder="Enter a new key"
             className={inputClass}
             autoComplete="off"
+            aria-label={`New value for ${name}`}
           />
           <button
-            onClick={() => onSave(value)}
-            disabled={busy}
-            className="rounded-lg border border-white/10 px-2.5 py-1.5 text-[12.5px] text-slate-200 hover:bg-white/[0.04] disabled:opacity-50 whitespace-nowrap"
+            onClick={() => void submit()}
+            disabled={busy || (!value.trim() && !configured)}
+            className="min-h-11 rounded-lg border border-white/10 px-3 py-1.5 text-[12.5px] text-slate-200 hover:bg-white/[0.04] disabled:opacity-50 whitespace-nowrap"
           >
-            {value.trim() ? "Save" : configured ? "Clear" : "Set"}
+            {value.trim() ? "Save" : "Clear"}
           </button>
         </div>
+        {feedback && (
+          <p role={feedback.ok ? "status" : "alert"} className={`mt-1 text-[12px] ${feedback.ok ? "text-emerald-300" : "text-rose-300"}`}>
+            {feedback.text}
+          </p>
+        )}
       </td>
     </tr>
   );

@@ -229,8 +229,8 @@ def cache_search() -> AdminSearchCacheOut:
 def update_key(body: KeyUpdateIn) -> AdminKeysOut:
     """Set or clear one API key — persisted AND applied live (no restart).
 
-    ``value=""`` clears the key (falls back to its .env value, which may be
-    empty). The overlay never touches .env and never echoes a secret. The
+    ``value=""`` disables the key, including any .env value. The overlay
+    never touches .env and never echoes a secret. The
     change is hot-applied on the spot: the live ``settings`` object is updated
     in place (AI clients and the leads API key read it per-use) and Tavily /
     Brave provider instances are REBUILT with the new key. Only searches

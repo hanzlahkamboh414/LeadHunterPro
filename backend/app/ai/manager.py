@@ -4,7 +4,7 @@ import logging
 
 from app.ai.base import BaseAIProvider
 from app.ai.providers.registry import resolve
-from app.core.config import settings
+from app.core.config import refresh_runtime_keys, settings
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +35,7 @@ class AIManager:
         Raises:
             AIProviderNotFoundError: When ``AI_PROVIDER`` is not registered.
         """
+        refresh_runtime_keys()
         name = settings.AI_PROVIDER
         provider = resolve(name)
         logger.info(

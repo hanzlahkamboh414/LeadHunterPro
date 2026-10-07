@@ -429,6 +429,18 @@ def test_gateway_routes_through_router_when_selected(monkeypatch, patched_openai
     assert gateway.ask("Reply with exactly: ROUTER_OK") == "ROUTER_OK"
 
 
+def test_gateway_uses_replaced_key_on_next_call(monkeypatch, patched_openai) -> None:
+    """A scheduler-held gateway must use an admin-updated key immediately."""
+    monkeypatch.setattr(settings, "AI_PROVIDER", "router")
+    monkeypatch.setattr(settings, "AI_API_KEY", "first-placeholder")
+    patched_openai.return_value.chat.completions.create.return_value = _fake_response("OK")
+    gateway = AIGateway()
+    assert gateway.ask("first") == "OK"
+    monkeypatch.setattr(settings, "AI_API_KEY", "second-placeholder")
+    assert gateway.ask("second") == "OK"
+    assert patched_openai.call_args.kwargs["api_key"] == "second-placeholder"
+
+
 # ---------------------------------------------------------------------------
 # Research/intelligence flow (PROOF: the real path reaches the configured router)
 # ---------------------------------------------------------------------------

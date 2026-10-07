@@ -494,12 +494,8 @@ def test_admin_update_key_clear_unregisters_provider(tmp_path, monkeypatch):
     assert response.json()["applies_after_restart"] is False
 
 
-def test_admin_update_key_clear_falls_back_to_env_value(tmp_path, monkeypatch):
-    """Clearing an overlay key reverts to the .env value, like a restart would.
-
-    The env snapshot (config._ENV_KEY_VALUES) is the fallback apply_live
-    reverts to — the live state after a clear must equal the boot state.
-    """
+def test_admin_update_key_clear_disables_env_value(tmp_path, monkeypatch):
+    """Clear disables the effective key even when .env provides a value."""
     from app.core import config
 
     fake_registry = _hot_reload_env(
@@ -507,15 +503,18 @@ def test_admin_update_key_clear_falls_back_to_env_value(tmp_path, monkeypatch):
     )
     client = _admin_client(tmp_path, monkeypatch)
 
-    # Overlay a new key, then clear it — settings must revert to .env's value
-    # and the provider must be rebuilt with THAT key (not unregistered).
+    # Overlay a new key, then clear it — the .env key must stay disabled.
     client.put("/api/v1/admin/keys", json={"name": "TAVILY_SEARCH_API_KEY", "value": "tvly-overlay"})
-    client.put("/api/v1/admin/keys", json={"name": "TAVILY_SEARCH_API_KEY", "value": ""})
+    response = client.put("/api/v1/admin/keys", json={"name": "TAVILY_SEARCH_API_KEY", "value": ""})
 
-    assert config.settings.TAVILY_SEARCH_API_KEY == "tvly-env-orig"
+    assert response.status_code == 200
+    assert config.settings.TAVILY_SEARCH_API_KEY == ""
+    assert admin_module._key_store.load()["TAVILY_SEARCH_API_KEY"] == ""
+    key_status = next(k for k in response.json()["keys"] if k["name"] == "TAVILY_SEARCH_API_KEY")
+    assert key_status["configured"] is False
+    assert key_status["masked"] == ""
     tavily = fake_registry.get("tavily")
-    assert tavily is not None
-    assert tavily._api_key == "tvly-env-orig"
+    assert tavily is None
 
 
 def test_admin_update_key_live_applies_ai_key_to_settings(tmp_path, monkeypatch):

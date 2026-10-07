@@ -59,6 +59,13 @@ class SearchProviderManager:
         Returns:
             Aggregated SearchResponse with combined results.
         """
+        from app.core.config import refresh_runtime_keys
+
+        changed = refresh_runtime_keys()
+        if {"TAVILY_SEARCH_API_KEY", "BRAVE_SEARCH_API_KEY"}.intersection(changed):
+            from app.search_providers import re_register_configured_providers
+
+            re_register_configured_providers()
         start = time.monotonic()
         providers = self._registry.get_enabled()
         all_results: list[Any] = []

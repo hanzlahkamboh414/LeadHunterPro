@@ -4,16 +4,13 @@ import logging
 from typing import Callable
 
 from app.ai.manager import AIManager
-from app.core.config import settings
+from app.core.config import refresh_runtime_keys, settings
 
 logger = logging.getLogger(__name__)
 
 
 class AIGateway:
     """Route prompts to the active AI provider."""
-
-    def __init__(self) -> None:
-        self._manager = AIManager()
 
     def ask(self, prompt: str) -> str:
         """Send *prompt* to the AI provider and return the response.
@@ -24,7 +21,9 @@ class AIGateway:
         Returns:
             The provider's text response.
         """
-        return self._manager.generate(prompt)
+        # Resolve lazily so the app can boot with AI disabled, and a scheduler
+        # holding this gateway uses a newly saved key on its next request.
+        return AIManager().generate(prompt)
 
 
 def make_ai_ask(
@@ -59,6 +58,7 @@ def make_ai_ask(
     """
     from app.ai.providers.registry import get_provider_class
 
+    refresh_runtime_keys()
     key = api_key or settings.AI_API_KEY_2 or settings.AI_API_KEY
     resolved_model = model or settings.AI_MODEL_DEEP or settings.AI_MODEL
     cls = get_provider_class(settings.AI_PROVIDER)

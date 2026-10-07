@@ -354,6 +354,16 @@ export const api = {
     return request<AdminKeys>("/admin/keys");
   },
 
+  researchAvailability(): Promise<{ enabled: boolean }> {
+    return request("/leads/research-availability");
+  },
+  adminAiResearchStatus(): Promise<{ enabled: boolean }> {
+    return request("/admin/ai-research");
+  },
+  adminSetAiResearch(enabled: boolean): Promise<{ enabled: boolean }> {
+    return request(`/admin/ai-research/${enabled ? "enable" : "disable"}`, { method: "POST" });
+  },
+
   updateAdminKey(name: string, value: string): Promise<AdminKeys> {
     return request<AdminKeys>("/admin/keys", {
       method: "PUT",

@@ -30,6 +30,7 @@ from app.auth.activity import get_activity
 from app.auth.dependencies import get_current_user
 from app.auth.models import User
 from app.core.config import settings
+from app.core.research_availability import UNAVAILABLE_MESSAGE, is_research_disabled
 from app.campaigns.store import get_campaign_store
 from app.lead_research.models import CRM_STATUSES
 from app.lead_research.service import LeadResearchStore, _email_hash
@@ -265,9 +266,16 @@ def _job_source_by_email(user_id: str = "", is_admin: bool = False,
 # Job endpoints
 # ---------------------------------------------------------------------------
 
+@router.get("/research-availability", dependencies=[Depends(require_api_key)])
+def research_availability(user: User = Depends(get_current_user)) -> dict[str, bool]:
+    return {"enabled": not is_research_disabled(_store._db_path)}
+
+
 @router.post("/jobs", response_model=JobOut, status_code=201, dependencies=[Depends(require_api_key)])
 def create_job(body: JobCreate, user: User = Depends(get_current_user)) -> JobOut:
     """Submit a query run; it executes in the background."""
+    if is_research_disabled(_store._db_path):
+        raise HTTPException(status_code=503, detail=UNAVAILABLE_MESSAGE)
     if not _can_admin_data(user) and body.target_emails > MAX_USER_TARGET_EMAILS:
         raise HTTPException(
             status_code=422,
@@ -351,6 +359,8 @@ def pause_job(job_id: str) -> dict[str, Any]:
 @router.post("/jobs/{job_id}/resume", dependencies=[Depends(require_api_key)])
 def resume_job(job_id: str) -> dict[str, Any]:
     """Resume a paused job."""
+    if is_research_disabled(_store._db_path):
+        raise HTTPException(status_code=503, detail=UNAVAILABLE_MESSAGE)
     ok = _manager.resume(job_id)
     if not ok:
         job = _manager.get(job_id)

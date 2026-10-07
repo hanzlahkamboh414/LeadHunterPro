@@ -38,6 +38,11 @@ export default function Execute() {
   const [showKey, setShowKey] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
   const [formError, setFormError] = useState("");
+  const availability = useQuery({
+    queryKey: ["research-availability"],
+    queryFn: () => api.researchAvailability(),
+    refetchInterval: 10_000,
+  });
 
   // Restore the active job after a refresh / dashboard round-trip: the jobId is
   // persisted per user, so the live activity view comes right back.
@@ -158,6 +163,11 @@ export default function Execute() {
         title="Research"
         subtitle="Choose your market. Discover companies and follow their research as it happens."
       />
+      {availability.data?.enabled === false && (
+        <p role="status" className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
+          AI research is temporarily unavailable. Please wait a while and try again.
+        </p>
+      )}
       <div className="mt-4 flex flex-wrap gap-2" role="tablist" aria-label="Research type">
         <button role="tab" aria-selected={researchMode === "market"} onClick={() => setResearchMode("market")} className={`min-h-11 rounded-lg px-4 text-sm font-semibold ${researchMode === "market" ? "bg-indigo-600 text-white" : "border border-white/10 text-slate-300"}`}>Find new leads</button>
         <button role="tab" aria-selected={researchMode === "file"} onClick={() => setResearchMode("file")} className={`min-h-11 rounded-lg px-4 text-sm font-semibold ${researchMode === "file" ? "bg-indigo-600 text-white" : "border border-white/10 text-slate-300"}`}>Research my file</button>
@@ -323,7 +333,9 @@ export default function Execute() {
           )}
           {create.isError && (
             <p className="text-[13px] text-rose-300">
-              Failed to start job: {(create.error as ApiError).message}
+              {(create.error as ApiError).status === 503
+                ? (create.error as ApiError).message
+                : `Failed to start job: ${(create.error as ApiError).message}`}
             </p>
           )}
 

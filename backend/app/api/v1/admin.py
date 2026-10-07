@@ -29,6 +29,7 @@ from app.auth.dependencies import require_admin
 from app.auth.models import User, UserStore
 from app.campaigns.store import get_campaign_store
 from app.core.runtime_keys import KNOWN_KEY_NAMES, RuntimeKeyStore
+from app.core.research_availability import is_research_disabled, set_research_disabled
 from app.lead_research.service import _email_hash
 from app.phones.store import PhoneLeadsStore
 from app.schemas.admin import (
@@ -116,6 +117,22 @@ def resume_all_campaign_sending(user: User = Depends(require_admin)) -> dict[str
     _campaign_pause_file().unlink(missing_ok=True)
     logger.warning("Campaign sending globally enabled by %s", user.username)
     return {"paused": False}
+
+
+@router.get("/ai-research")
+def ai_research_status(user: User = Depends(require_admin)) -> dict[str, bool]:
+    _require_primary_admin(user)
+    return {"enabled": not is_research_disabled(_store._db_path)}
+
+
+@router.post("/ai-research/{action}")
+def set_ai_research(action: str, user: User = Depends(require_admin)) -> dict[str, bool]:
+    _require_primary_admin(user)
+    if action not in ("enable", "disable"):
+        raise HTTPException(status_code=422, detail="Unknown AI research action")
+    set_research_disabled(_store._db_path, action == "disable")
+    logger.warning("AI research %s by %s", action, user.username)
+    return {"enabled": action == "enable"}
 
 
 def _keys_payload() -> AdminKeysOut:

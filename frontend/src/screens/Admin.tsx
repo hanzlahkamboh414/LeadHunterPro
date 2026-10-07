@@ -473,6 +473,8 @@ export default function Admin({ initialTab = "overview" }: { initialTab?: Tab })
       {/* API KEYS                                                       */}
       {/* -------------------------------------------------------------- */}
       {tab === "keys" && allowedTabs.some(({ id }) => id === tab) && (
+        <>
+        {isPrimaryAdmin && <AiResearchPanel />}
         <section className={`${cardClass} mt-6`}>
           <div className="flex items-center gap-2">
             <KeyRound className="h-4 w-4 text-amber-300" />
@@ -536,6 +538,7 @@ export default function Admin({ initialTab = "overview" }: { initialTab?: Tab })
             </>
           )}
         </section>
+        </>
       )}
 
       {/* -------------------------------------------------------------- */}
@@ -659,6 +662,56 @@ export default function Admin({ initialTab = "overview" }: { initialTab?: Tab })
       )}
     </div>
   );
+}
+
+// ---------------------------------------------------------------------------
+// Primary admin's global sending switch
+// ---------------------------------------------------------------------------
+
+function AiResearchPanel() {
+  const qc = useQueryClient();
+  const status = useQuery({
+    queryKey: ["admin-ai-research"],
+    queryFn: () => api.adminAiResearchStatus(),
+    refetchInterval: 10_000,
+  });
+  const update = useMutation({
+    mutationFn: (enabled: boolean) => api.adminSetAiResearch(enabled),
+    onSuccess: (result) => {
+      qc.setQueryData(["admin-ai-research"], result);
+      qc.setQueryData(["research-availability"], result);
+    },
+  });
+
+  return <section className={`${cardClass} mt-6 max-w-2xl`}>
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <div>
+        <h2 className="text-[16px] font-semibold text-white">AI research service</h2>
+        <p className="mt-1 text-[12.5px] text-slate-400">Control new searches without changing or removing the API key.</p>
+      </div>
+      <span role="status" className={`rounded-full px-3 py-1 text-xs font-semibold ${status.data?.enabled === false ? "bg-amber-500/15 text-amber-200" : "bg-emerald-500/15 text-emerald-200"}`}>
+        {status.isLoading ? "Checking…" : status.isError ? "Status unavailable" : status.data?.enabled ? "AI on" : "AI off"}
+      </span>
+    </div>
+    <p className="mt-4 text-[13px] text-slate-300">When off, users see a temporary unavailability message when they try to search. Searches already running may finish.</p>
+    <div className="mt-4 flex flex-wrap gap-2">
+      {status.data?.enabled === false ? (
+        <button type="button" onClick={() => update.mutate(true)} disabled={update.isPending}
+          className="inline-flex min-h-11 items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-[13px] font-semibold text-white disabled:opacity-50">
+          <LockOpen className="h-4 w-4" /> {update.isPending ? "Enabling…" : "Turn AI on"}
+        </button>
+      ) : (
+        <button type="button" onClick={() => update.mutate(false)} disabled={!status.data || update.isPending}
+          className="inline-flex min-h-11 items-center gap-2 rounded-lg bg-amber-600 px-4 py-2 text-[13px] font-semibold text-white disabled:opacity-50">
+          <Pause className="h-4 w-4" /> {update.isPending ? "Turning off…" : "Turn AI off"}
+        </button>
+      )}
+      <button type="button" onClick={() => void status.refetch()} className="inline-flex min-h-11 items-center gap-2 rounded-lg border border-white/10 px-3 text-[13px] text-slate-200">
+        <RefreshCw className="h-4 w-4" /> Refresh
+      </button>
+    </div>
+    {(status.isError || update.isError) && <p role="alert" className="mt-3 text-xs text-rose-300">Could not update AI research. Refresh and try again.</p>}
+  </section>;
 }
 
 // ---------------------------------------------------------------------------

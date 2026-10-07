@@ -533,3 +533,24 @@ def test_admin_update_key_live_applies_ai_key_to_settings(tmp_path, monkeypatch)
     )
     assert response.status_code == 200
     assert config.settings.AI_API_KEY == "sk-hot-42"
+
+
+def test_ai_research_switch_blocks_new_jobs_without_clearing_key(tmp_path, monkeypatch):
+    db_path = str(tmp_path / "lead_research.db")
+    monkeypatch.setattr(leads_module._store, "_db_path", db_path)
+    monkeypatch.setattr(settings, "AI_API_KEY", "saved-key")
+    client = _admin_client(tmp_path, monkeypatch)
+
+    assert client.get("/api/v1/admin/ai-research").json() == {"enabled": True}
+    assert client.post("/api/v1/admin/ai-research/disable").json() == {"enabled": False}
+    assert client.get("/api/v1/leads/research-availability").json() == {"enabled": False}
+    blocked = client.post("/api/v1/leads/jobs", json={
+        "trade": "electrician", "location": "Texas", "target_emails": 10,
+    })
+    assert blocked.status_code == 503
+    assert "temporarily unavailable" in blocked.json()["detail"]
+    assert settings.AI_API_KEY == "saved-key"
+
+    assert client.post("/api/v1/admin/ai-research/enable").json() == {"enabled": True}
+    assert client.get("/api/v1/leads/research-availability").json() == {"enabled": True}
+    assert settings.AI_API_KEY == "saved-key"

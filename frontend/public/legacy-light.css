@@ -1,0 +1,72 @@
+/* Plain CSS fallbacks for older Chrome builds that ignore modern theme selectors. */
+html[data-theme="light"] { color-scheme: light; }
+html[data-theme="light"] body,
+html[data-theme="light"] .workspace-shell,
+html[data-theme="light"] .workspace-main,
+html[data-theme="light"] .workspace-page { background-color: #f3f8f6 !important; color: #17343d !important; }
+
+html[data-theme="light"] .workspace-sidebar,
+html[data-theme="light"] .workspace-topbar { background-color: #f0f7f4 !important; color: #17343d !important; border-color: #bdd6ce !important; }
+html[data-theme="light"] .workspace-sidebar .sidebar-link,
+html[data-theme="light"] .workspace-sidebar .nav-section-label,
+html[data-theme="light"] .workspace-sidebar .sidebar-footer,
+html[data-theme="light"] .workspace-topbar .topbar-breadcrumb { color: #365760 !important; }
+html[data-theme="light"] .workspace-sidebar .sidebar-link[aria-current="page"] { background-color: #d4eee5 !important; color: #0c554e !important; }
+
+html[data-theme="light"] .workspace-main .ui-panel,
+html[data-theme="light"] .workspace-main .company-library,
+html[data-theme="light"] .workspace-main .company-filters,
+html[data-theme="light"] .workspace-main .contact-toolbar,
+html[data-theme="light"] .workspace-main .contact-directory,
+html[data-theme="light"] .workspace-main .company-table-scroll,
+html[data-theme="light"] .workspace-main .manage-panel,
+html[data-theme="light"] .workspace-main .dossier-hero,
+html[data-theme="light"] .workspace-main .company-stat { background: #ffffff !important; color: #17343d !important; border-color: #bfd8ce !important; }
+html[data-theme="light"] .workspace-main .company-table td { background: #ffffff !important; color: #17343d !important; border-color: #d4e5df !important; }
+html[data-theme="light"] .workspace-main .company-table th { background: #e6f2ed !important; color: #244b50 !important; }
+
+html[data-theme="light"] .workspace-main h1,
+html[data-theme="light"] .workspace-main h2,
+html[data-theme="light"] .workspace-main h3,
+html[data-theme="light"] .workspace-main .text-white,
+html[data-theme="light"] .workspace-main .text-slate-100,
+html[data-theme="light"] .workspace-main .text-slate-200,
+html[data-theme="light"] .workspace-main .text-slate-300 { color: #17343d !important; }
+html[data-theme="light"] .workspace-main .text-slate-400,
+html[data-theme="light"] .workspace-main .text-slate-500,
+html[data-theme="light"] .workspace-main .text-slate-600,
+html[data-theme="light"] .workspace-main .page-description,
+html[data-theme="light"] .workspace-main .screen-tip { color: #455f69 !important; }
+
+html[data-theme="light"] .workspace-main input,
+html[data-theme="light"] .workspace-main select,
+html[data-theme="light"] .workspace-main textarea,
+html[data-theme="light"] .workspace-main button[aria-haspopup="listbox"],
+html[data-theme="light"] .workspace-search input,
+html[data-theme="light"] .auth-page input { background-color: #ffffff !important; color: #17343d !important; border-color: #a9c7bd !important; }
+html[data-theme="light"] .workspace-main input::placeholder,
+html[data-theme="light"] .workspace-main textarea::placeholder,
+html[data-theme="light"] .workspace-search input::placeholder,
+html[data-theme="light"] .auth-page input::placeholder { color: #526d76 !important; opacity: 1; }
+html[data-theme="light"] .workspace-main option { background: #ffffff; color: #17343d; }
+html[data-theme="light"] .workspace-main [role="listbox"] { background: #ffffff !important; color: #17343d !important; border-color: #bfd8ce !important; }
+html[data-theme="light"] .workspace-main [role="option"] { color: #294d57 !important; }
+html[data-theme="light"] .workspace-main [role="option"][aria-selected="true"] { background: #d9f1e8 !important; color: #0c554e !important; }
+
+html[data-theme="light"] .workspace-main a { color: #174c54; }
+html[data-theme="light"] .workspace-main .company-stat[aria-pressed="true"] { background: #d9f1e8 !important; border-color: #5ba78e !important; color: #0c554e !important; }
+html[data-theme="light"] .workspace-main [aria-label="Campaign email status filter"] button[aria-pressed="true"] { background: #0b7167 !important; color: #ffffff !important; }
+html[data-theme="light"] .workspace-main button.bg-indigo-600,
+html[data-theme="light"] .workspace-main button.bg-emerald-600,
+html[data-theme="light"] .workspace-main button.bg-teal-600,
+html[data-theme="light"] .workspace-main button.bg-rose-600 { color: #ffffff !important; }
+html[data-theme="light"] .workspace-main button.bg-indigo-600 .text-white,
+html[data-theme="light"] .workspace-main button.bg-emerald-600 .text-white,
+html[data-theme="light"] .workspace-main button.bg-teal-600 .text-white,
+html[data-theme="light"] .workspace-main button.bg-rose-600 .text-white { color: #ffffff !important; }
+
+html[data-theme="light"] .auth-page { background: #f1f8f5 !important; color: #17343d !important; }
+html[data-theme="light"] .auth-page form { background: #ffffff !important; color: #17343d !important; border-color: #bddbd3 !important; }
+html[data-theme="light"] .auth-page h1,
+html[data-theme="light"] .auth-page .text-white { color: #17343d !important; }
+html[data-theme="light"] .auth-page button .text-white { color: #ffffff !important; }

@@ -217,8 +217,14 @@ export default function Leads() {
   // (never the whole store). q is answered server-side now, so the queryKey
   // carries it and the old client-side filter memo is gone.
   const PAGE = 100;
-  const [campaignPanelOpen, setCampaignPanelOpen] = useState(false);
-  const [campaignView, setCampaignView] = useState<"all" | "sent" | "unsent" | "available">("all");
+  const initialCampaignStatus = params.get("campaign_status");
+  const [campaignPanelOpen, setCampaignPanelOpen] = useState(
+    initialCampaignStatus !== null,
+  );
+  const [campaignView, setCampaignView] = useState<"all" | "sent" | "unsent" | "available">(
+    initialCampaignStatus === "sent" || initialCampaignStatus === "unsent" || initialCampaignStatus === "available"
+      ? initialCampaignStatus : "all",
+  );
   const [campaignFocus, setCampaignFocus] = useState(0);
   const usageFilter = {
     recommendation: rec || undefined,

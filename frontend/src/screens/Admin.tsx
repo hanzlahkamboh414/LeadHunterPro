@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
+import { useNavigate } from "react-router-dom";
 import { api } from "../api/client";
 import { useAuth } from "../contexts/AuthContext";
 import { DELETE_REASONS } from "../components/DeleteReasonDialog";
@@ -63,6 +64,7 @@ const TABS: { id: Tab; label: string; icon: typeof ShieldCheck }[] = [
 
 export default function Admin({ initialTab = "overview" }: { initialTab?: Tab }) {
   const qc = useQueryClient();
+  const navigate = useNavigate();
   const { user: activeUser } = useAuth();
   const isPrimaryAdmin = activeUser?.username === "admin4269" && activeUser.is_admin;
   const allowedTabs = TABS.filter(({ id }) => id === "access"
@@ -295,6 +297,23 @@ export default function Admin({ initialTab = "overview" }: { initialTab?: Tab })
       {/* -------------------------------------------------------------- */}
       {tab === "data" && allowedTabs.some(({ id }) => id === tab) && (
         <>
+          <section className={`${cardClass} mt-6`}>
+            <h2 className="text-[16px] font-semibold text-white">Campaign lead views</h2>
+            <p className="mt-1 text-[12px] text-slate-400">Open Companies with the matching email addresses and campaign counts.</p>
+            <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+              {([
+                ["all", "All emails"],
+                ["unsent", "In campaigns · not sent"],
+                ["sent", "Sent"],
+                ["available", "Not in any campaign"],
+              ] as const).map(([status, label]) => (
+                <button key={status} type="button" onClick={() => navigate(`/leads?folder=*&campaign_status=${status}`)}
+                  className="min-h-11 rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-left text-[12.5px] font-medium text-slate-200 hover:border-indigo-400/40 hover:bg-indigo-500/10 focus:outline-none focus:ring-2 focus:ring-indigo-400">
+                  {label}
+                </button>
+              ))}
+            </div>
+          </section>
           <section className={`${cardClass} mt-6`}>
             <div className="flex items-center gap-2">
               <EyeOff className="h-4 w-4 text-indigo-400" />

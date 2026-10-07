@@ -902,6 +902,22 @@ class CampaignStore:
             "WHERE h.user_id=? ORDER BY h.sent_at ASC", (user_id,),
         ).fetchall()
         conn.close()
+        usage: dict[str, dict[str, Any]] = {}
+        for email, state, campaign_id, name in rows:
+            status = "sent" if state == "sent" else "unsent"
+            current = usage.get(email)
+            if current is None or (status == "sent" and current["status"] != "sent"):
+                usage[email] = {
+                    "status": status, "campaign_id": campaign_id,
+                    "campaign_name": name, "send_state": state,
+                }
+        for email, campaign_id, name in history:
+            usage[email] = {
+                "status": "sent", "campaign_id": campaign_id,
+                "campaign_name": name or f"Campaign #{campaign_id}",
+                "send_state": "sent",
+            }
+        return usage
 
     def record_policy_rejection(self, campaign_id: int, email: str, *,
                                 account_id: int, reason: str) -> bool:
@@ -945,22 +961,6 @@ class CampaignStore:
             raise
         finally:
             conn.close()
-        usage: dict[str, dict[str, Any]] = {}
-        for email, state, campaign_id, name in rows:
-            status = "sent" if state == "sent" else "unsent"
-            current = usage.get(email)
-            if current is None or (status == "sent" and current["status"] != "sent"):
-                usage[email] = {
-                    "status": status, "campaign_id": campaign_id,
-                    "campaign_name": name, "send_state": state,
-                }
-        for email, campaign_id, name in history:
-            usage[email] = {
-                "status": "sent", "campaign_id": campaign_id,
-                "campaign_name": name or f"Campaign #{campaign_id}",
-                "send_state": "sent",
-            }
-        return usage
 
     def activity_for_user(self, user_id: str, limit: int = 100,
                           offset: int = 0) -> list[dict[str, Any]]:

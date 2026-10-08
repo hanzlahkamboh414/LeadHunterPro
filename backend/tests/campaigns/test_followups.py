@@ -642,6 +642,20 @@ def test_gmail_policy_rejection_holds_sender_and_cancels_followup(tmp_path, monk
     assert ctx["sched"].run_once()["bounced"] == 0
 
 
+def test_accepted_campaign_send_resets_hard_bounce_streak(tmp_path, monkeypatch):
+    from app.campaigns.deliverability_guard import DeliverabilityGuard
+
+    ctx = _bounce_setup(tmp_path, monkeypatch, emails=("jane@acme.com",))
+    guard = DeliverabilityGuard(str(tmp_path / "guard.db"))
+    ctx["sched"]._deliverability_guard = guard
+    account_id = ctx["account_id"]
+    assert not guard.record_hard_bounce(account_id, "old@dead.com", now=NOW)
+    assert ctx["sched"].run_once()["sent"] == 1
+    assert not guard.record_hard_bounce(account_id, "next@dead.com", now=NOW)
+    assert not guard.record_hard_bounce(account_id, "third@dead.com", now=NOW)
+    assert guard.record_hard_bounce(account_id, "fourth@dead.com", now=NOW)
+
+
 def test_dsn_naming_no_sent_address_records_nothing(tmp_path, monkeypatch):
     """A DSN whose text names none of OUR sent addresses is an honest
     miss — no guessed bounce, nothing written."""

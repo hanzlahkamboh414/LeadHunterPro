@@ -714,6 +714,9 @@ class CampaignScheduler:
         sent_at = self._clock()
         self._store.mark_sent(send["id"], subject=subject, sent_at=_iso(sent_at),
                               account_id=account_id, body=body)
+        if self._deliverability_guard is not None:
+            self._deliverability_guard.record_send_accepted(
+                account_id, now=sent_at)
         stats["sent"] += 1
         logger.info("campaign %d sent to %s (step %d, account %d)",
                     c["id"], send["email"], send["step"], account_id)

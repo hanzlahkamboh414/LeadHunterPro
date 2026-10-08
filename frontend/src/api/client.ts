@@ -912,9 +912,24 @@ export const api = {
     return request<LeadDetail>(`/leads/${encodeURIComponent(email)}`);
   },
 
-  // Email sending accounts (Phase E2) — Gmail via Google OAuth.
+  // Email sending accounts — Gmail OAuth or a verified secure SMTP login.
   emailAccounts(): Promise<EmailAccount[]> {
     return request<EmailAccount[]>("/email-accounts");
+  },
+
+  connectSmtpAccount(body: {
+    email: string;
+    host: string;
+    port: number;
+    security: "ssl" | "starttls";
+    username: string;
+    password: string;
+  }): Promise<EmailAccount> {
+    return request<EmailAccount>("/email-accounts/smtp", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
   },
 
   /** Is Gmail OAuth configured server-side? (Drives the Connect button vs the

@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { api, ApiError, type LeadImportJob } from "../api/client";
 
-const activeStatus = (status: string) => !["completed", "cancelled"].includes(status);
+const activeStatus = (status: string) => ["queued", "running", "waiting_quota"].includes(status);
 const errorText = (error: unknown) => error instanceof ApiError ? error.message : "Please try again.";
 
 export default function ManualResearch({ aiEnabled = true }: { aiEnabled?: boolean }) {
@@ -24,6 +24,8 @@ export default function ManualResearch({ aiEnabled = true }: { aiEnabled?: boole
   function refresh() { qc.invalidateQueries({ queryKey: ["lead-imports"] }); qc.invalidateQueries({ queryKey: ["lead-import-quota"] }); qc.invalidateQueries({ queryKey: ["lead-import-activity"] }); qc.invalidateQueries({ queryKey: ["leads"] }); }
   const upload = useMutation({ mutationFn: () => api.uploadLeadFile(file!, name), onSuccess: ({ job }) => { setSelected(job.id); setFile(null); setName(""); if (input.current) input.current.value = ""; refresh(); } });
   const cancel = useMutation({ mutationFn: (id: string) => api.cancelLeadImport(id), onSuccess: refresh });
+  const pause = useMutation({ mutationFn: (id: string) => api.pauseLeadImport(id), onSuccess: refresh });
+  const resume = useMutation({ mutationFn: (id: string) => api.resumeLeadImport(id), onSuccess: refresh });
   const rename = useMutation({ mutationFn: ({ id, title }: { id: string; title: string }) => api.renameLeadImport(id, title), onSuccess: refresh });
   const remove = useMutation({ mutationFn: (id: string) => api.deleteLeadImport(id), onSuccess: () => { setSelected(null); refresh(); } });
   function choose(next: File | null) {
@@ -64,8 +66,14 @@ export default function ManualResearch({ aiEnabled = true }: { aiEnabled?: boole
         <div className="flex flex-wrap items-center justify-between gap-2"><div><h3 className="font-semibold text-white">{current.name}</h3><p className="text-xs text-slate-400">{current.filename} · {current.status}</p></div><div className="flex flex-wrap gap-2">
           <button onClick={() => navigate(`/leads?import_id=${encodeURIComponent(current.id)}`)} className="rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white">View leads →</button>
           <button onClick={() => renameJob(current)} className="rounded-lg border border-white/10 px-3 py-2 text-xs text-slate-300">Rename</button>
-          {activeStatus(current.status) ? <button onClick={() => cancel.mutate(current.id)} disabled={cancel.isPending} className="rounded-lg border border-amber-500/30 px-3 py-2 text-xs text-amber-300">Cancel</button> : <button onClick={() => deleteJob(current)} disabled={remove.isPending} className="rounded-lg border border-rose-500/30 px-3 py-2 text-xs text-rose-300">Remove</button>}
+          {activeStatus(current.status) && <button onClick={() => pause.mutate(current.id)} disabled={pause.isPending} className="min-h-11 rounded-lg border border-amber-500/30 px-3 py-2 text-xs font-semibold text-amber-300 disabled:opacity-50">{pause.isPending ? "Pausing…" : "Pause"}</button>}
+          {(current.status === "paused" || current.status === "cancelled") && <button onClick={() => resume.mutate(current.id)} disabled={resume.isPending || !aiEnabled} className="min-h-11 rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white disabled:opacity-50">{resume.isPending ? "Resuming…" : "Resume"}</button>}
+          {(activeStatus(current.status) || current.status === "paused") && <button onClick={() => cancel.mutate(current.id)} disabled={cancel.isPending} className="min-h-11 rounded-lg border border-amber-500/30 px-3 py-2 text-xs text-amber-300 disabled:opacity-50">Cancel</button>}
+          {(current.status === "completed" || current.status === "cancelled") && <button onClick={() => deleteJob(current)} disabled={remove.isPending} className="min-h-11 rounded-lg border border-rose-500/30 px-3 py-2 text-xs text-rose-300 disabled:opacity-50">Remove</button>}
         </div></div>
+        {(pause.isError || resume.isError || cancel.isError) && <p role="alert" className="mt-3 text-sm text-rose-300">{errorText(pause.error || resume.error || cancel.error)}</p>}
+        {current.status === "paused" && <p role="status" className="mt-3 text-xs text-amber-300">Paused. An address already being researched may finish; the remaining addresses will wait.</p>}
+        {current.status === "cancelled" && <p role="status" className="mt-3 text-xs text-slate-300">Cancelled with {current.pending} address{current.pending === 1 ? "" : "es"} remaining. Resume continues from here.</p>}
         <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-5">{([ ["Total", current.total], ["Relevant", current.relevant], ["Irrelevant", current.irrelevant], ["Pending", current.pending], ["Failed", current.failed] ] as const).map(([label, value]) => <div key={label} className="rounded-lg bg-white/[0.04] p-3"><p className="text-xs text-slate-400">{label}</p><p className="text-lg font-semibold text-white">{value}</p></div>)}</div>
         <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-white/10"><div className="h-full bg-indigo-500" style={{ width: `${current.total ? Math.round((current.total - current.pending) / current.total * 100) : 0}%` }} /></div>
         <h4 className="mt-5 text-sm font-semibold text-white">Research activity</h4>

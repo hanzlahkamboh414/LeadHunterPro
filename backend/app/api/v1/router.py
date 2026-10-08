@@ -20,6 +20,7 @@ from app.api.v1.admin import router as admin_router
 from app.api.v1.campaigns import router as campaigns_router
 from app.api.v1.leadership import router as leadership_router
 from app.api.v1.leads import router as leads_router
+from app.api.v1.lead_imports import router as lead_imports_router
 from app.api.v1.linkedin import router as linkedin_router
 from app.api.v1.phones import router as phones_router
 from app.api.v1.research import router as research_router
@@ -41,6 +42,7 @@ api_router.include_router(email_router)
 api_router.include_router(discovery_router)
 api_router.include_router(source_intelligence_router)
 api_router.include_router(connectors_router)
+api_router.include_router(lead_imports_router, dependencies=[Depends(require_email_access)])
 api_router.include_router(leads_router, dependencies=[Depends(require_email_access)])
 api_router.include_router(phones_router, dependencies=[Depends(require_phone_access)])
 api_router.include_router(linkedin_router, dependencies=[Depends(require_email_access)])

@@ -48,6 +48,14 @@ async def lifespan(app: FastAPI):
     except Exception:  # noqa: BLE001 — a scheduler failure must not kill the app
         logger.exception("campaign scheduler failed to start — continuing")
 
+    import_worker = None
+    try:
+        from app.leads.import_research_worker import get_worker as get_import_worker
+        import_worker = get_import_worker()
+        import_worker.start()
+    except Exception:  # noqa: BLE001 — browsing must survive a worker failure
+        logger.exception("uploaded lead research worker failed to start")
+
     # Phone-lead email enrichment (phones vertical): one daemon thread that
     # enriches claimed phone leads with emails from their own websites and
     # feeds the finds into the emails vertical's pending cache. Same rule —
@@ -125,6 +133,8 @@ async def lifespan(app: FastAPI):
     yield
     if scheduler is not None:
         scheduler.stop()
+    if import_worker is not None:
+        import_worker.stop()
     if enricher is not None:
         enricher.stop()
     if harvester is not None:

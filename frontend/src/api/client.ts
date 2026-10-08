@@ -268,6 +268,8 @@ export const api = {
   leadImportQuota(): Promise<LeadImportQuota> { return request("/leads/imports/quota"); },
   leadImportActivity(id: string): Promise<LeadImportActivity[]> { return request(`/leads/imports/${encodeURIComponent(id)}/activity`); },
   cancelLeadImport(id: string): Promise<LeadImportJob> { return request(`/leads/imports/${encodeURIComponent(id)}/cancel`, { method: "POST" }); },
+  pauseLeadImport(id: string): Promise<LeadImportJob> { return request(`/leads/imports/${encodeURIComponent(id)}/pause`, { method: "POST" }); },
+  resumeLeadImport(id: string): Promise<LeadImportJob> { return request(`/leads/imports/${encodeURIComponent(id)}/resume`, { method: "POST" }); },
   renameLeadImport(id: string, name: string): Promise<LeadImportJob> { return request(`/leads/imports/${encodeURIComponent(id)}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) }); },
   deleteLeadImport(id: string): Promise<void> { return request(`/leads/imports/${encodeURIComponent(id)}`, { method: "DELETE" }); },
   // Auth -----------------------------------------------------------------

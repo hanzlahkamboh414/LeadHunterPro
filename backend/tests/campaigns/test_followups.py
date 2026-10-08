@@ -635,17 +635,26 @@ def test_gmail_policy_rejection_counts_failure_and_cancels_followup(tmp_path, mo
     assert ctx["store"].get(campaign_id, ctx["user"].id)["status"] != "paused"
     sends = [s for s in ctx["store"].sends(campaign_id, ctx["user"].id)
              if s["email"] == "chip@example.com"]
-    assert [s["state"] for s in sends] == ["failed", "skipped"]
+    assert sends == []
     assert ctx["store"].bounces(campaign_id, ctx["user"].id)[0]["email"] == "chip@example.com"
+    assert ctx["store"].delivery_excluded_emails(["CHIP@example.com"]) == {"chip@example.com"}
+    assert ctx["store"].pending_delivery_exclusions() == []
+    with pytest.raises(ValueError, match="already queued or emailed"):
+        ctx["store"].create(
+            "another-user", account_id=2, name="retry", subject="S", body="B",
+            emails=["chip@example.com"], start_at=_iso(NOW),
+        )
     counts = ctx["store"].get(campaign_id, ctx["user"].id)
     assert counts["bounced"] == 1
-    assert counts["skipped"] == 1
+    assert counts["skipped"] == 0
     assert counts["replied"] == 0
     response = ctx["client"].get(f"/api/v1/campaigns/{campaign_id}")
     assert response.status_code == 200
     assert response.json()["bounced"] == 1
     assert ctx["bounce"].lookup("chip@example.com") is None
     assert ctx["leads"].get("chip@example.com") is not None
+    visible, _ = ctx["leads"].query_leads(global_scope=True)
+    assert all(lead.get("email") != "chip@example.com" for lead in visible)
     assert ctx["sched"].run_once()["bounced"] == 0
 
 

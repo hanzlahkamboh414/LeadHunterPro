@@ -197,9 +197,16 @@ class CampaignStore:
                     account_id INTEGER NOT NULL DEFAULT 0,
                     bounced_at TEXT NOT NULL,
                     reason TEXT NOT NULL DEFAULT '',
+                    cleaned_at TEXT NOT NULL DEFAULT '',
                     PRIMARY KEY (campaign_id, email)
                 )
             """)
+            bounce_cols = {r[1] for r in conn.execute("PRAGMA table_info(campaign_bounces)")}
+            if "cleaned_at" not in bounce_cols:
+                conn.execute("ALTER TABLE campaign_bounces "
+                             "ADD COLUMN cleaned_at TEXT NOT NULL DEFAULT ''")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_campaign_bounces_email "
+                         "ON campaign_bounces(email)")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS campaign_opt_outs (
                     user_id TEXT NOT NULL,
@@ -333,6 +340,7 @@ class CampaignStore:
             "SELECT email FROM campaign_opt_outs WHERE user_id = ?",
             (user_id,),
         ))
+        claimed.update(self._delivery_excluded_in_conn(conn, seen))
         seen = [e for e in seen if e.lower() not in claimed]
         if recipient_limit is not None:
             seen = seen[:recipient_limit]
@@ -1258,10 +1266,10 @@ class CampaignStore:
         return cur.rowcount > 0
 
     def purge_recipient(self, email: str) -> int:
-        """Remove a confirmed invalid address from every campaign queue.
+        """Remove an excluded address from every campaign queue.
 
-        Sent and pending rows are removed together as requested; the bounce
-        outcome remains in email_outcomes.db as the audit and send block.
+        Sent and pending rows are removed together; campaign bounce records
+        and recipient history remain available for audit and send blocking.
         """
         addr = (email or "").strip().lower()
         if not addr:
@@ -1499,6 +1507,8 @@ class CampaignStore:
                     "SELECT email FROM campaign_opt_outs WHERE user_id = ?",
                     (user_id,),
                 ))
+                claimed_elsewhere.update(
+                    self._delivery_excluded_in_conn(conn, wanted_emails))
                 terminal_here = {
                     r[0] for r in conn.execute(
                         "SELECT email FROM campaign_sends WHERE campaign_id = ? "
@@ -1607,6 +1617,46 @@ class CampaignStore:
         conn.commit()
         conn.close()
         return cur.rowcount
+
+    def delivery_excluded_emails(self, emails: list[str]) -> set[str]:
+        """Global no-resend list: any campaign's bounce or provider block."""
+        conn = self._conn()
+        try:
+            return self._delivery_excluded_in_conn(conn, emails)
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _delivery_excluded_in_conn(conn: sqlite3.Connection,
+                                   emails: list[str]) -> set[str]:
+        requested = list({str(email).strip().lower() for email in emails
+                          if "@" in str(email)})
+        blocked: set[str] = set()
+        for start in range(0, len(requested), 500):
+            batch = requested[start:start + 500]
+            marks = ",".join("?" for _ in batch)
+            blocked.update(row[0] for row in conn.execute(
+                f"SELECT DISTINCT lower(email) FROM campaign_bounces "
+                f"WHERE email IN ({marks})", batch,
+            ))
+        return blocked
+
+    def pending_delivery_exclusions(self, limit: int = 500) -> list[str]:
+        """Recorded failures whose cross-store queue/lead cleanup must retry."""
+        conn = self._conn()
+        rows = conn.execute(
+            "SELECT DISTINCT lower(email) FROM campaign_bounces "
+            "WHERE cleaned_at='' LIMIT ?", (limit,),
+        ).fetchall()
+        conn.close()
+        return [row[0] for row in rows]
+
+    def mark_delivery_exclusion_cleaned(self, email: str) -> None:
+        conn = self._conn()
+        conn.execute("UPDATE campaign_bounces SET cleaned_at=? "
+                     "WHERE lower(email)=?", (_now(), email.strip().lower()))
+        conn.commit()
+        conn.close()
 
     def continue_now(self, campaign_id: int, user_id: str,
                      pakistan_day: str) -> bool:

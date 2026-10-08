@@ -418,18 +418,29 @@ class CampaignScheduler:
                     note=f"lead replied (subject: {subject[:120]})")
 
     def _cleanup_hard_bounces(self) -> None:
-        """Retry cross-database cleanup until a confirmed bounce is removed."""
-        if self._bounce_store is None:
-            return
-        for email in self._bounce_store.pending_hard_bounces():
+        """Retry cleanup of hard bounces and provider rejections across stores."""
+        if self._bounce_store is not None:
+            for email in self._bounce_store.pending_hard_bounces():
+                try:
+                    self._lead_store.delete(email, reason="bounced", username="auto-bounce")
+                    PendingLeadsStore(db_path=self._lead_store._db_path).remove([email])
+                    removed = self._store.purge_recipient(email)
+                    self._bounce_store.mark_cleaned(email)
+                    logger.info("hard bounce cleanup: %s, %d campaign rows removed", email, removed)
+                except Exception:  # noqa: BLE001 — retry on the next pass
+                    logger.exception("hard bounce cleanup failed for %s; will retry", email)
+        for email in self._store.pending_delivery_exclusions():
             try:
-                self._lead_store.delete(email, reason="bounced", username="auto-bounce")
+                # A provider policy rejection is not proof that the mailbox is
+                # invalid. Keep its dossier/audit, but hide it from lead views.
+                self._lead_store.set_hidden(email, True)
                 PendingLeadsStore(db_path=self._lead_store._db_path).remove([email])
                 removed = self._store.purge_recipient(email)
-                self._bounce_store.mark_cleaned(email)
-                logger.info("hard bounce cleanup: %s, %d campaign rows removed", email, removed)
+                self._store.mark_delivery_exclusion_cleaned(email)
+                logger.info("delivery exclusion cleanup: %s, %d campaign rows removed",
+                            email, removed)
             except Exception:  # noqa: BLE001 — retry on the next pass
-                logger.exception("hard bounce cleanup failed for %s; will retry", email)
+                logger.exception("delivery exclusion cleanup failed for %s; will retry", email)
 
     # -- One campaign, at most one send ------------------------------------
 
@@ -541,6 +552,10 @@ class CampaignScheduler:
             c["id"], _iso(now), verified_only=self._verifier is not None)
         if send is None:
             self._store.mark_completed_if_drained(c["id"])
+            return
+
+        if self._store.delivery_excluded_emails([send["email"]]):
+            self._store.purge_recipient(send["email"])
             return
 
         if self._store.is_suppressed(c["user_id"], send["email"]):

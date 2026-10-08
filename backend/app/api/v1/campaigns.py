@@ -70,9 +70,10 @@ def _blocked_addresses(emails: list[str]) -> set[str]:
     try:
         campaign_store = get_campaign_store()
         invalid = campaign_store.invalid_checked_emails(emails)
+        delivery_excluded = campaign_store.delivery_excluded_emails(emails)
         bounced = {str(email).lower() for email in emails
                    if store.lookup(str(email)) == "bounced"}
-        return invalid | bounced
+        return invalid | bounced | delivery_excluded
     finally:
         store.close()
 

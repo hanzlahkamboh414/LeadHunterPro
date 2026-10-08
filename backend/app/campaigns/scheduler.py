@@ -354,11 +354,12 @@ class CampaignScheduler:
                                     target["campaign_id"], blocked,
                                     account_id=account_id, reason=reason):
                                 stats["bounced"] += 1
-                                self._store.pause_for_account(
-                                    account_id, reason="deliverability")
                                 if self._deliverability_guard is not None:
-                                    self._deliverability_guard.hold_account(
-                                        account_id, reason, now=now)
+                                    if self._deliverability_guard.record_delivery_failure(
+                                            account_id, target["send_id"],
+                                            sent_at=parse_ts(target["sent_at"])):
+                                        self._store.pause_for_account(
+                                            account_id, reason="deliverability")
                                 logger.warning(
                                     "Gmail policy rejection: account %d, campaign %d, %s",
                                     account_id, target["campaign_id"], blocked)
@@ -377,8 +378,11 @@ class CampaignScheduler:
                                 stats["bounced"] += 1
                                 logger.info("hard bounce confirmed: %s", bounced)
                                 if self._deliverability_guard is not None:
-                                    if self._deliverability_guard.record_hard_bounce(
-                                            account_id, bounced, now=now):
+                                    if self._deliverability_guard.record_delivery_failure(
+                                            account_id, target["send_id"],
+                                            sent_at=parse_ts(target["sent_at"])):
+                                        self._store.pause_for_account(
+                                            account_id, reason="deliverability")
                                         logger.warning(
                                             "sender account %d held after repeated hard bounces",
                                             account_id)
@@ -716,7 +720,7 @@ class CampaignScheduler:
                               account_id=account_id, body=body)
         if self._deliverability_guard is not None:
             self._deliverability_guard.record_send_accepted(
-                account_id, now=sent_at)
+                account_id, send["id"], now=sent_at)
         stats["sent"] += 1
         logger.info("campaign %d sent to %s (step %d, account %d)",
                     c["id"], send["email"], send["step"], account_id)
@@ -817,8 +821,10 @@ class CampaignScheduler:
                         evidence=f"SMTP {smtp_code}: {reason[:150]}",
                     )
                     if self._deliverability_guard is not None:
-                        self._deliverability_guard.record_hard_bounce(
-                            account_id, send["email"], now=now)
+                        if self._deliverability_guard.record_delivery_failure(
+                                account_id, send["id"], sent_at=now):
+                            self._store.pause_for_account(
+                                account_id, reason="deliverability")
                     self._cleanup_hard_bounces()
                     return
         if isinstance(exc, smtplib.SMTPAuthenticationError):

@@ -608,7 +608,7 @@ def test_temporary_delivery_notice_keeps_lead_and_queue(tmp_path, monkeypatch):
     assert ctx["leads"].get("bob@dead.com") is not None
 
 
-def test_gmail_policy_rejection_holds_sender_and_cancels_followup(tmp_path, monkeypatch):
+def test_gmail_policy_rejection_counts_failure_and_cancels_followup(tmp_path, monkeypatch):
     from app.campaigns.deliverability_guard import DeliverabilityGuard
 
     ctx = _bounce_setup(tmp_path, monkeypatch,
@@ -631,8 +631,8 @@ def test_gmail_policy_rejection_holds_sender_and_cancels_followup(tmp_path, monk
     ctx["sched"]._clock.advance(2 * 3600)
     stats = ctx["sched"].run_once()
     assert stats["bounced"] == 1
-    assert guard.is_held(ctx["account_id"])
-    assert ctx["store"].get(campaign_id, ctx["user"].id)["status"] == "paused"
+    assert not guard.is_held(ctx["account_id"])
+    assert ctx["store"].get(campaign_id, ctx["user"].id)["status"] != "paused"
     sends = [s for s in ctx["store"].sends(campaign_id, ctx["user"].id)
              if s["email"] == "chip@example.com"]
     assert [s["state"] for s in sends] == ["failed", "skipped"]
@@ -642,6 +642,37 @@ def test_gmail_policy_rejection_holds_sender_and_cancels_followup(tmp_path, monk
     assert ctx["sched"].run_once()["bounced"] == 0
 
 
+def test_three_gmail_policy_blocks_hold_sender(tmp_path, monkeypatch):
+    from app.campaigns.deliverability_guard import DeliverabilityGuard
+
+    emails = ("one@example.com", "two@example.com", "three@example.com")
+    ctx = _bounce_setup(tmp_path, monkeypatch, emails=emails)
+    guard = DeliverabilityGuard(str(tmp_path / "guard.db"))
+    ctx["sched"]._deliverability_guard = guard
+    monkeypatch.setattr(google, "list_inbox_senders", lambda tok, **kw: [])
+    assert ctx["sched"].run_once()["sent"] == 1
+    pending = [s for s in ctx["store"].sends(ctx["campaign_id"], ctx["user"].id)
+               if s["state"] == "pending"]
+    for index, send in enumerate(pending, start=1):
+        sent_at = NOW + timedelta(minutes=index)
+        ctx["store"].mark_sent(
+            send["id"], subject="Test", sent_at=_iso(sent_at),
+            account_id=ctx["account_id"], body="Test",
+        )
+        guard.record_send_accepted(ctx["account_id"], send["id"], now=sent_at)
+    ctx["sched"]._clock.advance(2 * 3600)
+    assert not guard.is_held(ctx["account_id"])
+
+    notices = [{
+        "from": "mailer-daemon@googlemail.com",
+        "subject": "Delivery Status Notification (Failure)",
+        "snippet": f"Message blocked. Your message to {email} was rejected.",
+    } for email in emails]
+    monkeypatch.setattr(google, "list_inbox_senders", lambda tok, **kw: notices)
+    assert ctx["sched"].run_once()["bounced"] == 3
+    assert guard.is_held(ctx["account_id"])
+
+
 def test_accepted_campaign_send_resets_hard_bounce_streak(tmp_path, monkeypatch):
     from app.campaigns.deliverability_guard import DeliverabilityGuard
 
@@ -649,11 +680,16 @@ def test_accepted_campaign_send_resets_hard_bounce_streak(tmp_path, monkeypatch)
     guard = DeliverabilityGuard(str(tmp_path / "guard.db"))
     ctx["sched"]._deliverability_guard = guard
     account_id = ctx["account_id"]
-    assert not guard.record_hard_bounce(account_id, "old@dead.com", now=NOW)
     assert ctx["sched"].run_once()["sent"] == 1
-    assert not guard.record_hard_bounce(account_id, "next@dead.com", now=NOW)
-    assert not guard.record_hard_bounce(account_id, "third@dead.com", now=NOW)
-    assert guard.record_hard_bounce(account_id, "fourth@dead.com", now=NOW)
+    assert not guard.record_delivery_failure(account_id, 900, sent_at=NOW - timedelta(minutes=2))
+    assert not guard.record_delivery_failure(account_id, 901, sent_at=NOW - timedelta(minutes=1))
+    assert not guard.is_held(account_id)
+    assert not guard.record_delivery_failure(
+        account_id, 902, sent_at=NOW + timedelta(minutes=1))
+    assert not guard.record_delivery_failure(
+        account_id, 903, sent_at=NOW + timedelta(minutes=2))
+    assert guard.record_delivery_failure(
+        account_id, 904, sent_at=NOW + timedelta(minutes=3))
 
 
 def test_dsn_naming_no_sent_address_records_nothing(tmp_path, monkeypatch):

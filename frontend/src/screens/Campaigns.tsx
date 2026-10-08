@@ -51,7 +51,7 @@ const PAUSE_REASONS: Record<string, string> = {
   user: "Paused by you",
   rate_limited: "Rate limited by Gmail — auto-resumes after cooldown",
   account: "Gmail account disconnected — resumes when reconnected",
-  deliverability: "Paused after delivery blocks",
+  deliverability: "Paused after 3 consecutive delivery failures",
 };
 
 const INPUT =

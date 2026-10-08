@@ -1,4 +1,4 @@
-"""Persist hard-bounce streaks and explicit provider holds."""
+"""Track send outcomes and hold accounts after three consecutive failures."""
 
 from __future__ import annotations
 
@@ -23,74 +23,63 @@ class DeliverabilityGuard:
                 held_at TEXT NOT NULL,
                 reason TEXT NOT NULL
             )""")
-            conn.execute("""CREATE TABLE IF NOT EXISTS hard_bounce_streaks (
-                account_id INTEGER PRIMARY KEY,
-                consecutive_count INTEGER NOT NULL DEFAULT 0,
-                updated_at TEXT NOT NULL
+            conn.execute("""CREATE TABLE IF NOT EXISTS delivery_attempts (
+                account_id INTEGER NOT NULL,
+                send_id INTEGER NOT NULL,
+                sent_at TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                PRIMARY KEY (account_id, send_id)
             )""")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_delivery_attempts_order "
+                         "ON delivery_attempts(account_id, sent_at DESC, send_id DESC)")
 
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=5)
         conn.execute("PRAGMA busy_timeout=5000")
         return conn
 
-    def record_hard_bounce(self, account_id: int, email: str, *,
-                           now: datetime | None = None) -> bool:
-        """Hold an account after three consecutive distinct hard bounces.
-
-        An accepted send resets the streak. Duplicate DSNs for one recipient
-        cannot inflate it. Provider policy blocks use ``hold_account`` and
-        still stop immediately.
-        """
-        if account_id <= 0 or "@" not in email:
-            return False
-        now = now or datetime.now(timezone.utc)
-        when = now.astimezone(timezone.utc).isoformat()
-        with self._conn() as conn:
-            inserted = conn.execute(
-                "INSERT OR IGNORE INTO hard_bounce_events "
-                "(account_id,email,occurred_at) VALUES (?,?,?)",
-                (account_id, email.strip().lower(), when),
-            ).rowcount
-            if inserted:
-                conn.execute(
-                    "INSERT INTO hard_bounce_streaks "
-                    "(account_id,consecutive_count,updated_at) VALUES (?,1,?) "
-                    "ON CONFLICT(account_id) DO UPDATE SET "
-                    "consecutive_count=consecutive_count+1,updated_at=excluded.updated_at",
-                    (account_id, when),
-                )
-            count = conn.execute(
-                "SELECT consecutive_count FROM hard_bounce_streaks "
-                "WHERE account_id=?", (account_id,),
-            ).fetchone()
-            if count is not None and count[0] >= 3:
-                conn.execute("INSERT OR IGNORE INTO sender_holds "
-                             "(account_id,held_at,reason) VALUES (?,?,?)",
-                             (account_id, when, "three consecutive hard bounces"))
-            return conn.execute(
-                "SELECT 1 FROM sender_holds WHERE account_id=?",
-                (account_id,),
-            ).fetchone() is not None
-
-    def record_send_accepted(self, account_id: int, *,
+    def record_send_accepted(self, account_id: int, send_id: int, *,
                              now: datetime | None = None) -> None:
-        """Reset a hard-bounce streak after the provider accepts a send.
-
-        Acceptance is not proof of recipient delivery; a later DSN can still
-        reclassify that message. This method never clears an existing hold.
-        """
-        if account_id <= 0:
+        """Record Gmail/SMTP acceptance in send order (not proof of delivery)."""
+        if account_id <= 0 or send_id <= 0:
             return
         when = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
         with self._conn() as conn:
             conn.execute(
-                "INSERT INTO hard_bounce_streaks "
-                "(account_id,consecutive_count,updated_at) VALUES (?,0,?) "
-                "ON CONFLICT(account_id) DO UPDATE SET "
-                "consecutive_count=0,updated_at=excluded.updated_at",
-                (account_id, when),
+                "INSERT OR IGNORE INTO delivery_attempts "
+                "(account_id,send_id,sent_at,outcome) VALUES (?,?,?,'accepted')",
+                (account_id, send_id, when),
             )
+
+    def record_delivery_failure(self, account_id: int, send_id: int, *,
+                                sent_at: datetime | None = None) -> bool:
+        """Count hard bounces and policy blocks by original send order.
+
+        Repeated notices update the same attempt. A late notice for an older
+        send cannot override a newer accepted send. Existing holds stay put.
+        """
+        if account_id <= 0 or send_id <= 0:
+            return False
+        when = (sent_at or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO delivery_attempts "
+                "(account_id,send_id,sent_at,outcome) VALUES (?,?,?,'failed') "
+                "ON CONFLICT(account_id,send_id) DO UPDATE SET outcome='failed'",
+                (account_id, send_id, when),
+            )
+            latest = [row[0] for row in conn.execute(
+                "SELECT outcome FROM delivery_attempts WHERE account_id=? "
+                "ORDER BY sent_at DESC, send_id DESC LIMIT 3", (account_id,),
+            )]
+            if len(latest) == 3 and all(outcome == "failed" for outcome in latest):
+                conn.execute("INSERT OR IGNORE INTO sender_holds "
+                             "(account_id,held_at,reason) VALUES (?,?,?)",
+                             (account_id, when, "three consecutive delivery failures"))
+            return conn.execute(
+                "SELECT 1 FROM sender_holds WHERE account_id=?",
+                (account_id,),
+            ).fetchone() is not None
 
     def is_held(self, account_id: int) -> bool:
         with self._conn() as conn:

@@ -1317,7 +1317,8 @@ class CampaignStore:
         campaign+lead) — the addresses reply detection matches against."""
         conn = self._conn()
         rows = conn.execute(
-            "SELECT s.campaign_id, c.user_id, s.email, MAX(s.sent_at) AS sent_at "
+            "SELECT s.campaign_id, c.user_id, s.email, MAX(s.sent_at) AS sent_at, "
+            "MAX(s.id) AS send_id "
             "FROM campaign_sends s JOIN campaigns c ON s.campaign_id = c.id "
             "LEFT JOIN campaign_replies r ON r.campaign_id = s.campaign_id "
             "AND r.email = s.email "
@@ -1329,7 +1330,7 @@ class CampaignStore:
         ).fetchall()
         conn.close()
         return [{"campaign_id": r[0], "user_id": r[1], "email": r[2],
-                 "sent_at": r[3] or ""} for r in rows]
+                 "sent_at": r[3] or "", "send_id": r[4]} for r in rows]
 
     def get_reply_check(self, account_id: int) -> str:
         conn = self._conn()

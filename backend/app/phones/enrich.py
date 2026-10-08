@@ -40,7 +40,7 @@ from urllib.parse import urlparse
 
 from app.crawlers.html_parser import HTMLParser
 from app.discovery.sources._http import fetch as _default_fetch
-from app.email.email_cleaner import clean_emails
+from app.email.email_cleaner import FREE_MAIL_DOMAINS, clean_emails
 from app.email.pattern_inference import infer_verified_email
 from app.discovery.tradefold import normalize_trade
 from app.phones.store import normalize_phone
@@ -50,7 +50,9 @@ logger = logging.getLogger(__name__)
 # Reuse the identity verifier's blocklist (§14) — a search result pointing
 # at one of these hosts is a LISTING about the company, never the company's
 # own website, so its emails belong to the directory, not the lead.
-from app.engines.verification.identity_verifier import _AGGREGATOR_HOSTS
+from app.engines.verification.identity_verifier import (
+    _AGGREGATOR_HOSTS, _GENERIC_TRADE_WORDS, name_tokens,
+)
 
 #: Page-furniture filtering lives in ONE place now. The local
 #: ``_JUNK_EMAIL_TOKENS``/``_IMAGE_EXTS``/``_clean_emails`` trio that used to
@@ -113,7 +115,7 @@ def _default_search(query: str, num: int) -> list[str]:
 
 
 def _pick_best_email(emails: list[str], website: str) -> str:
-    """Prefer an address on the company's own domain; else first seen.
+    """Use the site's own domain or an explicitly published free-mail box.
 
     Own-domain beats a free-mail box that happens to be listed too — but a
     gmail on the company's own contact page is REAL evidence for a calling
@@ -125,7 +127,30 @@ def _pick_best_email(emails: list[str], website: str) -> str:
         e_host = e.rsplit("@", 1)[-1]
         if host and (e_host == host or e_host.endswith("." + host)):
             return e
-    return emails[0] if emails else ""
+    return next((e for e in emails
+                 if e.rsplit("@", 1)[-1] in FREE_MAIL_DOMAINS), "")
+
+
+def _site_matches_lead(lead: dict[str, Any], url: str, parsed: Any) -> bool:
+    """Require business identity evidence before treating a search hit as its site.
+
+    A distinctive business-name token in the host is good evidence. When a
+    company uses an unrelated brand/domain, require its full name AND board
+    phone on the page. Trade words alone never establish identity.
+    """
+    business = (lead.get("business_name") or "").strip()
+    tokens = name_tokens(business)
+    distinctive = [t for t in tokens if t not in _GENERIC_TRADE_WORDS]
+    host_name = _host(url).rsplit(".", 1)[0].replace(".", "")
+    if distinctive and any(t in host_name for t in distinctive):
+        return True
+    phone = normalize_phone(lead.get("phone", ""))
+    if not phone or not tokens:
+        return False
+    page_name = " ".join(re.findall(
+        r"[a-z0-9]+", (parsed.title + " " + parsed.text_content).lower()))
+    return (" ".join(tokens) in page_name
+            and phone in {normalize_phone(p) for p in parsed.phones})
 
 
 def _default_overture(phone: str) -> dict[str, str]:
@@ -259,7 +284,21 @@ def enrich_lead(
         query += f" {state}"
 
     urls = search(query, 10)
-    site = next((u for u in urls if not _is_aggregator(u)), "")
+    site = ""
+    home = None
+    for candidate in (u for u in urls[:5] if not _is_aggregator(u)):
+        result = do_fetch(candidate, timeout=12.0)
+        if not result.ok or not result.text:
+            continue
+        final_url = getattr(result, "final_url", "") or candidate
+        if _is_aggregator(final_url):
+            continue
+        parsed = parser.parse(result.text, final_url)
+        if _site_matches_lead(lead, final_url, parsed):
+            site, home = final_url, parsed
+            break
+        logger.info("enrich %r: rejected unrelated search result %s",
+                    business, final_url)
     if not site:
         logger.info(
             "enrich %r: no official website among %d result(s) — honest miss",
@@ -274,10 +313,16 @@ def enrich_lead(
     while queue and checked < 1 + _MAX_CONTACT_PAGES:
         url = queue.pop(0)
         checked += 1
-        result = do_fetch(url, timeout=12.0)
-        if not result.ok or not result.text:
-            continue
-        parsed = parser.parse(result.text, url)
+        if url == site:
+            parsed = home
+        else:
+            result = do_fetch(url, timeout=12.0)
+            if not result.ok or not result.text:
+                continue
+            final_url = getattr(result, "final_url", "") or url
+            if _host(final_url) != _host(site):
+                continue
+            parsed = parser.parse(result.text, final_url)
         emails.extend(clean_emails(parsed.emails))
         if url == site:
             # Contact pages are discovered from the homepage only — a contact

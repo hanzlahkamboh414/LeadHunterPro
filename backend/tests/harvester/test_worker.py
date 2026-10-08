@@ -14,11 +14,13 @@ import time
 from app.harvester.store import HarvesterStore
 from app.harvester.worker import HarvesterWorker
 from app.phones.soda import (
+    DE_TRADE_VALUES,
     TDLR_TRADE_VALUES,
     TRADE_COVERAGE,
     WA_TRADE_VALUES,
     SourceStatus,
 )
+from app.phones.iowa import IA_TRADE_VALUES
 from app.phones.store import PhoneLeadsStore
 
 
@@ -35,8 +37,10 @@ _NOW = datetime.now(timezone.utc)
 def _trade_value(source_id: str, slug: str) -> str:
     """The source's real trade vocabulary for a slug — so a fetched record
     folds back to the SAME slug at ingest (normalize_trade round-trip)."""
-    values = (WA_TRADE_VALUES if source_id == "wa_license"
-              else TDLR_TRADE_VALUES)
+    values = (WA_TRADE_VALUES if source_id == "wa_license" else
+              IA_TRADE_VALUES if source_id == "ia_registration" else
+              DE_TRADE_VALUES if source_id == "de_prequalified" else
+              TDLR_TRADE_VALUES)
     return values[slug][0]
 
 
@@ -53,14 +57,18 @@ class FakeFetch:
         self.calls.append((source_id, slug, city, limit, offset))
         if self.fail:
             return SourceStatus.UNAVAILABLE, [], {"error": "source down"}
-        state = "WA" if source_id == "wa_license" else "TX"
+        state = {"wa_license": "WA", "ia_registration": "IA",
+                 "de_prequalified": "DE",
+                 "tdlr_license": "TX"}[source_id]
         records = [
             {
                 "phone": f"50395734{50 + i}",
                 "person_name": "SMITH, JANE",
                 "business_name": "Acme",
                 "trade_category": _trade_value(source_id, slug),
-                "city": "VANCOUVER" if state == "WA" else "AUSTIN",
+                "city": {"WA": "VANCOUVER", "IA": "DES MOINES",
+                         "DE": "WILMINGTON",
+                         "TX": "AUSTIN"}[state],
                 "state": state,
                 "source": source_id,
                 "license_status": "ACTIVE",

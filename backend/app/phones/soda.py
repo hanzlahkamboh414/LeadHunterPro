@@ -1,7 +1,7 @@
-"""SODA (Socrata Open Data API) license-board connectors — the Phones
-vertical's harvest sources.
+"""Official contractor data connectors for the Phones harvester.
 
-Both datasets were live-verified 2026-09-13 (see lead-source-verification):
+The Washington and Texas SODA datasets were live-verified 2026-09-13
+(see lead-source-verification):
 
 * **Washington L&I Contractor Licenses** — data.wa.gov ``m8qx-ubtq`` (daily
   since 2015). ``primaryprincipalname`` is a REAL person name (LAST, FIRST),
@@ -11,6 +11,10 @@ Both datasets were live-verified 2026-09-13 (see lead-source-verification):
   ``license_type`` is the trade (contractor classes only — cosmetology etc.
   is noise we never request), ``business_telephone``/``owner_telephone``,
   ``business_city_state_zip``. NO email — this is a PHONE source by design.
+
+Iowa's active construction registrations use an official ZIP/NDJSON download
+(:mod:`app.phones.iowa`). Delaware's public-works prequalification roster is
+a small SODA source; it is not a statewide contractor license list.
 
 Structural facts encoded here:
   - Government license data NEVER contains email (verified on every source);
@@ -47,6 +51,7 @@ from typing import Any
 from app.discovery.sources._http import fetch
 from app.discovery.sources.status import SourceStatus
 from app.phones.cslb import CSLB_CLASSIFICATIONS
+from app.phones.iowa import IA_SOURCE_ID, IA_TRADE_VALUES, fetch_ia_records
 from app.source_scout.store import (
     STATUS_PROMOTED,
     ScoutStore,
@@ -58,6 +63,7 @@ logger = logging.getLogger(__name__)
 
 WA_DATASET = "https://data.wa.gov/resource/m8qx-ubtq.json"
 TDLR_DATASET = "https://data.texas.gov/resource/7358-krk7.json"
+DE_PREQUALIFIED_DATASET = "https://data.delaware.gov/resource/g7vn-fpb4.json"
 
 #: data.texas.gov DNS is flaky on some resolvers; pinning the ELB IP
 #: (the curl --resolve workaround, verified 2026-09-13) as an optional knob.
@@ -89,6 +95,19 @@ TDLR_TRADE_VALUES: dict[str, list[str]] = {
     "mechanical": ["A/C Contractor"],
 }
 
+# Delaware's public works prequalification roster is a small, phone-bearing
+# contractor source. Mixed trade classes are deliberately excluded.
+DE_TRADE_VALUES: dict[str, list[str]] = {
+    "gc": ["General Construction"],
+    "electrical": ["Electric Power"],
+    "mechanical": ["Mechanical"],
+    "plumbing": ["Plumbing"],
+    "roofing": ["Roofing"],
+    "painting": ["PAINTING", "Painting"],
+    "concrete": ["Concrete"],
+    "demolition": ["Demolition"],
+}
+
 #: slug -> {state: source_id} — which source can serve which (trade, state).
 #: cslb_portal rows are stocked by the browser bulk-sync (scripts/
 #: sync_cslb.py), NOT by this module's fetch lane — see
@@ -96,9 +115,12 @@ TDLR_TRADE_VALUES: dict[str, list[str]] = {
 TRADE_COVERAGE: dict[str, dict[str, str]] = {
     slug: {**({"WA": "wa_license"} if slug in WA_TRADE_VALUES else {}),
            **({"TX": "tdlr_license"} if slug in TDLR_TRADE_VALUES else {}),
-           **({"CA": "cslb_portal"} if slug in CSLB_CLASSIFICATIONS else {})}
+           **({"CA": "cslb_portal"} if slug in CSLB_CLASSIFICATIONS else {}),
+           **({"IA": IA_SOURCE_ID} if slug in IA_TRADE_VALUES else {}),
+           **({"DE": "de_prequalified"} if slug in DE_TRADE_VALUES else {})}
     for slug in (set(WA_TRADE_VALUES) | set(TDLR_TRADE_VALUES)
-                 | set(CSLB_CLASSIFICATIONS))
+                 | set(CSLB_CLASSIFICATIONS) | set(IA_TRADE_VALUES)
+                 | set(DE_TRADE_VALUES))
 }
 
 #: Sources stocked by a BROWSER bulk-sync, never by fetch_license_records
@@ -308,6 +330,20 @@ def _parse_tdlr_row(row: dict[str, Any]) -> dict[str, Any]:
             row.get("license_expiration_date_mmddccyy", "")
         ),
         "source_url": "https://data.texas.gov/resource/7358-krk7.json",
+    }
+
+
+def _parse_de_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "phone": row.get("phone_number", ""),
+        "person_name": "",
+        "business_name": row.get("company", ""),
+        "trade_category": row.get("trade_classification", ""),
+        "city": row.get("city", ""),
+        "state": row.get("state", ""),
+        "source": "de_prequalified",
+        "license_status": "PREQUALIFIED",
+        "source_url": DE_PREQUALIFIED_DATASET,
     }
 
 
@@ -527,6 +563,15 @@ def fetch_license_records(
         params = _page_params(where, limit, offset)
         status, rows, reason = _fetch_page(TDLR_DATASET, params, TDLR_PINNED_IP)
         meta = {"source": "tdlr_license", "dataset": "7358-krk7"}
+    elif source_id == "de_prequalified":
+        values = ", ".join(f"'{_soql_quote(v)}'" for v in DE_TRADE_VALUES[slug])
+        where = (f"trade_classification IN({values}) AND state='DE' "
+                 f"AND dateexpire >= '{date.today().isoformat()}'")
+        if city:
+            where += f" AND upper(city) = '{_soql_quote(city.strip().upper())}'"
+        params = _page_params(where, limit, offset)
+        status, rows, reason = _fetch_page(DE_PREQUALIFIED_DATASET, params)
+        meta = {"source": "de_prequalified", "dataset": "g7vn-fpb4"}
     elif source_id == "cslb_portal":
         # Browser bulk-sync source (see app.phones.cslb): the F5 edge kills
         # scripted transports, so this lane must never pretend to fetch it.
@@ -535,13 +580,19 @@ def fetch_license_records(
             "error": "browser-synced source — stock via scripts/sync_cslb.py; "
                      "the fetch lane never serves it",
         })
+    elif source_id == IA_SOURCE_ID:
+        return fetch_ia_records(slug, city, limit, offset)
     else:
         # P9: anything else must be a PROMOTED scout source — quarantine
         # and retired sources get the same honest unknown_source refusal.
         return _fetch_scout_records(source_id, slug, city, limit, offset)
 
     if status == SourceStatus.SUCCESS:
-        parse = _parse_wa_row if source_id == "wa_license" else _parse_tdlr_row
+        parse = {
+            "wa_license": _parse_wa_row,
+            "tdlr_license": _parse_tdlr_row,
+            "de_prequalified": _parse_de_row,
+        }[source_id]
         records = [parse(r) for r in rows]
         meta["rows_fetched"] = len(rows)
         meta["offset"] = offset

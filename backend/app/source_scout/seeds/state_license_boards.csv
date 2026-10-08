@@ -25,7 +25,7 @@ UT,DOPL,Division of Professional Licensing,https://dopl.utah.gov,"electrical,mec
 TN,BC,Board for Licensing Contractors,https://www.tn.gov/commerce,gc,24,12692,,
 SC,LLR,Dept of Labor Licensing & Reg,https://llr.sc.gov,gc,25,11981,,"GC + residential; specialty licenses exist; official licensee-list request form; free bulk feed pending"
 ID,,none,,none,26,9895,,no state-level contractor license (local)
-IA,,none,,none,27,9067,,no state-level license (local)
+IA,DIAL,Department of Inspections Appeals and Licensing,https://data.iowa.gov/catalog/dataset/1052,construction_registration,27,9067,bulk_file,"official active-contractor ZIP/JSON with phone and activity; ia_registration harvester connector"
 AL,ALBCB,Licensing Board for General Contractors,,gc,28,8982,,"url_unverified"
 OK,CIB,Construction Industries Board,https://ok.gov/cib,"gc,electrical,mechanical,plumbing",29,8966,,
 LA,LSLBC,State Licensing Board for Contractors,https://www.lslbc.louisiana.gov,all_trades,30,8900,,"official roster request portal; free bulk feed pending"
@@ -47,6 +47,6 @@ WY,,none,,none,45,2981,,no state-level license (local)
 ND,,none,,none,46,2946,,no state-level license (local)
 HI,DCCA,Contractors License Board,https://cca.hawaii.gov,all_trades,47,2924,,
 VT,OPR,Office of Professional Regulation,https://opr.vermont.gov,all_trades,48,2870,open_data_api,"master ed list verified; already promoted"
-AK,,none,,none,49,2627,,no state-level GC license (local)
-DE,,none,,none,50,2518,,no state-level license (local)
+AK,CBPL,Division of Corporations Business and Professional Licensing,https://www.commerce.alaska.gov/web/cbpl/ProfessionalLicensing/ConstructionContractors/MiscForms,contractor_registration,49,2627,lookup_only,"state registers general mechanical handyman and specialty contractors; public bulk phone feed not verified"
+DE,OMB,Division of Facilities Management,https://data.delaware.gov/Economic-Development/Public-Works-Annually-Prequalified-Contractors-Sub/g7vn-fpb4,public_works_prequalification,50,2518,open_data_api,"small official prequalified contractor roster with phone and trade; de_prequalified harvester connector; not a statewide license roster"
 DC,DCRA,Dept of Consumer & Regulatory Affairs,https://dcra.dc.gov,all_trades,51,506,,"GC + specialty licenses"

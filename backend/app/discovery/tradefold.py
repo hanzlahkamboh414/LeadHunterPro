@@ -118,7 +118,7 @@ _TRADE_ALIASES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("gc", re.compile(
         r"\bgeneral\s+contract(or|ing)\b|\bgeneral_contractor\b"
         r"|\bgc\b|\bconstruction\s*(company|contract(or|ing))?\b"
-        r"|\bbuilding\s+contractor\b|\bremodel(er|ing)\b|\brenovat(or|ion)\b"
+        r"|\bbuilding\s+contractor\b|\bremodel(ers?|ing)\b|\brenovat(or|ion)\b"
         r"|\bgeneral\b")),
 )
 

@@ -60,6 +60,38 @@ def test_finds_email_on_homepage():
     assert calls["search"] == 1  # one search, not a loop
 
 
+def test_unrelated_search_result_cannot_attach_its_email_to_phone_lead():
+    lead = _lead(
+        business="MICAHS CONCRETE LLC",
+        person_name="Cristopher Fernandez-Almanza",
+        city="CAREYWOOD", state="ID", phone="+12088196921",
+    )
+    def fetch(url, **kw):
+        if "sultangrill" in url:
+            return _Page("<title>Sultan Grill</title>bokabord@sultangrill.se")
+        return _Page("<title>Micahs Concrete</title>info@micahsconcrete.com")
+
+    out = enrich_lead(
+        lead,
+        overture_fn=lambda phone: {},
+        search_fn=lambda q, n: ["https://www.sultangrill.se/",
+                                 "https://micahsconcrete.com/"],
+        fetch_fn=fetch, infer_fn=_no_infer,
+    )
+    assert out["email"] == "info@micahsconcrete.com"
+    assert out["website"] == "https://micahsconcrete.com/"
+
+
+def test_unrelated_domain_email_on_verified_site_is_not_selected():
+    out = enrich_lead(
+        _lead(), overture_fn=lambda phone: {},
+        search_fn=lambda q, n: ["https://acmegc.com"],
+        fetch_fn=lambda u, **kw: _Page("vendor@unrelated.example"),
+        infer_fn=_no_infer,
+    )
+    assert out["email"] == ""
+
+
 @pytest.mark.parametrize("fails", [False, True])
 def test_default_search_closes_provider_in_its_own_loop(monkeypatch, fails):
     """One-shot phone searches cannot leak a loop-bound provider session."""

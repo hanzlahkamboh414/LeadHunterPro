@@ -23,20 +23,21 @@ from app.phones.soda import (
 # ---------------------------------------------------------------------------
 
 def test_coverage_wa_trades():
-    assert covered_sources("gc") == ["cslb_portal", "wa_license"]
-    assert covered_sources("drywall") == ["cslb_portal", "wa_license"]
-    assert covered_sources("demolition") == ["cslb_portal", "wa_license"]
+    assert covered_sources("gc") == ["cslb_portal", "de_prequalified", "ia_registration", "wa_license"]
+    assert covered_sources("drywall") == ["cslb_portal", "ia_registration", "wa_license"]
+    assert covered_sources("demolition") == ["cslb_portal", "de_prequalified", "wa_license"]
 
 
 def test_coverage_tx_trades():
-    assert covered_sources("electrical") == ["cslb_portal", "tdlr_license"]
+    assert covered_sources("electrical") == ["cslb_portal", "de_prequalified", "ia_registration", "tdlr_license"]
 
 
-def test_coverage_mechanical_spans_three_states():
+def test_coverage_mechanical_spans_four_states():
     """mechanical (HVAC) is served by WA specialties, TDLR A/C, and the
     CSLB bulk-sync (C-4/C-20)."""
     assert TRADE_COVERAGE["mechanical"] == {
         "WA": "wa_license", "TX": "tdlr_license", "CA": "cslb_portal",
+        "DE": "de_prequalified",
     }
 
 
@@ -44,6 +45,7 @@ def test_coverage_state_filter():
     assert covered_sources("gc", "WA") == ["wa_license"]
     assert covered_sources("gc", "TX") == []  # TX does not license GCs
     assert covered_sources("gc", "CA") == ["cslb_portal"]
+    assert covered_sources("gc", "DE") == ["de_prequalified"]
     assert covered_sources("electrical", "WA") == []  # WA: separate program
     assert covered_sources("electrical", "TX") == ["tdlr_license"]
 
@@ -103,7 +105,7 @@ TDLR_ROW = {
     "business_telephone": "5125637173",
     "owner_telephone": "5125637173",
     "owner_name": "INFINITE POWER LLC",
-    "license_expiration_date_mmddccyy": "10/06/2026",
+    "license_expiration_date_mmddccyy": "10/06/2030",
 }
 
 
@@ -126,6 +128,40 @@ def test_parse_tdlr_row_active_and_expired():
     assert soda._parse_tdlr_row(expired)["license_status"] == "EXPIRED"
     garbage = dict(TDLR_ROW, license_expiration_date_mmddccyy="")
     assert soda._parse_tdlr_row(garbage)["license_status"] == ""
+
+
+def test_parse_de_prequalified_row():
+    row = {"company": "A-Del Construction", "city": "Newark", "state": "DE",
+           "phone_number": "(302) 453-8286", "trade_classification": "Concrete"}
+    rec = soda._parse_de_row(row)
+    assert rec["phone"] == "(302) 453-8286"
+    assert rec["business_name"] == "A-Del Construction"
+    assert rec["trade_category"] == "Concrete"
+    assert rec["state"] == "DE"
+    assert rec["person_name"] == ""
+    assert rec["license_status"] == "PREQUALIFIED"
+
+
+def test_fetch_de_prequalified_query(monkeypatch):
+    calls = {}
+
+    def _fake_page(url, params, pinned_ip=""):
+        calls.update(url=url, params=params)
+        return SourceStatus.SUCCESS, [{"company": "A-Del Construction",
+                                      "phone_number": "(302) 453-8286",
+                                      "trade_classification": "Concrete",
+                                      "city": "Newark", "state": "DE"}], ""
+
+    monkeypatch.setattr(soda, "_fetch_page", _fake_page)
+    status, records, meta = fetch_license_records(
+        "de_prequalified", "concrete", city="Newark", limit=20, offset=1)
+    assert status == SourceStatus.SUCCESS
+    assert records[0]["source"] == "de_prequalified"
+    assert calls["url"] == soda.DE_PREQUALIFIED_DATASET
+    assert "state='DE'" in calls["params"]["$where"]
+    assert "upper(city) = 'NEWARK'" in calls["params"]["$where"]
+    assert calls["params"]["$offset"] == "1"
+    assert meta["rows_fetched"] == 1
 
 
 def test_parse_tdlr_row_multiword_city():

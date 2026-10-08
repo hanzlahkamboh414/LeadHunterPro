@@ -62,8 +62,8 @@ from app.campaigns.store import CampaignStore
 from app.campaigns.templates import context_for, render, render_email_body
 from app.email_accounts import google, smtp
 from app.email_accounts.store import EmailAccountStore
-from app.lead_research.models import CRM_STATUSES
-from app.lead_research.service import LeadResearchStore, PendingLeadsStore
+from app.lead_research.models import CRM_STATUSES, LeadDossier
+from app.lead_research.service import LeadResearchService, LeadResearchStore, PendingLeadsStore
 
 logger = logging.getLogger(__name__)
 
@@ -590,7 +590,8 @@ class CampaignScheduler:
 
         # The independent worker must record a safe preflight before any send.
         # Unknown DNS and suspicious syntax stay queued and never reach SMTP.
-        if self._verifier is not None and self._verifier.status(send["email"]) != "ready":
+        if self._verifier is not None and self._store.email_check_status(
+                send["email"], allow_domain_ready=c.get("audience_source") == "own_list") != "ready":
             return
 
         # Honour the campaign's gap across all its accounts, and the same
@@ -612,6 +613,36 @@ class CampaignScheduler:
 
         # The lead's dossier is the ONLY source of template facts.
         dossier = self._lead_store.get(send["email"])
+        if dossier is None and c.get("audience_source") == "own_list":
+            try:
+                domain = send["email"].rsplit("@", 1)[-1]
+                needs_research = bool(c.get("ai_compose") or c.get("ai_personalize"))
+                researched = (
+                    LeadResearchService(store=self._lead_store).agent.research(
+                        send["email"], domain)
+                    if needs_research
+                    else LeadDossier(email=send["email"], domain=domain,
+                                     recommendation="nurture")
+                )
+                if researched.email.strip().lower() != send["email"].lower():
+                    raise ValueError("Research returned another email address")
+                if researched.recommendation == "skip":
+                    self._store.mark_skipped(send["id"], error="recipient research was not suitable")
+                    self._store.mark_completed_if_drained(c["id"])
+                    stats["skipped"] += 1
+                    return
+                if needs_research:
+                    self._lead_store.save(researched, user_id=c["user_id"])
+                dossier = researched
+            except Exception as exc:  # noqa: BLE001 — never send without research
+                logger.warning("recipient research failed for campaign %d, %s: %s",
+                               c["id"], send["email"], exc)
+                if send["attempts"] + 1 >= MAX_ATTEMPTS:
+                    self._store.mark_failed(send["id"], error="recipient research failed")
+                    self._store.mark_completed_if_drained(c["id"])
+                else:
+                    self._store.bump_attempts(send["id"])
+                return
         if dossier is None:
             self._store.mark_failed(send["id"], error="lead dossier not found")
             self._store.mark_completed_if_drained(c["id"])
@@ -650,6 +681,7 @@ class CampaignScheduler:
                         self._ai_ask, dossier, campaign_name=c["name"],
                         angle=subject_tmpl or c["subject"], brief=brief,
                         signature=signature,
+                        sender_profile=c.get("sender_profile", ""),
                         step=send["step"],
                         previous_email=previous_body,
                     )

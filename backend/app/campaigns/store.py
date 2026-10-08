@@ -243,6 +243,12 @@ class CampaignStore:
             if "ai_signature" not in cols:
                 conn.execute("ALTER TABLE campaigns "
                              "ADD COLUMN ai_signature TEXT NOT NULL DEFAULT ''")
+            if "audience_source" not in cols:
+                conn.execute("ALTER TABLE campaigns "
+                             "ADD COLUMN audience_source TEXT NOT NULL DEFAULT 'leads'")
+            if "sender_profile" not in cols:
+                conn.execute("ALTER TABLE campaigns "
+                             "ADD COLUMN sender_profile TEXT NOT NULL DEFAULT ''")
             if "early_resume_date" not in cols:
                 conn.execute("ALTER TABLE campaigns "
                              "ADD COLUMN early_resume_date TEXT NOT NULL DEFAULT ''")
@@ -307,6 +313,8 @@ class CampaignStore:
         ai_compose: bool = False,
         ai_signature: str = "",
         recipient_limit: int | None = None,
+        audience_source: str = "leads",
+        sender_profile: str = "",
     ) -> dict[str, Any]:
         """One campaign + its pending step-0 send queue (insertion order =
         send order) + its follow-up definitions (steps 1..N). Duplicate
@@ -355,12 +363,13 @@ class CampaignStore:
         cur = conn.execute(
             "INSERT INTO campaigns (user_id, account_id, name, subject, body, "
             "status, start_at, daily_limit, delay_min_s, delay_max_s, "
-            "ai_personalize, ai_compose, ai_signature, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "ai_personalize, ai_compose, ai_signature, audience_source, "
+            "sender_profile, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (user_id, account_id, name, subject, body, start_at,
              int(daily_limit), int(delay_min_s), int(delay_max_s),
              1 if ai_personalize else 0, 1 if ai_compose else 0,
-             ai_signature.strip(), now, now),
+             ai_signature.strip(), audience_source, sender_profile.strip(), now, now),
         )
         campaign_id = cur.lastrowid
         conn.executemany(
@@ -389,7 +398,7 @@ class CampaignStore:
                       "paused_reason, resume_at, start_at, daily_limit, "
                       "delay_min_s, delay_max_s, ai_personalize, "
                       "created_at, updated_at, early_resume_date, "
-                      "ai_compose, ai_signature")
+                      "ai_compose, ai_signature, audience_source, sender_profile")
 
     def get(self, campaign_id: int, user_id: str) -> dict[str, Any] | None:
         """One campaign (None when missing or not the caller's) + progress."""
@@ -564,6 +573,8 @@ class CampaignStore:
             "early_resume_date": r[16] or "",
             "ai_compose": bool(r[17]),
             "ai_signature": r[18] or "",
+            "audience_source": r[19] or "leads",
+            "sender_profile": r[20] or "",
             "pending": counts.get("pending", 0),
             "sent": counts.get("sent", 0),
             "failed": counts.get("failed", 0),
@@ -630,10 +641,17 @@ class CampaignStore:
             where += " AND (not_before = '' OR not_before <= ?)"
             params.append(now_iso)
         if verified_only:
-            where += (" AND EXISTS (SELECT 1 FROM campaign_email_checks v "
+            where += (" AND (EXISTS (SELECT 1 FROM campaign_email_checks v "
                       "WHERE v.email = campaign_sends.email AND v.status = 'ready' "
                       "AND v.reason IN ('mails.so:deliverable', "
                       "'first-party:reply-confirmed'))")
+            where += (" OR EXISTS ("
+                      "SELECT 1 FROM campaigns c JOIN campaign_email_checks v "
+                      "ON v.email = campaign_sends.email "
+                      "WHERE c.id = campaign_sends.campaign_id "
+                      "AND c.audience_source = 'own_list' AND v.status = 'ready' "
+                      "AND v.reason IN ('MX record found', "
+                      "'address record mail fallback'))) ")
         conn = self._conn()
         row = conn.execute(
             f"SELECT id, email, step, attempts FROM campaign_sends "
@@ -656,15 +674,17 @@ class CampaignStore:
         conn.close()
         return (row[0] or "") if row else ""
 
-    def email_check_status(self, email: str) -> str | None:
+    def email_check_status(self, email: str, *, allow_domain_ready: bool = False) -> str | None:
         conn = self._conn()
         row = conn.execute(
             "SELECT status, checked_at, reason FROM campaign_email_checks WHERE email = ?",
             ((email or "").strip().lower(),),
         ).fetchone()
         conn.close()
-        if row and row[0] == "ready" and row[2] not in (
-                "mails.so:deliverable", "first-party:reply-confirmed"):
+        accepted_reasons = {"mails.so:deliverable", "first-party:reply-confirmed"}
+        if allow_domain_ready:
+            accepted_reasons.update({"MX record found", "address record mail fallback"})
+        if row and row[0] == "ready" and row[2] not in accepted_reasons:
             return "hold"
         if row and row[0] == "ready":
             cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
@@ -697,6 +717,7 @@ class CampaignStore:
         conn = self._conn()
         rows = conn.execute(
             "SELECT lower(s.email) FROM campaign_sends s "
+            "JOIN campaigns c ON c.id = s.campaign_id "
             "LEFT JOIN campaign_email_checks v ON v.email = s.email "
             "WHERE s.state = 'pending' AND (v.email IS NULL "
             "OR v.status = 'invalid' "
@@ -708,8 +729,10 @@ class CampaignStore:
             "OR (v.status = 'hold' AND v.checked_at <= ? "
             "AND (v.reason LIKE 'builtin:%' OR v.reason LIKE 'smtp-probe:%')) "
             "OR (v.status = 'ready' AND (v.checked_at <= ? "
-            "OR v.reason NOT IN ('mails.so:deliverable', "
-            "'first-party:reply-confirmed')))) "
+            "OR (v.reason NOT IN ('mails.so:deliverable', "
+            "'first-party:reply-confirmed') "
+            "AND NOT (c.audience_source = 'own_list' AND v.reason IN "
+            "('MX record found', 'address record mail fallback')))))) "
             "GROUP BY lower(s.email) "
             "ORDER BY COALESCE(v.checked_at, '') ASC, MIN(s.step), MIN(s.id) LIMIT ?",
             (retry_before, provider_retry_before, builtin_retry_before,

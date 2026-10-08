@@ -1066,9 +1066,12 @@ function CampaignBuilder({
   const [aiPersonalize, setAiPersonalize] = useState(false);
   const [aiCompose, setAiCompose] = useState(true);
   const [aiSignature, setAiSignature] = useState("");
+  const [senderProfile, setSenderProfile] = useState("");
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
   const [folder, setFolder] = useState("*");
+  const [audienceSource, setAudienceSource] = useState<"leads" | "own_list">("leads");
+  const [ownEmailsText, setOwnEmailsText] = useState("");
   const [quantity, setQuantity] = useState(50);
   const [recommendation, setRecommendation] = useState("contact_now");
   const [startAt, setStartAt] = useState(defaultStart());
@@ -1105,9 +1108,14 @@ function CampaignBuilder({
   const pool = useQuery({
     queryKey: ["campaign-available", folder, recommendation, quantity],
     queryFn: () => api.campaignAvailableLeads({ count: quantity, folder, recommendation }),
-    enabled: connected.length > 0 && quantity >= 1 && quantity <= 500,
+    enabled: audienceSource === "leads" && connected.length > 0 && quantity >= 1 && quantity <= 500,
   });
   const poolEmails = pool.data?.emails || [];
+  const ownEmails = Array.from(new Set((ownEmailsText.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || [])
+    .map((email) => email.toLowerCase())));
+  const audienceReady = audienceSource === "own_list"
+    ? ownEmails.length >= 1 && ownEmails.length <= 500
+    : poolEmails.length === quantity && !pool.isFetching;
 
   const create = useMutation({
     mutationFn: () => {
@@ -1127,9 +1135,11 @@ function CampaignBuilder({
         account_ids: extraIds.filter((id) => id !== accountId),
         subject,
         body,
-        audience_count: quantity,
-        audience_folder: folder,
-        audience_recommendation: recommendation,
+        audience_source: audienceSource,
+        ...(audienceSource === "own_list"
+          ? { emails: ownEmails }
+          : { audience_count: quantity, audience_folder: folder,
+              audience_recommendation: recommendation }),
         start_at: new Date(startAt).toISOString(),
         daily_limit: dailyLimit,
         delay_min_s: delayMin,
@@ -1138,6 +1148,7 @@ function CampaignBuilder({
         ai_personalize: aiPersonalize,
         ai_compose: aiCompose,
         ai_signature: aiSignature,
+        sender_profile: senderProfile,
       });
     },
     onSuccess: (r) => {
@@ -1171,7 +1182,9 @@ function CampaignBuilder({
 
   const canCreate =
     name.trim() && accountId && subject.trim() && body.trim() &&
-    (!aiCompose || aiSignature.trim()) && poolEmails.length === quantity && !pool.isFetching && startAt &&
+    (!aiCompose || aiSignature.trim()) &&
+    (audienceSource !== "own_list" || !aiCompose || senderProfile.trim()) &&
+    audienceReady && startAt &&
     delayMin >= 20 && delayMin <= 3600 && delayMax >= delayMin && delayMax <= 7200 &&
     dailyLimit >= 1 && dailyLimit <= 200 &&
     (!fu1On || (fu1Days >= 1 && fu1Days <= 30)) &&
@@ -1184,12 +1197,14 @@ function CampaignBuilder({
     (!fu1On || (fu1Days >= 1 && fu1Days <= 30)) &&
     (!fu2On || (fu2Days >= 1 && fu2Days <= 30)) &&
     (!fu3On || (fu3Days >= 1 && fu3Days <= 30));
-  const audienceValid = quantity >= 1 && quantity <= 500 && Number.isInteger(quantity) &&
-    poolEmails.length === quantity && !pool.isFetching && !!startAt &&
+  const audienceValid = (audienceSource === "own_list" ||
+    (quantity >= 1 && quantity <= 500 && Number.isInteger(quantity))) &&
+    audienceReady && !!startAt &&
     delayMin >= 20 && delayMin <= 3600 && delayMax >= delayMin && delayMax <= 7200 &&
     dailyLimit >= 1 && dailyLimit <= 200;
   const canContinue = step === 1 ? !!name.trim()
-    : step === 3 ? !!(subject.trim() && body.trim() && (!aiCompose || aiSignature.trim()))
+    : step === 3 ? !!(subject.trim() && body.trim() && (!aiCompose || aiSignature.trim()) &&
+      (audienceSource !== "own_list" || !aiCompose || senderProfile.trim()))
     : step === 4 ? !!followupsValid
     : step === 5 ? !!audienceValid : true;
   const steps = ["Name", "Mode", "Message", "Follow-ups", "Audience & timing", "Sending accounts"];
@@ -1359,6 +1374,12 @@ function CampaignBuilder({
               <textarea className={`${input} mt-1 h-24 resize-y`} maxLength={2000} value={aiSignature} onChange={(e) => setAiSignature(e.target.value)} placeholder={"Your name\nCompany\nContact details"} />
               <span className="mt-1 block text-[11.5px] text-slate-500">This exact text is added to every AI-written email in this campaign.</span>
             </label>}
+            {aiCompose && <label className="mt-3 block text-[12px] text-slate-300">About your company
+              <textarea className={`${input} mt-1 h-28 resize-y`} maxLength={4000}
+                value={senderProfile} onChange={(e) => setSenderProfile(e.target.value)}
+                placeholder="What your company does, who you help, your real strengths and proof, and what you want to offer." />
+              <span className="mt-1 block text-[11.5px] text-slate-500">AI combines this with each recipient's research. Required for your own list.</span>
+            </label>}
             {!aiCompose && <label className="mt-3 block text-[12px] text-slate-300">Follow-up sign-off (optional)
               <textarea className={`${input} mt-1 h-24 resize-y`} maxLength={2000} value={aiSignature} onChange={(e) => setAiSignature(e.target.value)} placeholder="Your name, title and company" />
               <span className="mt-1 block text-[11.5px] text-slate-500">AI writes follow-ups in this mode too. Leave blank to use the sign-off in your email script.</span>
@@ -1420,6 +1441,38 @@ function CampaignBuilder({
           )}
 
           {step === 5 && <>
+          <div className="mt-3 grid gap-2 sm:grid-cols-2" role="group" aria-label="Choose recipient source">
+            <button type="button" aria-pressed={audienceSource === "leads"}
+              onClick={() => setAudienceSource("leads")}
+              className={`min-h-16 rounded-lg border p-3 text-left text-sm ${audienceSource === "leads" ? "border-indigo-400 bg-indigo-500/15 text-white" : "border-white/10 text-slate-300 hover:bg-white/5"}`}>
+              Unused leads in Companies
+            </button>
+            <button type="button" aria-pressed={audienceSource === "own_list"}
+              onClick={() => setAudienceSource("own_list")}
+              className={`min-h-16 rounded-lg border p-3 text-left text-sm ${audienceSource === "own_list" ? "border-indigo-400 bg-indigo-500/15 text-white" : "border-white/10 text-slate-300 hover:bg-white/5"}`}>
+              My own email list
+            </button>
+          </div>
+          {audienceSource === "own_list" && <div className="mt-3 rounded-lg border border-white/10 bg-white/[0.03] p-3.5">
+            <label className="block text-[12px] text-slate-300" htmlFor="campaign-own-emails">Paste email addresses</label>
+            <textarea id="campaign-own-emails" className={`${input} mt-1 h-36 resize-y`}
+              value={ownEmailsText} onChange={(e) => setOwnEmailsText(e.target.value)}
+              placeholder={"name@company.com\nanother@company.com"} />
+            <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
+              <span>{ownEmails.length} unique addresses found · maximum 500</span>
+              <label className="cursor-pointer rounded-lg border border-white/15 px-3 py-2 text-slate-200 hover:bg-white/5">
+                Import .csv or .txt
+                <input type="file" accept=".csv,.txt,text/csv,text/plain" className="sr-only"
+                  onChange={async (event) => {
+                    const file = event.target.files?.[0];
+                    if (file) setOwnEmailsText(await file.text());
+                    event.target.value = "";
+                  }} />
+              </label>
+            </div>
+            <p className="mt-2 text-xs text-slate-500">Repeated, already sent, bounced and opted-out addresses are excluded. A domain mail-route check cannot confirm an individual inbox; delivery can still fail.</p>
+          </div>}
+          {audienceSource === "leads" && <>
           <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label className="text-[12px] text-slate-400">Choose leads from</label>
@@ -1453,9 +1506,12 @@ function CampaignBuilder({
               </select>
             </div>
           </div>
+          </>}
 
           <div className="mt-2 rounded-lg bg-white/[0.03] border border-white/5 px-3.5 py-2.5 text-[12.5px] text-slate-400">
-            {quantity < 1 || quantity > 500 || !Number.isInteger(quantity) ? (
+            {audienceSource === "own_list" ? (
+              <span className="text-slate-200 font-semibold">{ownEmails.length} unique addresses to check and research before sending.</span>
+            ) : quantity < 1 || quantity > 500 || !Number.isInteger(quantity) ? (
               "Choose a whole number from 1 to 500."
             ) : pool.isFetching ? (
               "Checking unused leads…"
@@ -1504,12 +1560,14 @@ function CampaignBuilder({
             <h3 className="text-sm font-semibold text-white">Review before scheduling</h3>
             <p className="mt-2">Campaign: <strong className="text-white">{name || "—"}</strong></p>
             <p className="mt-1">Mode: {aiCompose ? "AI writes each email" : "Your email script"}</p>
-            <p className="mt-1">Recipients: {quantity} from {folder === "*" ? "all unused leads" : folder}</p>
+            <p className="mt-1">Recipients: {audienceSource === "own_list" ? `${ownEmails.length} from your own list` : `${quantity} from ${folder === "*" ? "all unused leads" : folder}`}</p>
             <p className="mt-1">Start: {startAt ? startAt.replace("T", " ") : "—"} · {dailyLimit} per account daily</p>
             <p className="mt-1">Follow-ups: {[fu1On, fu2On, fu3On].filter(Boolean).length}</p>
             {!name.trim() && <p className="mt-2 text-amber-300">Add a campaign name in Step 1.</p>}
             {(!subject.trim() || !body.trim() || (aiCompose && !aiSignature.trim())) &&
               <p className="mt-2 text-amber-300">Complete the message{aiCompose ? " and sign-off" : ""} in Step 3.</p>}
+            {audienceSource === "own_list" && aiCompose && !senderProfile.trim() &&
+              <p className="mt-2 text-amber-300">Describe your company in Step 3 so AI can tailor each message.</p>}
             {!followupsValid && <p className="mt-2 text-amber-300">Complete the enabled follow-ups in Step 4.</p>}
             {!audienceValid && <p className="mt-2 text-amber-300">Review Audience & timing: enough unused leads and valid sending limits are required.</p>}
             {!accountId && <p className="mt-2 text-amber-300">Choose a sending account above.</p>}

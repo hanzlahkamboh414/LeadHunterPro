@@ -24,6 +24,8 @@ class CampaignCreateIn(BaseModel):
     subject: str = Field(min_length=1, max_length=500)
     body: str = Field(min_length=1, max_length=20000)
     emails: list[str] = Field(default_factory=list, max_length=500)
+    audience_source: str = Field(default="leads", pattern="^(leads|own_list)$")
+    sender_profile: str = Field(default="", max_length=4000)
     audience_count: int | None = Field(default=None, ge=1, le=500)
     audience_folder: str = Field(default="*", max_length=200)
     audience_recommendation: str = Field(default="contact_now", max_length=40)
@@ -89,6 +91,8 @@ class CampaignOut(BaseModel):
     ai_personalize: bool = False
     ai_compose: bool = False
     ai_signature: str = ""
+    audience_source: str = "leads"
+    sender_profile: str = ""
     created_at: str
     updated_at: str
     pending: int

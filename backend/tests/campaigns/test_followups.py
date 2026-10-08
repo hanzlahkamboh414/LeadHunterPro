@@ -106,6 +106,88 @@ def _make_campaign(ctx, *, emails=("jane@acme.com",), followups=None):
     )
 
 
+def test_own_list_researches_recipient_and_uses_sender_profile(tmp_path, monkeypatch):
+    import app.campaigns.scheduler as scheduler_module
+    from app.campaigns.pre_send_verifier import CampaignEmailVerifier
+
+    prompts = []
+    ctx = _setup(tmp_path, monkeypatch, ai_ask=lambda prompt: (
+        prompts.append(prompt) or
+        '{"subject":"Project estimates","body":"We can prepare a sample estimate for your review."}'
+    ))
+    email = "joel@builder.example"
+    researched = []
+
+    class ResearchServiceStub:
+        def __init__(self, **_kwargs):
+            self.agent = self
+
+        def research(self, address, domain):
+            researched.append((address, domain))
+            return _dossier(address)
+
+    monkeypatch.setattr(scheduler_module, "LeadResearchService", ResearchServiceStub)
+    monkeypatch.setattr(google, "send_gmail", lambda *_args, **_kwargs: {})
+    campaign = ctx["store"].create(
+        ctx["user"].id, account_id=ctx["account_id"], name="My list",
+        subject="Introduce our service", body="Offer a sample estimate",
+        emails=[email], start_at=_iso(NOW - timedelta(minutes=1)),
+        ai_compose=True, ai_signature="Usman\nThe Best Estimator LLC",
+        audience_source="own_list",
+        sender_profile="The Best Estimator LLC provides material takeoffs and bid prep.",
+    )
+    verifier = CampaignEmailVerifier(
+        ctx["store"], ctx["leads"],
+        domain_check=lambda _domain: ("ready", "MX record found"),
+    )
+    ctx["sched"]._verifier = verifier
+    assert verifier.run_once()["ready"] == 1
+    assert ctx["leads"].get(email) is None
+    assert ctx["sched"].run_once()["sent"] == 1
+    assert researched == [(email, "builder.example")]
+    assert ctx["leads"].get(email) is not None
+    assert "The Best Estimator LLC provides material takeoffs" in prompts[0]
+    assert ctx["store"].get(campaign["id"], ctx["user"].id)["sender_profile"]
+
+
+def test_own_list_api_requires_company_details_for_ai(tmp_path, monkeypatch):
+    ctx = _setup(tmp_path, monkeypatch)
+    payload = {
+        "name": "My list", "account_id": ctx["account_id"],
+        "subject": "Introduce our service", "body": "Offer a sample estimate",
+        "audience_source": "own_list", "emails": ["joel@builder.example"],
+        "start_at": _iso(NOW + timedelta(days=1)), "ai_compose": True,
+    }
+    response = ctx["client"].post("/api/v1/campaigns", json=payload)
+    assert response.status_code == 422
+    response = ctx["client"].post("/api/v1/campaigns", json={
+        **payload, "sender_profile": "We provide cost estimates for builders."})
+    assert response.status_code == 200, response.text
+    assert response.json()["campaign"]["audience_source"] == "own_list"
+
+
+def test_own_list_script_mode_sends_without_ai_research(tmp_path, monkeypatch):
+    from app.campaigns.pre_send_verifier import CampaignEmailVerifier
+
+    ctx = _setup(tmp_path, monkeypatch)
+    sent = []
+    monkeypatch.setattr(google, "send_gmail", lambda _token, **kw: sent.append(kw))
+    ctx["store"].create(
+        ctx["user"].id, account_id=ctx["account_id"], name="My script",
+        subject="Sample estimate", body="I can share a sample estimate.",
+        emails=["joel@builder.example"], start_at=_iso(NOW - timedelta(minutes=1)),
+        audience_source="own_list",
+    )
+    verifier = CampaignEmailVerifier(
+        ctx["store"], ctx["leads"],
+        domain_check=lambda _domain: ("ready", "MX record found"),
+    )
+    ctx["sched"]._verifier = verifier
+    assert verifier.run_once()["ready"] == 1
+    assert ctx["sched"].run_once()["sent"] == 1
+    assert sent[0]["to"] == "joel@builder.example"
+
+
 _FU = [{"after_days": 3, "subject": "Re: {{company_name}} estimating",
         "body": "Hi {{first_name}}, following up."}]
 

@@ -12,6 +12,7 @@ import logging
 import os
 import smtplib
 from datetime import date, datetime, timedelta, timezone
+from email_validator import EmailNotValidError, validate_email
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
@@ -172,17 +173,29 @@ def create_campaign(
         raise HTTPException(status_code=422,
                             detail="delay_min_s must be <= delay_max_s")
     _validate_outreach_copy(body.body, body.followups)
+    if body.audience_source == "own_list" and body.ai_compose and not body.sender_profile.strip():
+        raise HTTPException(422, "Describe your company before using AI with your own list")
 
     start_at = _validate_start_at(body.start_at)
 
     store = get_campaign_store()
-    requested = (
-        _available_lead_emails(
-            user, count=body.audience_count,
-            folder=body.audience_folder,
-            recommendation=body.audience_recommendation,
-        ) if body.audience_count is not None else body.emails
-    )
+    if body.audience_source == "own_list":
+        if body.audience_count is not None or not body.emails:
+            raise HTTPException(422, "Add at least one email to your own list")
+        try:
+            supplied = [validate_email(email, check_deliverability=False).normalized.lower()
+                        for email in body.emails]
+        except EmailNotValidError as exc:
+            raise HTTPException(422, f"Invalid email in your list: {exc}") from exc
+        requested = list(dict.fromkeys(supplied))
+    else:
+        requested = (
+            _available_lead_emails(
+                user, count=body.audience_count,
+                folder=body.audience_folder,
+                recommendation=body.audience_recommendation,
+            ) if body.audience_count is not None else body.emails
+        )
     if body.audience_count is not None and len(requested) < body.audience_count:
         raise HTTPException(
             status_code=422,
@@ -209,6 +222,8 @@ def create_campaign(
             ai_compose=body.ai_compose,
             ai_signature=body.ai_signature,
             recipient_limit=body.audience_count,
+            audience_source=body.audience_source,
+            sender_profile=body.sender_profile,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

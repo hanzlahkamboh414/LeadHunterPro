@@ -98,3 +98,20 @@ def test_held_address_does_not_block_verified_address(tmp_path):
     store.save_email_check("hold@slow.test", "hold", "DNS unavailable")
     store.save_email_check("ready@acme.com", "ready", "first-party:reply-confirmed")
     assert store.next_pending(campaign["id"], verified_only=True)["email"] == "ready@acme.com"
+
+
+def test_own_list_uses_domain_route_without_leaking_other_campaigns(tmp_path):
+    store = CampaignStore(db_path=str(tmp_path / "campaigns.db"))
+    regular = store.create(
+        "u1", account_id=1, name="regular", subject="s", body="b",
+        emails=["regular@acme.com"], start_at=_iso(NOW))
+    own = store.create(
+        "u1", account_id=1, name="own", subject="s", body="b",
+        emails=["own@acme.com"], start_at=_iso(NOW),
+        audience_source="own_list")
+    store.save_email_check("regular@acme.com", "ready", "MX record found")
+    store.save_email_check("own@acme.com", "ready", "MX record found")
+    assert store.next_pending(regular["id"], verified_only=True) is None
+    assert store.next_pending(own["id"], verified_only=True)["email"] == "own@acme.com"
+    assert store.email_check_status("own@acme.com", allow_domain_ready=True) == "ready"
+    assert store.emails_to_verify(retry_before="", ready_before="") == ["regular@acme.com"]

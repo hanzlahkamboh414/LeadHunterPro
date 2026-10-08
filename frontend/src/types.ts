@@ -302,6 +302,8 @@ export interface Campaign {
   ai_compose: boolean;
   /** Fixed text appended after "Best regards," for this campaign. */
   ai_signature: string;
+  audience_source: "leads" | "own_list";
+  sender_profile: string;
   created_at: string;
   updated_at: string;
   pending: number;
@@ -466,6 +468,8 @@ export interface CampaignCreateInput {
   subject: string;
   body: string;
   emails?: string[];
+  audience_source?: "leads" | "own_list";
+  sender_profile?: string;
   audience_count?: number;
   audience_folder?: string;
   audience_recommendation?: string;

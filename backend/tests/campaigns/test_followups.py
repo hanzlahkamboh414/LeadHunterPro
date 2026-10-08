@@ -639,6 +639,10 @@ def test_gmail_policy_rejection_counts_failure_and_cancels_followup(tmp_path, mo
     assert ctx["store"].bounces(campaign_id, ctx["user"].id)[0]["email"] == "chip@example.com"
     assert ctx["store"].delivery_excluded_emails(["CHIP@example.com"]) == {"chip@example.com"}
     assert ctx["store"].pending_delivery_exclusions() == []
+    assert not ctx["store"].queue_followup(
+        campaign_id, "chip@example.com", step=1,
+        not_before=_iso(NOW + timedelta(days=3)),
+    )
     with pytest.raises(ValueError, match="already queued or emailed"):
         ctx["store"].create(
             "another-user", account_id=2, name="retry", subject="S", body="B",

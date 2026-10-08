@@ -1224,17 +1224,26 @@ class CampaignStore:
     def queue_followup(self, campaign_id: int, email: str, *, step: int,
                        not_before: str) -> bool:
         """Queue one follow-up row (pending, gated by not_before). No-op when
-        the lead already replied or the row already exists — decisions about
-        WHETHER to queue live in the scheduler."""
+        the address is delivery-excluded or the row already exists."""
+        addr = email.strip().lower()
         conn = self._conn()
-        cur = conn.execute(
-            "INSERT OR IGNORE INTO campaign_sends "
-            "(campaign_id, email, step, not_before) VALUES (?, ?, ?, ?)",
-            (campaign_id, email, int(step), not_before),
-        )
-        conn.commit()
-        conn.close()
-        return cur.rowcount > 0
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            if self._delivery_excluded_in_conn(conn, [addr]):
+                conn.rollback()
+                return False
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO campaign_sends "
+                "(campaign_id, email, step, not_before) VALUES (?, ?, ?, ?)",
+                (campaign_id, addr, int(step), not_before),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def is_replied(self, campaign_id: int, email: str) -> bool:
         conn = self._conn()
@@ -1551,7 +1560,9 @@ class CampaignStore:
                         "AND queued.email = p.email AND queued.step = ? "
                         "WHERE p.campaign_id = ? AND p.step = ? AND p.state = 'sent' "
                         "AND NOT EXISTS (SELECT 1 FROM campaign_replies r "
-                        "WHERE r.campaign_id = p.campaign_id AND r.email = p.email)",
+                        "WHERE r.campaign_id = p.campaign_id AND r.email = p.email) "
+                        "AND NOT EXISTS (SELECT 1 FROM campaign_bounces b "
+                        "WHERE lower(b.email) = lower(p.email))",
                         (step, campaign_id, step - 1),
                     ).fetchall()
                     for email, sent_at, queued_id in predecessors:

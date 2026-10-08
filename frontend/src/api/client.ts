@@ -258,6 +258,11 @@ export function googleAuthorizeUrl(): string {
 }
 
 export const api = {
+  importCampaignEmails(file: File): Promise<{ emails: string[]; count: number; rejected: number }> {
+    const data = new FormData();
+    data.append("file", file);
+    return request("/campaigns/import-emails", { method: "POST", body: data });
+  },
   uploadLeadFile(file: File, name: string): Promise<{ job: LeadImportJob; quota: LeadImportQuota }> {
     const data = new FormData();
     data.append("file", file);

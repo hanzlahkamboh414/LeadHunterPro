@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from app.auth.dependencies import get_current_user
 from app.auth.models import User
-from app.leads.import_files import ImportFileError, MAX_UPLOAD_BYTES, extract_emails
+from app.leads.import_files import ImportFileError, extract_emails
 from app.leads.import_research_store import ImportResearchStore
 
 router = APIRouter(prefix="/leads/imports", tags=["Lead imports"])
@@ -23,9 +23,8 @@ def _store() -> ImportResearchStore:
 @router.post("", status_code=201)
 def upload_leads(file: UploadFile = File(...), name: str = Form(""),
                  user: User = Depends(get_current_user)) -> dict:
-    data = file.file.read(MAX_UPLOAD_BYTES + 1)
     try:
-        emails, rejected = extract_emails(data, file.filename or "upload.txt")
+        emails, rejected = extract_emails(file.file, file.filename or "upload.txt")
     except ImportFileError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     job = _store().create_job(user.id, file.filename or "upload.txt",

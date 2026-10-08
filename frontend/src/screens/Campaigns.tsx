@@ -619,7 +619,14 @@ function EditCampaignForm({
   const folders = useQuery({ queryKey: ["folders"], queryFn: () => api.listFolders() });
   const pool = useQuery({
     queryKey: ["campaign-pool", folder, recommendation],
-    queryFn: () => api.listLeads({ folder: folder || undefined, recommendation: recommendation || undefined, limit: 500 }),
+    queryFn: async () => {
+      const all: Awaited<ReturnType<typeof api.listLeads>> = [];
+      for (let offset = 0; ; offset += 1000) {
+        const page = await api.listLeads({ folder: folder || undefined, recommendation: recommendation || undefined, limit: 1000, offset });
+        all.push(...page);
+        if (page.length < 1000) return all;
+      }
+    },
     enabled: replaceAudience,
   });
   const updateFollowup = (index: number, changes: Partial<FollowupInput & { on: boolean }>) =>
@@ -724,7 +731,7 @@ function EditCampaignForm({
         <div className="rounded-lg border border-white/5 p-3">
           <label className="flex gap-2 text-[12.5px] text-slate-300"><input type="checkbox" checked={replaceAudience} onChange={(e) => setReplaceAudience(e.target.checked)} /> Replace unsent lead selection</label>
           <p className="mt-1 text-[11.5px] text-slate-500">Leave unchecked to keep the current queue. Sent emails remain in history.</p>
-          {replaceAudience && <><div className="mt-2 grid grid-cols-2 gap-2"><select className={INPUT} value={folder} onChange={(e) => setFolder(e.target.value)}><option value="">All leads</option>{(folders.data?.folders || []).map((f) => <option key={f.name} value={f.name}>{f.name} ({f.count})</option>)}</select><select className={INPUT} value={recommendation} onChange={(e) => setRecommendation(e.target.value)}><option value="">Any recommendation</option><option value="contact_now">Contact now</option><option value="nurture">Nurture</option></select></div><p className="mt-2 text-[12px] text-slate-400">{pool.isFetching ? "Counting leads…" : `${pool.data?.length || 0} leads selected (first 500 max)`}</p></>}
+          {replaceAudience && <><div className="mt-2 grid grid-cols-2 gap-2"><select className={INPUT} value={folder} onChange={(e) => setFolder(e.target.value)}><option value="">All leads</option>{(folders.data?.folders || []).map((f) => <option key={f.name} value={f.name}>{f.name} ({f.count})</option>)}</select><select className={INPUT} value={recommendation} onChange={(e) => setRecommendation(e.target.value)}><option value="">Any recommendation</option><option value="contact_now">Contact now</option><option value="nurture">Nurture</option></select></div><p className="mt-2 text-[12px] text-slate-400">{pool.isFetching ? "Counting leads…" : `${pool.data?.length || 0} leads selected`}</p></>}
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3"><label className="text-[12px] text-slate-400">Start (your local time)<input type="datetime-local" className={`${INPUT} mt-1`} value={startAt} onChange={(e) => setStartAt(e.target.value)} /></label><label className="text-[12px] text-slate-400">Daily limit (per Gmail account)<input type="number" min={1} max={200} className={`${INPUT} mt-1`} value={dailyLimit} onChange={(e) => setDailyLimit(Number(e.target.value))} /></label></div>
         <DelayFields min={delayMin} max={delayMax} setMin={setDelayMin} setMax={setDelayMax} />
@@ -1072,6 +1079,10 @@ function CampaignBuilder({
   const [folder, setFolder] = useState("*");
   const [audienceSource, setAudienceSource] = useState<"leads" | "own_list">("leads");
   const [ownEmailsText, setOwnEmailsText] = useState("");
+  const [importedEmails, setImportedEmails] = useState<string[]>([]);
+  const [importedFile, setImportedFile] = useState("");
+  const [importError, setImportError] = useState("");
+  const [importing, setImporting] = useState(false);
   const [quantity, setQuantity] = useState(50);
   const [recommendation, setRecommendation] = useState("contact_now");
   const [startAt, setStartAt] = useState(defaultStart());
@@ -1108,13 +1119,15 @@ function CampaignBuilder({
   const pool = useQuery({
     queryKey: ["campaign-available", folder, recommendation, quantity],
     queryFn: () => api.campaignAvailableLeads({ count: quantity, folder, recommendation }),
-    enabled: audienceSource === "leads" && connected.length > 0 && quantity >= 1 && quantity <= 500,
+    enabled: audienceSource === "leads" && connected.length > 0 && quantity >= 1 && Number.isInteger(quantity),
   });
   const poolEmails = pool.data?.emails || [];
-  const ownEmails = Array.from(new Set((ownEmailsText.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || [])
-    .map((email) => email.toLowerCase())));
+  const ownEmails = Array.from(new Set([
+    ...(ownEmailsText.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || []),
+    ...importedEmails,
+  ].map((email) => email.toLowerCase())));
   const audienceReady = audienceSource === "own_list"
-    ? ownEmails.length >= 1 && ownEmails.length <= 500
+    ? ownEmails.length >= 1 && !importing
     : poolEmails.length === quantity && !pool.isFetching;
 
   const create = useMutation({
@@ -1198,7 +1211,7 @@ function CampaignBuilder({
     (!fu2On || (fu2Days >= 1 && fu2Days <= 30)) &&
     (!fu3On || (fu3Days >= 1 && fu3Days <= 30));
   const audienceValid = (audienceSource === "own_list" ||
-    (quantity >= 1 && quantity <= 500 && Number.isInteger(quantity))) &&
+    (quantity >= 1 && Number.isInteger(quantity))) &&
     audienceReady && !!startAt &&
     delayMin >= 20 && delayMin <= 3600 && delayMax >= delayMin && delayMax <= 7200 &&
     dailyLimit >= 1 && dailyLimit <= 200;
@@ -1459,17 +1472,31 @@ function CampaignBuilder({
               value={ownEmailsText} onChange={(e) => setOwnEmailsText(e.target.value)}
               placeholder={"name@company.com\nanother@company.com"} />
             <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
-              <span>{ownEmails.length} unique addresses found · maximum 500</span>
+              <span>{ownEmails.length} unique addresses found{importedFile ? ` · ${importedFile} imported` : ""}</span>
               <label className="cursor-pointer rounded-lg border border-white/15 px-3 py-2 text-slate-200 hover:bg-white/5">
-                Import .csv or .txt
-                <input type="file" accept=".csv,.txt,text/csv,text/plain" className="sr-only"
+                {importing ? "Importing…" : "Import file"}
+                <input type="file" accept=".csv,.tsv,.txt,.xlsx,.xls,.pdf,.docx,.ods,.html,.rtf" className="sr-only" disabled={importing}
                   onChange={async (event) => {
                     const file = event.target.files?.[0];
-                    if (file) setOwnEmailsText(await file.text());
                     event.target.value = "";
+                    if (!file) return;
+                    setImporting(true);
+                    setImportError("");
+                    try {
+                      const result = await api.importCampaignEmails(file);
+                      setImportedEmails(result.emails);
+                      setImportedFile(file.name);
+                    } catch (error) {
+                      setImportError(error instanceof ApiError ? error.message : "Could not import this file.");
+                    } finally {
+                      setImporting(false);
+                    }
                   }} />
               </label>
             </div>
+            {importedFile && <button type="button" onClick={() => { setImportedEmails([]); setImportedFile(""); }} className="mt-2 text-xs text-slate-300 underline">Remove imported file</button>}
+            {importError && <p role="alert" className="mt-2 text-xs text-rose-300">{importError}</p>}
+            <p className="mt-2 text-xs text-slate-500">CSV, Excel, PDF, Word and text files. Text-based PDFs are supported.</p>
             <p className="mt-2 text-xs text-slate-500">Repeated, already sent, bounced and opted-out addresses are excluded. A domain mail-route check cannot confirm an individual inbox; delivery can still fail.</p>
           </div>}
           {audienceSource === "leads" && <>
@@ -1491,7 +1518,7 @@ function CampaignBuilder({
             </div>
             <div>
               <label className="text-[12px] text-slate-400">How many emails?</label>
-              <input type="number" min={1} max={500} step={1} className={`${input} mt-1`} value={quantity} onChange={(e) => setQuantity(Number(e.target.value))} />
+              <input type="number" min={1} step={1} className={`${input} mt-1`} value={quantity} onChange={(e) => setQuantity(Number(e.target.value))} />
             </div>
             <div>
               <label className="text-[12px] text-slate-400">Lead quality</label>
@@ -1511,8 +1538,8 @@ function CampaignBuilder({
           <div className="mt-2 rounded-lg bg-white/[0.03] border border-white/5 px-3.5 py-2.5 text-[12.5px] text-slate-400">
             {audienceSource === "own_list" ? (
               <span className="text-slate-200 font-semibold">{ownEmails.length} unique addresses to check and research before sending.</span>
-            ) : quantity < 1 || quantity > 500 || !Number.isInteger(quantity) ? (
-              "Choose a whole number from 1 to 500."
+            ) : quantity < 1 || !Number.isInteger(quantity) ? (
+              "Choose a whole number of at least 1."
             ) : pool.isFetching ? (
               "Checking unused leads…"
             ) : pool.isError ? (

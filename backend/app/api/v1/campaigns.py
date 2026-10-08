@@ -14,7 +14,7 @@ import smtplib
 from datetime import date, datetime, timedelta, timezone
 from email_validator import EmailNotValidError, validate_email
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import Response
 
 from app.auth.vertical_access import require_email_access
@@ -29,6 +29,7 @@ from app.campaigns.tracking import PIXEL_GIF, parse_token
 from app.email_accounts import google, smtp
 from app.email_accounts.store import get_email_store
 from app.email.bounce_learning import BounceStore
+from app.leads.import_files import ImportFileError, extract_emails
 from app.schemas.campaigns import (
     CampaignCreateIn,
     CampaignCreateOut,
@@ -48,6 +49,18 @@ from app.schemas.campaigns import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/campaigns", tags=["Campaigns"])
+
+
+@router.post("/import-emails")
+def import_campaign_emails(
+    file: UploadFile = File(...), user: User = Depends(require_email_access),
+) -> dict:
+    """Read an uploaded list; campaign creation still applies send exclusions."""
+    try:
+        emails, rejected = extract_emails(file.file, file.filename or "upload.txt")
+    except ImportFileError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"emails": emails, "count": len(emails), "rejected": rejected}
 
 
 def _sending_is_paused() -> bool:
@@ -374,7 +387,7 @@ def recipient_status(user: User = Depends(get_current_user)) -> dict[str, list[s
 
 @router.get("/available-leads")
 def available_leads(
-    count: int = Query(50, ge=1, le=500),
+    count: int = Query(50, ge=1),
     folder: str = Query("*", max_length=200),
     recommendation: str = Query("contact_now", max_length=40),
     user: User = Depends(require_email_access),

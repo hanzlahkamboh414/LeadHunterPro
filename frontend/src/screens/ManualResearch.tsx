@@ -29,7 +29,6 @@ export default function ManualResearch({ aiEnabled = true }: { aiEnabled?: boole
   const rename = useMutation({ mutationFn: ({ id, title }: { id: string; title: string }) => api.renameLeadImport(id, title), onSuccess: refresh });
   const remove = useMutation({ mutationFn: (id: string) => api.deleteLeadImport(id), onSuccess: () => { setSelected(null); refresh(); } });
   function choose(next: File | null) {
-    if (next && next.size > 10 * 1024 * 1024) { setFileError("Choose a file smaller than 10 MB."); setFile(null); return; }
     setFileError(""); setFile(next);
   }
   function submit(event: FormEvent) {
@@ -45,7 +44,7 @@ export default function ManualResearch({ aiEnabled = true }: { aiEnabled?: boole
       <div className="grid gap-4 sm:grid-cols-2">
         <label className="block text-sm text-slate-300">Email file
           <input ref={input} type="file" accept=".csv,.xlsx,.xls,.pdf,.docx,.ods,.txt" onChange={(e) => choose(e.target.files?.[0] ?? null)} className="mt-2 block w-full rounded-lg border border-white/10 bg-white/[0.04] p-3 text-sm" />
-          <span className="mt-1 block text-xs text-slate-500">CSV, Excel, PDF, Word or text · up to 10 MB</span>
+          <span className="mt-1 block text-xs text-slate-500">CSV, Excel, PDF, Word or text · no fixed file-size cap</span>
         </label>
         <label className="block text-sm text-slate-300">Research name (optional)
           <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. October contractors" className="mt-2 w-full rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2.5 text-sm text-white" />

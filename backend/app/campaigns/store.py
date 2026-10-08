@@ -322,10 +322,12 @@ class CampaignStore:
         EXTRA sending accounts beyond the primary (E5 multi-account); the
         primary always comes first and duplicates drop."""
         seen: list[str] = []
+        seen_set: set[str] = set()
         for e in emails:
             clean = e.strip().lower()
-            if clean and clean not in seen:
+            if clean and clean not in seen_set:
                 seen.append(clean)
+                seen_set.add(clean)
         accounts = [account_id]
         for a in account_ids or []:
             if a and a not in accounts:

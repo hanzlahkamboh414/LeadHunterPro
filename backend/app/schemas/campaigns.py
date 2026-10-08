@@ -23,10 +23,10 @@ class CampaignCreateIn(BaseModel):
     account_ids: list[int] = Field(default_factory=list, max_length=4)
     subject: str = Field(min_length=1, max_length=500)
     body: str = Field(min_length=1, max_length=20000)
-    emails: list[str] = Field(default_factory=list, max_length=500)
+    emails: list[str] = Field(default_factory=list)
     audience_source: str = Field(default="leads", pattern="^(leads|own_list)$")
     sender_profile: str = Field(default="", max_length=4000)
-    audience_count: int | None = Field(default=None, ge=1, le=500)
+    audience_count: int | None = Field(default=None, ge=1)
     audience_folder: str = Field(default="*", max_length=200)
     audience_recommendation: str = Field(default="contact_now", max_length=40)
     """ISO-8601 datetime (with offset) — the 9:00 AM start, computed in the
@@ -182,7 +182,7 @@ class CampaignUpdateIn(BaseModel):
     body: str = Field(min_length=1, max_length=20000)
     account_id: int | None = None
     account_ids: list[int] | None = Field(default=None, max_length=4)
-    emails: list[str] | None = Field(default=None, max_length=500)
+    emails: list[str] | None = Field(default=None)
     start_at: str | None = Field(default=None, min_length=10, max_length=40)
     daily_limit: int | None = Field(default=None, ge=1, le=200)
     delay_min_s: int | None = Field(default=None, ge=20, le=3600)

@@ -471,6 +471,20 @@ class LeadResearchStore:
         conn.close()
         return cur.rowcount > 0
 
+    def owned_by(self, email: str, user_id: str) -> bool:
+        """Whether this user can already see the researched address."""
+        if not user_id:
+            return False
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT 1 FROM dossiers d WHERE d.email_hash=? AND "
+            "(d.user_id=? OR EXISTS (SELECT 1 FROM dossier_owners o "
+            "WHERE o.email_hash=d.email_hash AND o.user_id=?))",
+            (_email_hash(email), user_id, user_id),
+        ).fetchone()
+        conn.close()
+        return row is not None
+
     def serve_shared(
         self, count: int, *, trade: str = "", location: str = "",
         user_id: str = "",

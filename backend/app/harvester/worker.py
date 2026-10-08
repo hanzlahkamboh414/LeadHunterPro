@@ -510,6 +510,7 @@ class HarvesterWorker:
         harvest cannot target anything.
         """
         now = self._now()
+        candidates: list[tuple[str, float, str, str]] = []
         for d in self._store.top_demand(200):
             trade, state = d["trade"], d["state"]
             if not trade or not state:
@@ -519,8 +520,13 @@ class HarvesterWorker:
             if (last_dt is not None
                     and (now - last_dt).total_seconds() < self._pair_cooldown_s):
                 continue
-            return trade, state
-        return None
+            # Rotate through demanded pairs. Weight breaks ties, but must not
+            # send every pass to one high-weight pair that yields nothing.
+            candidates.append((last or "", -float(d["weight"]), trade, state))
+        if not candidates:
+            return None
+        _, _, trade, state = min(candidates)
+        return trade, state
 
     def _budget_expired(self) -> bool:
         """run_full's cancel seam: True once the current emails pass has

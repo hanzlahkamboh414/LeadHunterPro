@@ -282,6 +282,15 @@ def test_emails_lane_researches_demanded_pair(tmp_path):
     assert worker._store.quota_used("emails") == 7
 
 
+def test_email_pair_rotates_after_zero_yield_even_without_cooldown(tmp_path):
+    worker = _worker(tmp_path, pair_cooldown_s=0)
+    worker._store.record_demand("gc", "AK", 4)
+    worker._store.record_demand("electrical", "AK", 2)
+    assert worker._pick_email_pair() == ("gc", "AK")
+    worker._store.record_run("emails", "gc", "AK", "success", 0)
+    assert worker._pick_email_pair() == ("electrical", "AK")
+
+
 def test_emails_lane_never_spends_without_demand(tmp_path):
     """The AI lane is demand-gated: no logged search, no research spend."""
     research = FakeResearch()

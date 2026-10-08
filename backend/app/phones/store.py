@@ -462,7 +462,7 @@ class PhoneLeadsStore:
         conn = self._conn()
         try:
             return int(conn.execute(
-                "SELECT COUNT(*) FROM phone_claim_events WHERE user_id = ? "
+                "SELECT COUNT(DISTINCT phone) FROM phone_claim_events WHERE user_id = ? "
                 "AND substr(created_at, 1, 10) = ?",
                 (user_id, _now()[:10]),
             ).fetchone()[0])
@@ -561,7 +561,7 @@ class PhoneLeadsStore:
                 ).fetchone()
                 allowance = int(limit_row[0]) if limit_row else DEFAULT_DAILY_PHONE_LIMIT
                 used = int(conn.execute(
-                    "SELECT COUNT(*) FROM phone_claim_events WHERE user_id = ? "
+                    "SELECT COUNT(DISTINCT phone) FROM phone_claim_events WHERE user_id = ? "
                     "AND substr(created_at, 1, 10) = ?",
                     (user_id, _now()[:10]),
                 ).fetchone()[0])
@@ -595,7 +595,14 @@ class PhoneLeadsStore:
             )
             rows = cur.fetchall()
             cols = [d[0] for d in cur.description]
-            leads = [dict(zip(cols, r, strict=True)) for r in rows]
+            leads = []
+            seen_phones: set[str] = set()
+            for row in rows:
+                lead = dict(zip(cols, row, strict=True))
+                if lead["phone"] in seen_phones:
+                    continue
+                seen_phones.add(lead["phone"])
+                leads.append(lead)
             ts = _now()
             # Every row this call claims carries the SAME batch stamp: the
             # sheet reads the latest batch, so one search = one sheet.
@@ -848,7 +855,7 @@ class PhoneLeadsStore:
         self, user_id: str, trade: str = "", state: str = "", city: str = "",
         limit: int = 200,
     ) -> list[dict[str, Any]]:
-        """Today's still-owned claims across all searches and states (UTC).
+        """Today's distinct phone claims across all searches and states (UTC).
 
         A new UTC day starts a blank sheet; untouched prior claims return to
         the pool, while contacted/saved claims and dated history remain.
@@ -858,11 +865,24 @@ class PhoneLeadsStore:
         try:
             cur = conn.execute(
                 f"""
-                SELECT l.*, o.created_at AS claimed_at FROM phone_leads l
-                JOIN phone_lead_owners o ON o.lead_id = l.id
-                AND o.user_id = ?
-                AND substr(o.created_at, 1, 10) = ?{frag}
-                ORDER BY o.created_at DESC, l.id DESC
+                WITH ranked AS (
+                    SELECT l.id, o.created_at,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY l.phone
+                               ORDER BY EXISTS (
+                                   SELECT 1 FROM phone_call_events e
+                                   WHERE e.user_id = o.user_id AND e.lead_id = l.id
+                               ) DESC, LENGTH(l.person_name) DESC, l.id ASC
+                           ) AS phone_rank
+                    FROM phone_leads l
+                    JOIN phone_lead_owners o ON o.lead_id = l.id
+                    WHERE o.user_id = ?
+                      AND substr(o.created_at, 1, 10) = ?{frag}
+                )
+                SELECT l.*, r.created_at AS claimed_at
+                FROM ranked r JOIN phone_leads l ON l.id = r.id
+                WHERE r.phone_rank = 1
+                ORDER BY r.created_at DESC, l.id DESC
                 LIMIT ?
                 """,
                 [user_id, _now()[:10], *args, limit],

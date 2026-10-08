@@ -233,6 +233,42 @@ def test_duplicate_business_rows_cannot_repeat_a_phone(tmp_path):
     assert len(bob) == 1 and bob[0]["phone"] == first[0]["phone"]
 
 
+def test_historical_duplicate_claims_show_one_phone_and_use_one_credit(tmp_path):
+    """Old batches may have claimed two business spellings of one number."""
+    from app.phones.store import _now
+
+    store = PhoneLeadsStore(db_path=str(tmp_path / "phones.db"))
+    store.add([
+        {**_rec("2087465573", "4 J ELECTRIC INC"),
+         "person_name": "Joel David Johnson"},
+        {**_rec("2087465573", "4J Electric Inc"),
+         "person_name": "Joel D Johnson"},
+    ])
+    conn = store._conn()
+    ids = [row[0] for row in conn.execute(
+        "SELECT id FROM phone_leads ORDER BY id"
+    )]
+    now = _now()
+    for lead_id in ids:
+        conn.execute("INSERT INTO phone_lead_owners "
+                     "(lead_id,user_id,created_at,batch_at) VALUES (?,?,?,?)",
+                     (lead_id, "alice", now, now))
+        conn.execute("INSERT INTO phone_claim_events "
+                     "(lead_id,user_id,phone,created_at) VALUES (?,?,?,?)",
+                     (lead_id, "alice", "+12087465573", now))
+    conn.execute("INSERT INTO phone_call_events "
+                 "(user_id,lead_id,phone,action,created_at) VALUES (?,?,?,?,?)",
+                 ("alice", ids[1], "+12087465573", "copied", now))
+    conn.commit()
+    conn.close()
+
+    owned = store.list_owned("alice")
+    assert len(owned) == 1
+    assert owned[0]["id"] == ids[1]  # preserve the row the user called
+    assert store.daily_usage("alice") == 1
+    assert store.serve("gc", "", "", 1, "bob") == []
+
+
 def test_noted_phone_never_returns_to_shared_claim_pool(tmp_path):
     store = PhoneLeadsStore(db_path=str(tmp_path / "phones.db"))
     store.add([

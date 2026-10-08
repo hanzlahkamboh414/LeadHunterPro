@@ -637,6 +637,13 @@ def test_gmail_policy_rejection_counts_failure_and_cancels_followup(tmp_path, mo
              if s["email"] == "chip@example.com"]
     assert [s["state"] for s in sends] == ["failed", "skipped"]
     assert ctx["store"].bounces(campaign_id, ctx["user"].id)[0]["email"] == "chip@example.com"
+    counts = ctx["store"].get(campaign_id, ctx["user"].id)
+    assert counts["bounced"] == 1
+    assert counts["skipped"] == 1
+    assert counts["replied"] == 0
+    response = ctx["client"].get(f"/api/v1/campaigns/{campaign_id}")
+    assert response.status_code == 200
+    assert response.json()["bounced"] == 1
     assert ctx["bounce"].lookup("chip@example.com") is None
     assert ctx["leads"].get("chip@example.com") is not None
     assert ctx["sched"].run_once()["bounced"] == 0

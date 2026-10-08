@@ -445,8 +445,9 @@ function CampaignCard({
           <span>
             {c.sent} sent · {c.pending} pending
             {c.replied > 0 && ` · ${c.replied} replied`}
+            {c.bounced > 0 && ` · ${c.bounced} bounced/blocked`}
             {c.failed > 0 && ` · ${c.failed} failed`}
-            {c.skipped > 0 && ` · ${c.skipped} skipped (replied)`}
+            {c.skipped > 0 && ` · ${c.skipped} skipped`}
           </span>
           <span>max {c.daily_limit}/day</span>
         </div>

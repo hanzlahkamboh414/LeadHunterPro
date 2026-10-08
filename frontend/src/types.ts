@@ -307,10 +307,12 @@ export interface Campaign {
   pending: number;
   sent: number;
   failed: number;
-  /** Follow-ups dropped because the lead replied (Phase E4). */
+  /** All skipped sends, including cancelled follow-ups after a block. */
   skipped: number;
   /** Leads who answered this campaign (Phase E4). */
   replied: number;
+  /** Recipients with a recorded bounce or provider block. */
+  bounced: number;
   account_email: string;
   /** Resolved addresses of account_ids, primary first (E5). */
   account_emails: string[];

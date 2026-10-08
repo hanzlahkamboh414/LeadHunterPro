@@ -534,6 +534,13 @@ class CampaignStore:
         ).fetchall()
         for cid, n in replies:
             out.setdefault(cid, _empty_counts())["replied"] = n
+        bounces = conn.execute(
+            f"SELECT campaign_id, COUNT(*) FROM campaign_bounces "
+            f"WHERE campaign_id IN ({marks}) GROUP BY campaign_id",
+            campaign_ids,
+        ).fetchall()
+        for cid, n in bounces:
+            out.setdefault(cid, _empty_counts())["bounced"] = n
         return out
 
     @staticmethod
@@ -554,6 +561,7 @@ class CampaignStore:
             "failed": counts.get("failed", 0),
             "skipped": counts.get("skipped", 0),
             "replied": counts.get("replied", 0),
+            "bounced": counts.get("bounced", 0),
         }
 
     # -- Scheduler support ------------------------------------------------
@@ -1805,7 +1813,8 @@ class CampaignStore:
 
 def _empty_counts() -> dict[str, int]:
     """The zeroed progress shape for _counts' setdefault calls."""
-    return {"pending": 0, "sent": 0, "failed": 0, "skipped": 0, "replied": 0}
+    return {"pending": 0, "sent": 0, "failed": 0, "skipped": 0,
+            "replied": 0, "bounced": 0}
 
 
 # Module-level singleton (the deps._user_store pattern — tests override it).

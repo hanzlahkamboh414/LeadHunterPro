@@ -96,6 +96,7 @@ class CampaignOut(BaseModel):
     failed: int
     skipped: int
     replied: int
+    bounced: int = 0
     account_email: str = ""
     """Resolved addresses for account_ids, primary first (list view only —
     the detail view fills it; single-account callers keep account_email)."""

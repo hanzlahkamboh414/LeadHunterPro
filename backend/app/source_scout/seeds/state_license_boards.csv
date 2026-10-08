@@ -24,7 +24,7 @@ MD,DLLR,Div of Labor & Reg,https://www.dllr.maryland.gov,gc,22,14528,,"MHIC — 
 UT,DOPL,Division of Professional Licensing,https://dopl.utah.gov,"electrical,mechanical,plumbing",23,13022,,"no state GC license"
 TN,BC,Board for Licensing Contractors,https://www.tn.gov/commerce,gc,24,12692,,
 SC,LLR,Dept of Labor Licensing & Reg,https://llr.sc.gov,gc,25,11981,,"GC + residential; specialty licenses exist; official licensee-list request form; free bulk feed pending"
-ID,,none,,none,26,9895,,no state-level contractor license (local)
+ID,DOPL,Contractors Board,https://dopl.idaho.gov/con/,contractor_registration,26,9895,lookup_only,"official contractor registration search; public bulk phone feed not verified"
 IA,DIAL,Department of Inspections Appeals and Licensing,https://data.iowa.gov/catalog/dataset/1052,construction_registration,27,9067,bulk_file,"official active-contractor ZIP/JSON with phone and activity; ia_registration harvester connector"
 AL,ALBCB,Licensing Board for General Contractors,,gc,28,8982,,"url_unverified"
 OK,CIB,Construction Industries Board,https://ok.gov/cib,"gc,electrical,mechanical,plumbing",29,8966,,

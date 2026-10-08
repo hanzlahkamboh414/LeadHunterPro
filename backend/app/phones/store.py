@@ -299,6 +299,10 @@ class PhoneLeadsStore:
                 "ON phone_user_leads (user_id, phone)"
             )
             conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_phone_saved_noted_phone "
+                "ON phone_user_leads (phone) WHERE note <> ''"
+            )
+            conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_phone_claim_day "
                 "ON phone_claim_events (user_id, created_at)"
             )
@@ -405,10 +409,12 @@ class PhoneLeadsStore:
 
     @staticmethod
     def _qualified_frag() -> str:
-        """Raw inventory is never a new phone claim or an availability count."""
+        """Only qualified, unsuppressed, unnoted numbers can enter claims."""
         return (" AND TRIM(l.business_name) <> '' AND TRIM(l.trade) <> ''"
                 " AND NOT EXISTS (SELECT 1 FROM phone_suppressions x"
-                " WHERE x.phone = l.phone)")
+                " WHERE x.phone = l.phone)"
+                " AND NOT EXISTS (SELECT 1 FROM phone_user_leads noted"
+                " WHERE noted.phone = l.phone AND noted.note <> '')")
 
     @staticmethod
     def _resting_frag() -> str:
@@ -1261,11 +1267,10 @@ class PhoneLeadsStore:
         """☎Voicemail: nobody answered — park the number and move on.
 
         Tiered recycling (the user's approved ladder): the Nth voicemail
-        parks the number for 14/30/60 days, then it re-enters the shared
-        rotation for the next caller (data reuse — "aaj voice mail pr ha to
-        shayad 1 2 mah bad na ho"). The user's claim is RELEASED (the row
-        leaves their sheet — it is not theirs to keep if they won't talk to
-        it). A FOURTH voicemail retires the number for good: row deleted,
+        parks the number for 14/30/60 days, then it can re-enter the shared
+        rotation for a different caller. A saved note keeps the phone out of
+        rotation altogether. The user's claim is RELEASED (the row leaves
+        their sheet). A FOURTH voicemail retires the number for good: row deleted,
         number suppressed, harvester can never re-add it. None when the
         user doesn't own the lead."""
         lead = self._owned_lead(lead_id, user_id)

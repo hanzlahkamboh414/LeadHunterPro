@@ -233,6 +233,40 @@ def test_duplicate_business_rows_cannot_repeat_a_phone(tmp_path):
     assert len(bob) == 1 and bob[0]["phone"] == first[0]["phone"]
 
 
+def test_noted_phone_never_returns_to_shared_claim_pool(tmp_path):
+    store = PhoneLeadsStore(db_path=str(tmp_path / "phones.db"))
+    store.add([
+        _rec("5031110001", "Original business"),
+        _rec("5031110001", "Duplicate business"),
+    ])
+    lead = store.serve("", "WA", "", 1, "alice")[0]
+    store.note_lead(lead["id"], "alice", "Spoke to owner; call next week")
+    store.mark_voicemail(lead["id"], "alice")  # normally releases ownership
+    conn = store._conn()
+    conn.execute("UPDATE phone_leads SET voicemail_at='2020-01-01T00:00:00' "
+                 "WHERE phone=?", (lead["phone"],))
+    conn.commit()
+    conn.close()
+
+    assert store.unclaimed_count("", "WA") == 0
+    assert store.servable_by_state().get("WA", 0) == 0
+    assert store.serve("", "WA", "", 10, "bob") == []
+
+
+def test_note_added_to_saved_contact_also_blocks_other_users(tmp_path):
+    store = PhoneLeadsStore(db_path=str(tmp_path / "phones.db"))
+    store.add([_rec("5031110001", "Original business")])
+    lead = store.serve("", "WA", "", 1, "alice")[0]
+    saved_id = store.store_contact(lead["id"], "alice")["saved_id"]
+    store.mark_voicemail(lead["id"], "alice")
+    assert store.set_saved_note(saved_id, "alice", "Please call on Monday")
+    conn = store._conn()
+    conn.execute("UPDATE phone_leads SET voicemail_at='2020-01-01T00:00:00'")
+    conn.commit()
+    conn.close()
+    assert store.serve("", "WA", "", 1, "bob") == []
+
+
 def test_serve_exclude_ids_prevents_run_duplicates(tmp_path):
     """The gap-fill re-serve only brings NEW rows — a run never serves the
     same lead twice (the pool serve's rows are excluded)."""

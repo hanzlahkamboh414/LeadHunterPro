@@ -67,7 +67,8 @@ def test_trade_less_coverage_is_anything_stocking_the_state(tmp_path):
                            target=5, user_id="alice")
     assert set(out_any["coverage"]) == {
         "wa_license", "tdlr_license", "cslb_portal",
-        "mn_dli_registration", "nyc_dcwp_hic",
+        "mn_dli_registration", "nyc_dcwp_hic", "ia_registration",
+        "de_prequalified",
     }
 
 
@@ -143,8 +144,7 @@ def test_voicemail_tiers_and_release(tmp_path):
 
 
 def test_voicemail_resting_expires_and_recirculates(tmp_path):
-    """After the cooldown the resting row serves again — data reuse: the
-    next caller (this user or another) gets the same number."""
+    """After the cooldown the resting row serves to another caller."""
     import sqlite3
 
     store = _store(tmp_path)
@@ -174,11 +174,13 @@ def test_fourth_voicemail_retires_for_good(tmp_path):
     store = _store(tmp_path)
     store.add([_rec("5031110001")])
     lead = store.serve("gc", "", "", 10, "alice")[0]
+    caller = "alice"
 
-    for _n in range(1, MAX_VOICEMAILS):
-        out = store.mark_voicemail(lead["id"], "alice")
+    for n in range(1, MAX_VOICEMAILS):
+        out = store.mark_voicemail(lead["id"], caller)
         assert out["retired"] is False
-        # Re-claim after each cooldown so the next voicemail can land.
+        # A different caller can claim after cooldown; the previous caller
+        # must not get the number again.
         import sqlite3
         conn = sqlite3.connect(str(tmp_path / "phones.db"))
         conn.execute(
@@ -187,9 +189,11 @@ def test_fourth_voicemail_retires_for_good(tmp_path):
         )
         conn.commit()
         conn.close()
-        store.serve("gc", "", "", 10, "alice")
+        assert store.serve("gc", "", "", 10, caller) == []
+        caller = f"caller-{n}"
+        assert store.serve("gc", "", "", 10, caller)[0]["id"] == lead["id"]
 
-    out4 = store.mark_voicemail(lead["id"], "alice")
+    out4 = store.mark_voicemail(lead["id"], caller)
     assert out4 == {"retired": True, "voicemail_count": MAX_VOICEMAILS,
                     "cooldown_days": 0}
     # Gone from the pool AND banned from re-entry.

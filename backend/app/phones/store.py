@@ -13,16 +13,12 @@ Tables:
   serves that trade's rows; other-trade rows are pool inventory for their
   own consumers. P7.5 adds the voicemail columns — ``voicemail_count`` /
   ``voicemail_at`` drive the tiered recycling (see VOICEMAIL_COOLDOWN_DAYS).
-* ``phone_lead_owners`` — the dossier_owners junction pattern, now a
-  ONE-SHOT serve (user's policy, 2026-09-16): serving a lead stamps
-  ownership, and an owned lead NEVER serves again — not to another user,
-  not back to the user who already has it. A repeat search of a state
-  therefore returns only fresh numbers. A voicemail RELEASES the row (the
-  ownership row is deleted) so it can rest out its cooldown and re-enter
-  the shared rotation — that release is explicit and is the only path back
-  in besides a new harvest. Each serve call stamps ``batch_at`` for legacy
-  diagnostics; the active call sheet now shows all of today's still-owned
-  claims across searches and states (see ``list_owned``).
+* ``phone_lead_owners`` — a call/saved lead remains exclusive. Untouched
+  claims from previous UTC days return to the shared pool. A voicemail
+  releases its claim after a cooldown, but never repeats to the same caller.
+  Exclusivity and call history are checked by normalized phone, so a second
+  business row cannot hand the same number out again. Each serve call stamps
+  ``batch_at`` for diagnostics; the active sheet shows today's claims.
 * ``phone_user_leads`` — the calling workflow's SAVED output (P7.5): a
   ✓Lead (the person promised a project) or a 💾Store contact, each a
   full snapshot keyed by (user_id, phone, kind) so it SURVIVES the pool
@@ -295,6 +291,14 @@ class PhoneLeadsStore:
                 "ON phone_call_events (user_id, created_at)"
             )
             conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_phone_call_user_phone "
+                "ON phone_call_events (user_id, phone)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_phone_saved_user_phone "
+                "ON phone_user_leads (user_id, phone)"
+            )
+            conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_phone_claim_day "
                 "ON phone_claim_events (user_id, created_at)"
             )
@@ -402,7 +406,9 @@ class PhoneLeadsStore:
     @staticmethod
     def _qualified_frag() -> str:
         """Raw inventory is never a new phone claim or an availability count."""
-        return " AND TRIM(l.business_name) <> '' AND TRIM(l.trade) <> ''"
+        return (" AND TRIM(l.business_name) <> '' AND TRIM(l.trade) <> ''"
+                " AND NOT EXISTS (SELECT 1 FROM phone_suppressions x"
+                " WHERE x.phone = l.phone)")
 
     @staticmethod
     def _resting_frag() -> str:
@@ -412,11 +418,13 @@ class PhoneLeadsStore:
         rotation (P7.5 recycling). SQLite parses the ISO 'T' timestamps
         ``_now()`` writes."""
         conds = " OR ".join(
-            f"(l.voicemail_count = {n} "
-            f"AND l.voicemail_at > datetime('now', '-{days} days'))"
+            f"(parked.voicemail_count = {n} "
+            f"AND parked.voicemail_at > "
+            f"strftime('%Y-%m-%dT%H:%M:%S', 'now', '-{days} days'))"
             for n, days in VOICEMAIL_COOLDOWN_DAYS.items()
         )
-        return f" AND NOT ({conds})"
+        return (" AND NOT EXISTS (SELECT 1 FROM phone_leads parked "
+                f"WHERE parked.phone = l.phone AND ({conds}))")
 
     def daily_limit(self, user_id: str) -> int:
         conn = self._conn()
@@ -458,6 +466,46 @@ class PhoneLeadsStore:
     def daily_remaining(self, user_id: str) -> int:
         return max(0, self.daily_limit(user_id) - self.daily_usage(user_id))
 
+    def release_untouched_previous_days(self) -> int:
+        """Return old, never-touched claims to the shared pool.
+
+        A claim stays owned if the user copied/dialed the number, recorded
+        any call outcome, or saved a contact/note. The immutable claim event
+        remains for daily usage and history.
+        """
+        conn = self._conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            cur = conn.execute(
+                """DELETE FROM phone_lead_owners AS o
+                   WHERE substr(o.created_at, 1, 10) < ?
+                     AND EXISTS (SELECT 1 FROM phone_leads l
+                                 WHERE l.id = o.lead_id)
+                     AND NOT EXISTS (
+                         SELECT 1 FROM phone_call_events e
+                         JOIN phone_leads l ON l.id = o.lead_id
+                         WHERE e.user_id = o.user_id AND e.phone = l.phone
+                     )
+                     AND NOT EXISTS (
+                         SELECT 1 FROM phone_user_leads s
+                         JOIN phone_leads l ON l.id = o.lead_id
+                         WHERE s.user_id = o.user_id AND s.phone = l.phone
+                     )""",
+                (_now()[:10],),
+            )
+            conn.commit()
+            return cur.rowcount
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _unowned_phone_frag() -> str:
+        """A second business row for an owned phone is still the same call."""
+        return (" AND NOT EXISTS ("
+                "SELECT 1 FROM phone_leads sibling "
+                "JOIN phone_lead_owners owner ON owner.lead_id = sibling.id "
+                "WHERE sibling.phone = l.phone)")
+
     def serve(
         self, trade: str, state: str, city: str, limit: int, user_id: str,
         exclude_ids: list[int] | None = None,
@@ -476,19 +524,21 @@ class PhoneLeadsStore:
         are exactly what the user sees, and the previous batch leaves the
         screen (still owned, still exclusive — ``list_owned``).
 
-        Two paths put a number back into the shared rotation, and both are
-        explicit: a voicemail RELEASES the ownership row (then the row rests
-        out its tier cooldown), and a ✓Lead retires the number for good into
-        ``phone_suppressions``. Nothing else un-claims a lead.
+        Untouched claims from earlier UTC days return to the shared pool.
+        A voicemail also releases its claim after a cooldown; a ✓Lead
+        permanently retires its number. A user's called/saved phone never
+        serves to that user again, even via a duplicate business row.
 
         ``exclude_ids`` keeps one run's own earlier serves from re-serving
         the same row (the gap-fill re-serve after a pool serve).
         """
         if limit <= 0:
             return []
+        self.release_untouched_previous_days()
         frag, args = self._serve_clauses(trade, state, city)
         frag += self._qualified_frag()
         frag += self._resting_frag()
+        frag += self._unowned_phone_frag()
         if exclude_ids:
             placeholders = ",".join("?" for _ in exclude_ids)
             frag += f" AND l.id NOT IN ({placeholders})"
@@ -515,14 +565,27 @@ class PhoneLeadsStore:
                 return []
             cur = conn.execute(
                 f"""
-                SELECT l.* FROM phone_leads l
-                WHERE l.id NOT IN (
-                    SELECT lead_id FROM phone_lead_owners
-                ){frag}
+                WITH ranked AS (
+                    SELECT l.id,
+                           ROW_NUMBER() OVER (PARTITION BY l.phone
+                                              ORDER BY l.id) AS phone_rank
+                    FROM phone_leads l
+                    WHERE 1=1{frag}
+                      AND NOT EXISTS (
+                          SELECT 1 FROM phone_call_events e
+                          WHERE e.user_id = ? AND e.phone = l.phone
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM phone_user_leads s
+                          WHERE s.user_id = ? AND s.phone = l.phone
+                      )
+                )
+                SELECT l.* FROM ranked r JOIN phone_leads l ON l.id = r.id
+                WHERE r.phone_rank = 1
                 ORDER BY l.id ASC
                 LIMIT ?
                 """,
-                [*args, limit],
+                [*args, user_id, user_id, limit],
             )
             rows = cur.fetchall()
             cols = [d[0] for d in cur.description]
@@ -552,17 +615,17 @@ class PhoneLeadsStore:
     def unclaimed_count(self, trade: str, state: str = "", city: str = "") -> int:
         """How many servable (unowned) rows the pool holds for this filter —
         the number a gap-fill does NOT need to fetch live."""
+        self.release_untouched_previous_days()
         frag, args = self._serve_clauses(trade, state, city)
         frag += self._qualified_frag()
         frag += self._resting_frag()
+        frag += self._unowned_phone_frag()
         conn = self._conn()
         try:
             row = conn.execute(
                 f"""
-                SELECT COUNT(*) FROM phone_leads l
-                WHERE l.id NOT IN (
-                    SELECT lead_id FROM phone_lead_owners
-                ){frag}
+                SELECT COUNT(DISTINCT l.phone) FROM phone_leads l
+                WHERE 1=1{frag}
                 """,
                 args,
             ).fetchone()
@@ -602,16 +665,16 @@ class PhoneLeadsStore:
         (one-shot serve), because those rows belong to somebody's call sheet
         and serve to no one. States the pool has never stocked are absent from
         the map (the caller reads them as 0 — never as "unknown")."""
+        self.release_untouched_previous_days()
         conn = self._conn()
         try:
             rows = conn.execute(
                 f"""
-                SELECT l.state, COUNT(*) FROM phone_leads l
-                WHERE l.id NOT IN (
-                    SELECT lead_id FROM phone_lead_owners
-                ){self._qualified_frag()}{self._resting_frag()}
+                SELECT l.state, COUNT(DISTINCT l.phone) FROM phone_leads l
+                WHERE 1=1{self._qualified_frag()}{self._resting_frag()}
+                    {self._unowned_phone_frag()}
                 GROUP BY l.state
-                ORDER BY COUNT(*) DESC
+                ORDER BY COUNT(DISTINCT l.phone) DESC
                 """
             ).fetchall()
             return {(r[0] or "").upper(): int(r[1]) for r in rows}
@@ -781,8 +844,8 @@ class PhoneLeadsStore:
     ) -> list[dict[str, Any]]:
         """Today's still-owned claims across all searches and states (UTC).
 
-        A new UTC day starts a blank sheet; previous claims remain exclusive
-        and their immutable claim/call history stays queryable by date.
+        A new UTC day starts a blank sheet; untouched prior claims return to
+        the pool, while contacted/saved claims and dated history remain.
         """
         frag, args = self._serve_clauses(trade, state, city)
         conn = self._conn()
@@ -1010,6 +1073,7 @@ class PhoneLeadsStore:
 
     def wrong_archive_page(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
         """A bounded admin archive page with its full active-row count."""
+        self.release_untouched_previous_days()
         conn = self._conn()
         try:
             total = conn.execute(

@@ -179,15 +179,58 @@ def test_serve_is_exclusive_across_users(tmp_path):
     bob = store.serve("gc", "", "", 10, "bob")
     assert [l["id"] for l in bob] != [alice[0]["id"]]
     assert len(bob) == 1
-    # The user's OWN re-search is empty too — the pool has nothing FRESH for
-    # her, and her earlier lead is not served back (one-shot serve, the
-    # user's policy: purana data kisi ko bhi na mile).
+    # Alice's own repeat search does not repeat either number.
     assert store.serve("gc", "", "", 10, "alice") == []
-    # Her claim is untouched by that: the lead is still hers to dial.
     assert [l["id"] for l in store.list_owned("alice")] == [alice[0]["id"]]
-    # Nobody left after both are claimed.
     assert store.serve("gc", "", "", 10, "carol") == []
     assert store.unclaimed_count("gc") == 0
+
+
+def test_old_untouched_claims_return_but_called_and_saved_stay_owned(tmp_path):
+    store = PhoneLeadsStore(db_path=str(tmp_path / "phones.db"))
+    store.add([
+        _rec("5031110001", "Called"),
+        _rec("5031110002", "Saved note"),
+        _rec("5031110003", "Untouched"),
+    ])
+    claims = {r["business_name"]: r for r in store.serve("", "WA", "", 3, "alice")}
+    store.record_call_event(claims["Called"]["id"], "alice", "copied")
+    store.note_lead(claims["Saved note"]["id"], "alice", "Call tomorrow")
+    conn = store._conn()
+    conn.execute("UPDATE phone_lead_owners SET created_at='2020-01-01T00:00:00'")
+    conn.commit()
+    conn.close()
+
+    assert store.unclaimed_count("", "WA") == 1
+    assert store.release_untouched_previous_days() == 0  # already released
+    assert [r["business_name"] for r in store.serve("", "WA", "", 3, "bob")] == ["Untouched"]
+    assert store.serve("", "WA", "", 3, "alice") == []
+    assert store.daily_usage("alice") == 3  # immutable claim history
+
+
+def test_duplicate_business_rows_cannot_repeat_a_phone(tmp_path):
+    store = PhoneLeadsStore(db_path=str(tmp_path / "phones.db"))
+    store.add([
+        _rec("5031110001", "First business"),
+        _rec("5031110001", "Second business"),
+        _rec("5031110002", "Unique business"),
+    ])
+    assert store.unclaimed_count("", "WA") == 2
+    first = store.serve("", "WA", "", 10, "alice")
+    assert len(first) == 2
+    assert len({r["phone"] for r in first}) == 2
+    assert store.serve("", "WA", "", 10, "bob") == []
+
+    store.mark_voicemail(first[0]["id"], "alice")
+    assert store.unclaimed_count("", "WA") == 0  # sibling obeys cooldown
+    conn = store._conn()
+    conn.execute("UPDATE phone_leads SET voicemail_at='2020-01-01T00:00:00' "
+                 "WHERE phone=?", (first[0]["phone"],))
+    conn.commit()
+    conn.close()
+    assert store.serve("", "WA", "", 1, "alice") == []  # already called
+    bob = store.serve("", "WA", "", 1, "bob")
+    assert len(bob) == 1 and bob[0]["phone"] == first[0]["phone"]
 
 
 def test_serve_exclude_ids_prevents_run_duplicates(tmp_path):

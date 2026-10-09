@@ -29,6 +29,25 @@ import type {
  *  threshold below. The backend default is the same number: the sheet is the
  *  user's own inventory and must never be silently cut short. */
 const SHEET_LIMIT = 1000;
+const ZOOM_WEB_APP = "https://app.zoom.us/wc";
+
+/** ChromeOS's tel: handler offers to send the number to an Android phone.
+ * Copy synchronously before the browser opens the installed Android Zoom app; older Chrome
+ * versions may lack navigator.clipboard or drop user activation after await. */
+function copyPhoneForZoom(phone: string): boolean {
+  const input = document.createElement("textarea");
+  input.value = phone;
+  input.style.position = "fixed";
+  input.style.opacity = "0";
+  document.body.appendChild(input);
+  input.focus();
+  input.select();
+  try {
+    return document.execCommand("copy");
+  } finally {
+    document.body.removeChild(input);
+  }
+}
 
 /** +15039573452 -> (503) 957-3452 for display; raw E.164 for copy/tel links. */
 function prettyPhone(e164: string): string {
@@ -110,8 +129,8 @@ export default function Phones() {
   const { user } = useAuth();
   const isAdmin = Boolean(user?.is_admin);
   const isChromeOS = /\bCrOS\b/i.test(navigator.userAgent);
-  const [showChromeOSDialHelp, setShowChromeOSDialHelp] = useState(false);
-  const dialHref = (phone: string) => isChromeOS ? `tel:${phone}` : `zoomphonecall://${phone}`;
+  const [chromeOSDial, setChromeOSDial] = useState<{ phone: string; copied: boolean } | null>(null);
+  const dialHref = (phone: string) => isChromeOS ? "zoomus://" : `zoomphonecall://${phone}`;
 
   const [stateName, setStateName] = useState(""); // full name; "" = any state
   const [target, setTarget] = useState(25);
@@ -328,6 +347,14 @@ export default function Phones() {
     }
   };
 
+  const openChromebookZoom = (phone: string, record: (action: "dialed" | "copied") => void) => {
+    if (!isChromeOS) { record("dialed"); return; }
+    let copied = false;
+    try { copied = copyPhoneForZoom(phone); } catch { /* The visible copy button remains available. */ }
+    setChromeOSDial({ phone, copied });
+    record(copied ? "copied" : "dialed");
+  };
+
   // Live email state by lead id: a search result is a snapshot, but the
   // enrichment outcome arrives later — the polled my-leads rows are the
   // truth for any lead shown.
@@ -385,9 +412,9 @@ export default function Phones() {
         title="Call Sheet"
         subtitle="Call contractors across your state — every number on your sheet is exclusively yours. Mark what happens on each call."
       />
-      {isChromeOS && showChromeOSDialHelp && <div role="status" className="rounded-lg border border-indigo-400/20 bg-indigo-500/10 px-4 py-3 text-xs text-slate-200">
-        When Chrome asks which app to use, choose Zoom. If no dialer opens, copy the number beside the link and dial it in <a href="https://app.zoom.us/wc" target="_blank" rel="noopener noreferrer" className="font-semibold text-indigo-200 underline">Zoom Web App</a>.
-        <button type="button" onClick={() => setShowChromeOSDialHelp(false)} className="ml-3 text-slate-300 underline">Dismiss</button>
+      {isChromeOS && chromeOSDial && <div role="status" className="rounded-lg border border-indigo-400/20 bg-indigo-500/10 px-4 py-3 text-xs text-slate-200">
+        {chromeOSDial.copied ? "Number copied: " : "Copy this number: "}<strong className="select-all text-white">{chromeOSDial.phone}</strong>. Open the Phone tab in Zoom and paste it into the dial pad. If the app did not open, use <a href={ZOOM_WEB_APP} target="_blank" rel="noopener noreferrer" className="font-semibold text-indigo-200 underline">Zoom Web App</a>.
+        <button type="button" onClick={() => setChromeOSDial(null)} className="ml-3 text-slate-300 underline">Dismiss</button>
       </div>}
       {!isAdmin && <p className="text-sm text-slate-300" role="status">
         Today (UTC): <span className="font-semibold text-white">{remaining ?? "…"}</span> of {stats?.daily_limit ?? 600} phone numbers remaining.
@@ -597,8 +624,8 @@ export default function Phones() {
                         <span className="inline-flex items-center gap-1.5">
                           <a
                             href={dialHref(l.phone)}
-                            title={isChromeOS ? "Choose Zoom to call this number" : "Call in Zoom Phone (requires Zoom Phone on this device)"}
-                            onClick={() => { if (isChromeOS) setShowChromeOSDialHelp(true); void recordEvent(l.id, "dialed"); }}
+                            title={isChromeOS ? "Copy number and open Zoom app" : "Call in Zoom Phone (requires Zoom Phone on this device)"}
+                            onClick={() => openChromebookZoom(l.phone, (action) => { void recordEvent(l.id, action); })}
                             className="inline-flex items-center gap-1 text-indigo-300 hover:text-indigo-200"
                           >
                             {prettyPhone(l.phone)} <PhoneCall className="h-3.5 w-3.5" aria-hidden="true" /><span className="sr-only">Call in Zoom Phone</span>
@@ -763,8 +790,8 @@ export default function Phones() {
                           <span className="inline-flex items-center gap-1.5">
                             <a
                               href={dialHref(s.phone)}
-                              title={isChromeOS ? "Choose Zoom to call this number" : "Call in Zoom Phone (requires the Zoom app and Zoom Phone sign-in)"}
-                              onClick={() => { if (isChromeOS) setShowChromeOSDialHelp(true); void recordSavedEvent(s.id, "dialed"); }}
+                              title={isChromeOS ? "Copy number and open Zoom app" : "Call in Zoom Phone (requires the Zoom app and Zoom Phone sign-in)"}
+                              onClick={() => openChromebookZoom(s.phone, (action) => { void recordSavedEvent(s.id, action); })}
                               className="text-indigo-300 hover:text-indigo-200"
                             >
                               {prettyPhone(s.phone)}

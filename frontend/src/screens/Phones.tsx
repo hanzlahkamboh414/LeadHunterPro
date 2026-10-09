@@ -109,6 +109,9 @@ function NoteEditor({
 export default function Phones() {
   const { user } = useAuth();
   const isAdmin = Boolean(user?.is_admin);
+  const isChromeOS = /\bCrOS\b/i.test(navigator.userAgent);
+  const [showChromeOSDialHelp, setShowChromeOSDialHelp] = useState(false);
+  const dialHref = (phone: string) => isChromeOS ? `tel:${phone}` : `zoomphonecall://${phone}`;
 
   const [stateName, setStateName] = useState(""); // full name; "" = any state
   const [target, setTarget] = useState(25);
@@ -382,6 +385,10 @@ export default function Phones() {
         title="Call Sheet"
         subtitle="Call contractors across your state — every number on your sheet is exclusively yours. Mark what happens on each call."
       />
+      {isChromeOS && showChromeOSDialHelp && <div role="status" className="rounded-lg border border-indigo-400/20 bg-indigo-500/10 px-4 py-3 text-xs text-slate-200">
+        When Chrome asks which app to use, choose Zoom. If no dialer opens, copy the number beside the link and dial it in <a href="https://app.zoom.us/wc" target="_blank" rel="noopener noreferrer" className="font-semibold text-indigo-200 underline">Zoom Web App</a>.
+        <button type="button" onClick={() => setShowChromeOSDialHelp(false)} className="ml-3 text-slate-300 underline">Dismiss</button>
+      </div>}
       {!isAdmin && <p className="text-sm text-slate-300" role="status">
         Today (UTC): <span className="font-semibold text-white">{remaining ?? "…"}</span> of {stats?.daily_limit ?? 600} phone numbers remaining.
         {remaining !== null && remaining !== undefined && target > remaining &&
@@ -390,7 +397,7 @@ export default function Phones() {
       <section className="ui-panel rounded-xl border border-white/5 bg-[#0D1017] p-5" aria-label="Daily calling progress">
         <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
           <div><h2 className="text-base font-semibold text-white">Daily calling progress</h2>
-            <p className="text-xs text-slate-500">A number counts once per user each UTC day, whether copied or opened in Zoom. Repeat actions stay in call history.</p></div>
+            <p className="text-xs text-slate-500">A number counts once per user each UTC day, whether copied or tapped to call. Repeat actions stay in call history.</p></div>
           <select aria-label="Progress date" value={selectedDay} onChange={(e) => setSelectedDay(e.target.value)}
             className="rounded-lg border border-white/10 bg-[#151923] px-3 py-2 text-sm text-white">
             {[...new Set([selectedDay, new Date().toISOString().slice(0, 10), ...activityDays])].sort().reverse().map((day) =>
@@ -398,7 +405,7 @@ export default function Phones() {
           </select>
         </div>
         <p className="mb-3 text-[12px] text-slate-400" role="status">
-          {activity?.unique_attempted ?? 0} unique numbers · {activity?.copied ?? 0} copies · {activity?.zoom_clicks ?? 0} Zoom clicks
+          {activity?.unique_attempted ?? 0} unique numbers · {activity?.copied ?? 0} copies · {activity?.zoom_clicks ?? 0} call clicks
         </p>
         <div className="grid gap-2">
           {callMetrics.map(([label, count, color]) => <div key={label} className="grid grid-cols-[110px_1fr_50px] items-center gap-3 text-xs">
@@ -589,9 +596,9 @@ export default function Phones() {
                       <td className="px-4 py-2.5">
                         <span className="inline-flex items-center gap-1.5">
                           <a
-                            href={`zoomphonecall://${l.phone}`}
-                            title="Call in Zoom Phone (requires Zoom Phone on this device)"
-                            onClick={() => { void recordEvent(l.id, "dialed"); }}
+                            href={dialHref(l.phone)}
+                            title={isChromeOS ? "Choose Zoom to call this number" : "Call in Zoom Phone (requires Zoom Phone on this device)"}
+                            onClick={() => { if (isChromeOS) setShowChromeOSDialHelp(true); void recordEvent(l.id, "dialed"); }}
                             className="inline-flex items-center gap-1 text-indigo-300 hover:text-indigo-200"
                           >
                             {prettyPhone(l.phone)} <PhoneCall className="h-3.5 w-3.5" aria-hidden="true" /><span className="sr-only">Call in Zoom Phone</span>
@@ -755,9 +762,9 @@ export default function Phones() {
                         <td className="px-4 py-2.5">
                           <span className="inline-flex items-center gap-1.5">
                             <a
-                              href={`zoomphonecall://${s.phone}`}
-                              title="Call in Zoom Phone (requires the Zoom app and Zoom Phone sign-in)"
-                              onClick={() => { void recordSavedEvent(s.id, "dialed"); }}
+                              href={dialHref(s.phone)}
+                              title={isChromeOS ? "Choose Zoom to call this number" : "Call in Zoom Phone (requires the Zoom app and Zoom Phone sign-in)"}
+                              onClick={() => { if (isChromeOS) setShowChromeOSDialHelp(true); void recordSavedEvent(s.id, "dialed"); }}
                               className="text-indigo-300 hover:text-indigo-200"
                             >
                               {prettyPhone(s.phone)}

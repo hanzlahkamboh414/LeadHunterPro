@@ -32,7 +32,8 @@ const SHEET_LIMIT = 1000;
 const ZOOM_WEB_APP = "https://app.zoom.us/wc";
 
 /** ChromeOS's tel: handler offers to send the number to an Android phone.
- * Copy synchronously before the browser opens the installed Android Zoom app; older Chrome
+ * Zoom's Android app does not expose a supported Zoom Phone dial link. Copy
+ * synchronously before opening the HTTPS Zoom Web App; older Chrome
  * versions may lack navigator.clipboard or drop user activation after await. */
 function copyPhoneForZoom(phone: string): boolean {
   const input = document.createElement("textarea");
@@ -130,7 +131,7 @@ export default function Phones() {
   const isAdmin = Boolean(user?.is_admin);
   const isChromeOS = /\bCrOS\b/i.test(navigator.userAgent);
   const [chromeOSDial, setChromeOSDial] = useState<{ phone: string; copied: boolean } | null>(null);
-  const dialHref = (phone: string) => isChromeOS ? "zoomus://" : `zoomphonecall://${phone}`;
+  const dialHref = (phone: string) => isChromeOS ? ZOOM_WEB_APP : `zoomphonecall://${phone}`;
 
   const [stateName, setStateName] = useState(""); // full name; "" = any state
   const [target, setTarget] = useState(25);
@@ -413,7 +414,7 @@ export default function Phones() {
         subtitle="Call contractors across your state — every number on your sheet is exclusively yours. Mark what happens on each call."
       />
       {isChromeOS && chromeOSDial && <div role="status" className="rounded-lg border border-indigo-400/20 bg-indigo-500/10 px-4 py-3 text-xs text-slate-200">
-        {chromeOSDial.copied ? "Number copied: " : "Copy this number: "}<strong className="select-all text-white">{chromeOSDial.phone}</strong>. Open the Phone tab in Zoom and paste it into the dial pad. If the app did not open, use <a href={ZOOM_WEB_APP} target="_blank" rel="noopener noreferrer" className="font-semibold text-indigo-200 underline">Zoom Web App</a>.
+        {chromeOSDial.copied ? "Number copied: " : "Copy this number: "}<strong className="select-all text-white">{chromeOSDial.phone}</strong>. Zoom Web App opens in a new tab. Select Phone and paste the number into its dial pad; you can also open your installed Zoom app and paste there.
         <button type="button" onClick={() => setChromeOSDial(null)} className="ml-3 text-slate-300 underline">Dismiss</button>
       </div>}
       {!isAdmin && <p className="text-sm text-slate-300" role="status">
@@ -624,7 +625,9 @@ export default function Phones() {
                         <span className="inline-flex items-center gap-1.5">
                           <a
                             href={dialHref(l.phone)}
-                            title={isChromeOS ? "Copy number and open Zoom app" : "Call in Zoom Phone (requires Zoom Phone on this device)"}
+                            title={isChromeOS ? "Copy number and open Zoom Phone in browser" : "Call in Zoom Phone (requires Zoom Phone on this device)"}
+                            target={isChromeOS ? "_blank" : undefined}
+                            rel={isChromeOS ? "noopener noreferrer" : undefined}
                             onClick={() => openChromebookZoom(l.phone, (action) => { void recordEvent(l.id, action); })}
                             className="inline-flex items-center gap-1 text-indigo-300 hover:text-indigo-200"
                           >
@@ -790,7 +793,9 @@ export default function Phones() {
                           <span className="inline-flex items-center gap-1.5">
                             <a
                               href={dialHref(s.phone)}
-                              title={isChromeOS ? "Copy number and open Zoom app" : "Call in Zoom Phone (requires the Zoom app and Zoom Phone sign-in)"}
+                              title={isChromeOS ? "Copy number and open Zoom Phone in browser" : "Call in Zoom Phone (requires the Zoom app and Zoom Phone sign-in)"}
+                              target={isChromeOS ? "_blank" : undefined}
+                              rel={isChromeOS ? "noopener noreferrer" : undefined}
                               onClick={() => openChromebookZoom(s.phone, (action) => { void recordSavedEvent(s.id, action); })}
                               className="text-indigo-300 hover:text-indigo-200"
                             >
